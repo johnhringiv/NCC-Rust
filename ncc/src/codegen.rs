@@ -1,4 +1,4 @@
-use crate::parser::AST;
+use crate::parser::{Expr, Stmt, Function, Identifier, Program};
 
 #[derive(Debug, PartialEq)]
 pub enum CodeGenAST {
@@ -16,29 +16,26 @@ pub enum CodeGenAST {
     Program(Box<CodeGenAST>),
 }
 
-fn convert_exp(ast: &AST) -> CodeGenAST {
+fn convert_exp(ast: &Expr) -> CodeGenAST {
     match ast {
-        AST::Int(value) => CodeGenAST::Imm(*value),
-        _ => unreachable!("Convert Expression: expected Int, found {:?}", ast),
+        Expr::Int(value) => CodeGenAST::Imm(*value),
     }
 }
 
-fn convert_statement(ast: &AST) -> Vec<CodeGenAST> {
+fn convert_statement(ast: &Stmt) -> Vec<CodeGenAST> {
     match ast {
-        AST::Return(exp) => {
+        Stmt::Return(exp) => {
             let converted_exp = convert_exp(exp);
             vec![CodeGenAST::Mov {dst: Box::new(CodeGenAST::Reg("eax".to_string())), src: Box::new(converted_exp)}, CodeGenAST::Ret]
         }
-        _ => unreachable!("Convert Statement: expected Return, found {:?}", ast),
     }
 }
 
-fn convert_function(ast: &AST) -> CodeGenAST {
+fn convert_function(ast: &Function) -> CodeGenAST {
     match ast { 
-        AST::Function { name, body } => {
-            let fname = match &**name{
-                AST::Identifier(name) => {name.to_string()}
-                _ => unreachable!("Convert Function: expected Identifier, found {:?}", name),
+        Function { name, body } => {
+            let fname = match name{
+                Identifier(name) => {name.to_string()}
             };
             let body_instructions = convert_statement(body);
             CodeGenAST::Function {
@@ -47,16 +44,14 @@ fn convert_function(ast: &AST) -> CodeGenAST {
             }
             
         },
-        _ => unreachable!("Convert Function: expected Function, found {:?}", ast),
     }
 }
 
-pub fn generate(ast: AST) -> CodeGenAST {
+pub fn generate(ast: Program) -> CodeGenAST {
     match ast {
-        AST::Program(fun_def) => {
-            CodeGenAST::Program(Box::new(convert_function(&fun_def)))
+        Program{function} => {
+            CodeGenAST::Program(Box::new(convert_function(&function)))
         }
-        _ => unreachable!("Gen: expected Program, found {:?}", ast)
     }
 }
 

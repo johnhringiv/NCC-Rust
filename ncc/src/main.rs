@@ -74,7 +74,7 @@ fn main() {
     
     let asm = emit::emit_asm(&code_ast);
     if args.s {
-        print!("Generated asm:\n{}", asm);
+        print!("Generated asm:\n\n{}", asm);
     }
     let path = Path::new(&args.filename);
     let out_file = args.output.unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());

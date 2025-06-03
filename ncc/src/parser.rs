@@ -3,15 +3,27 @@ use std::fmt;
 use crate::lexer::Token;
 
 #[derive(Debug, PartialEq)]
-pub enum AST {
+pub struct Identifier(pub String);
+
+#[derive(Debug, PartialEq)]
+pub enum Expr {
     Int(i64),
-    Identifier(String),
-    Return(Box<AST>),
-    Function {
-        name: Box<AST>,
-        body: Box<AST>,
-    },
-    Program(Box<AST>),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Stmt {
+    Return(Expr),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Function {
+    pub name: Identifier,
+    pub body: Stmt,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Program {
+    pub function: Function,
 }
 
 pub struct SyntaxError {
@@ -52,53 +64,45 @@ fn expect(expected: &Token, tokens: &mut VecDeque<Token>) -> Result<(), SyntaxEr
     }
 }
 
-//todo error message should ignore garbage value
-fn parse_int(tokens: &mut VecDeque<Token>) -> Result<AST, SyntaxError> {
+fn parse_expr(tokens: &mut VecDeque<Token>) -> Result<Expr, SyntaxError> {
     match tokens.pop_front() {
-        Some(Token::ConstantInt(value)) => Ok(AST::Int(value)),
-        x => Err(SyntaxError::new(Option::from(Token::ConstantInt(0)), x))
+        Some(Token::ConstantInt(value)) => Ok(Expr::Int(value)),
+        x => Err(SyntaxError::new(Some(Token::ConstantInt(0)), x))
     }
 }
 
-fn parse_id(tokens: &mut VecDeque<Token>) -> Result<AST, SyntaxError> {
+fn parse_identifier(tokens: &mut VecDeque<Token>) -> Result<Identifier, SyntaxError> {
     match tokens.pop_front() {
-        Some(Token::Identifier(value)) => Ok(AST::Identifier(value)),
+        Some(Token::Identifier(value)) => Ok(Identifier(value)),
         x => Err(SyntaxError::new(Option::from(Token::Identifier("whatever".to_string())), x))
     }
 }
 
-fn parse_exp(tokens: &mut VecDeque<Token>) -> Result<AST, SyntaxError> {
-    parse_int(tokens)
-}
-
-fn parse_statement(tokens: &mut VecDeque<Token>) -> Result<AST, SyntaxError> {
+fn parse_statement(tokens: &mut VecDeque<Token>) -> Result<Stmt, SyntaxError> {
     expect(&Token::ReturnKeyword, tokens)?;
-    let exp = parse_exp(tokens)?;
+    let exp = parse_expr(tokens)?;
     expect(&Token::Semicolon, tokens)?;
-    Ok(AST::Return(Box::new(exp)))
+    Ok(Stmt::Return(exp))
 }
 
-fn parse_function_definition(tokens: &mut VecDeque<Token>) -> Result<AST, SyntaxError> {
+fn parse_function_definition(tokens: &mut VecDeque<Token>) -> Result<Function, SyntaxError> {
     expect(&Token::IntKeyword, tokens)?;
-    let id = parse_id(tokens)?;
+    let name = parse_identifier(tokens)?;
     expect(&Token::OpenParen, tokens)?;
     expect(&Token::VoidKeyword, tokens)?;
     expect(&Token::CloseParen, tokens)?;
     expect(&Token::OpenBrace, tokens)?;
     
-    let stmt = parse_statement(tokens)?;
+    let body = parse_statement(tokens)?;
     expect(&Token::CloseBrace, tokens)?;
     
-    Ok(AST::Function {
-        name: Box::new(id),
-        body: Box::new(stmt),
-    })
+    Ok(Function{name, body})
 }
 
-pub fn parse_program(tokens: &mut VecDeque<Token>) -> Result<AST, SyntaxError> {
+pub fn parse_program(tokens: &mut VecDeque<Token>) -> Result<Program, SyntaxError> {
     let fun_def = parse_function_definition(tokens)?;
     if tokens.is_empty() {
-        Ok(AST::Program(Box::new(fun_def)))
+        Ok(Program { function: fun_def })
     } else { 
         Err(SyntaxError::new(None, tokens.front().cloned()))
     }
@@ -113,10 +117,13 @@ mod tests {
     fn basic_return() {
         let mut tokens: VecDeque<Token> = crate::lexer::tests::basic_return(100).into_iter().collect();
         let ast = parse_program(&mut tokens).unwrap();
-        assert_eq!(ast, AST::Program(Box::new(AST::Function {
-            name: Box::new(AST::Identifier("main".to_string())),
-            body: Box::new(AST::Return(Box::new(AST::Int(100)))),
-        })));
+        let expected = Program {
+            function: Function {
+                name: Identifier("main".to_string()),
+                body: Stmt::Return(Expr::Int(100)),
+            },
+        };
+        assert_eq!(ast, expected);
     }
 
     fn run_parser_test_invalid(file: &str) {
