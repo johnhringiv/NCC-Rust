@@ -2,8 +2,8 @@ mod lexer;
 mod parser;
 mod codegen;
 mod emit;
+mod tacky;
 
-use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use clap::{ArgGroup, Parser};
@@ -13,7 +13,7 @@ use clap::{ArgGroup, Parser};
 #[command(group(
     ArgGroup::new("mode")
         .required(false)
-        .args(&["lex", "parse", "code-gen", "s"])
+        .args(&["lex", "parse", "codegen", "s", "tacky"])
 ))]
 struct Args {
     /// Run lexer
@@ -24,9 +24,13 @@ struct Args {
     #[arg(long)]
     parse: bool,
 
-    /// Run lexer, parser, and code generator
-    #[arg(long, name = "code-gen")]
-    code_gen: bool,
+    /// Run lexer, parser, tacky, and code generator
+    #[arg(long, name = "codegen")]
+    codegen: bool,
+
+    /// Emit Tacky IR
+    #[arg(long, name = "tacky")]
+    tacky: bool,
 
     /// emits assembly
     #[arg(short = 'S')]
@@ -54,7 +58,7 @@ fn main() {
         std::process::exit(0);
     }
 
-    let mut tokens: VecDeque<lexer::Token> = tokens.unwrap().into_iter().collect();
+    let mut tokens = tokens.unwrap();
     let ast = parser::parse_program(&mut tokens);
     if ast.is_err() {
         println!("Failed to parse: {:?}", ast.err().unwrap());
@@ -65,14 +69,21 @@ fn main() {
         println!("Processed ast: {:?}", ast.unwrap());
         std::process::exit(0);
     }
+    
+    let tacky_ast = tacky::tackify_program(&ast.unwrap());
+    
+    if args.tacky {
+        println!("Tacky IR: {:?}", tacky_ast);
+        std::process::exit(0);
+    }
 
-    let code_ast = codegen::generate(ast.unwrap());
-    if args.code_gen {
+    let code_ast = codegen::generate(&tacky_ast);
+    if args.codegen {
         println!("Generated code as: {:?}", code_ast);
         std::process::exit(0);
     }
     
-    let asm = emit::emit_asm(&code_ast);
+    let asm = emit::emit_program(&code_ast);
     if args.s {
         print!("Generated asm:\n\n{}", asm);
     }

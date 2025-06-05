@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 use regex::Regex;
 
@@ -13,6 +14,9 @@ pub enum Token {
     OpenBrace,
     CloseBrace,
     Semicolon,
+    BitwiseComplement, // ~
+    Negation, // -
+    Decrement, // --
 }
 
 impl Token {
@@ -28,10 +32,11 @@ impl Token {
         match self {
             Token::Identifier(s) => s.len(),
             Token::ConstantInt(i) => i.to_string().len(),
+            Token::Decrement => 2,
             Token::IntKeyword => 3,
             Token::VoidKeyword => 4,
             Token::ReturnKeyword => 6,
-            Token::OpenParen | Token::CloseParen | Token::OpenBrace | Token::CloseBrace | Token::Semicolon => 1,
+            Token::OpenParen | Token::CloseParen | Token::OpenBrace | Token::CloseBrace | Token::Semicolon | Token::BitwiseComplement | Token::Negation => 1,
         }
     }
 }
@@ -43,6 +48,13 @@ struct TokenMatch {
 struct TokenDef {
     regex: Regex,
     variant: Token,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub line: usize,
+    pub column: usize,
 }
 
 fn next_token(input: &str) -> Result<Token, LexerError> {
@@ -58,6 +70,9 @@ fn next_token(input: &str) -> Result<Token, LexerError> {
         TokenDef { regex: Regex::new(r"^\{").unwrap(), variant: Token::OpenBrace },
         TokenDef { regex: Regex::new(r"^}").unwrap(), variant: Token::CloseBrace },
         TokenDef { regex: Regex::new(r"^;").unwrap(), variant: Token::Semicolon },
+        TokenDef { regex: Regex::new(r"^~").unwrap(), variant: Token::BitwiseComplement },
+        TokenDef { regex: Regex::new(r"^-").unwrap(), variant: Token::Negation },
+        TokenDef { regex: Regex::new(r"^--").unwrap(), variant: Token::Decrement },
     ] {
         if let Some(mat) = token_def.regex.find(input) {
             let token = match &token_def.variant {
@@ -98,19 +113,38 @@ impl fmt::Debug for LexerError {
 }
 
 //todo report line number of the error
-pub(crate) fn tokenizer(mut input: &str) -> Result<Vec<Token>, LexerError> {
-    let mut tokens = Vec::new();
-    // let total_lines = input.matches('\n').count();
+pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, LexerError> {
+    let mut tokens = VecDeque::new();
+    let mut line = 1;
+    let mut col = 1;
     while !input.is_empty() {
-        input = input.trim_start();
+        let trimmed = input.trim_start_matches([' ', '\t']);
+        col += input.len() - trimmed.len();
+        input = trimmed;
+        
         // check for comments and skip them need to support both // and /* */
-        if input.starts_with("//") {
+        if input.starts_with("//") | input.starts_with("\n") { // same line, col logic
             if let Some(newline_index) = input.find('\n') {
+                line += 1;
+                col = 1;
                 input = &input[newline_index + 1..];
             }
             continue;
         } else if input.starts_with("/*") {
             if let Some(end_comment_index) = input.find("*/") {
+                let comment = &input[..end_comment_index + 2];
+                let newline_count = comment.matches('\n').count();
+                if newline_count > 0 {
+                    line += newline_count;
+                    // Set col to the position after the last newline in the comment
+                    if let Some(last_newline) = comment.rfind('\n') {
+                        col = comment.len() - last_newline;
+                    } else {
+                        col += comment.len();
+                    }
+                } else {
+                    col += comment.len();
+                }
                 input = &input[end_comment_index + 2..];
             } else {
                 return Err(LexerError::new("Unterminated comment".to_string()));
@@ -121,13 +155,20 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<Vec<Token>, LexerError> {
         if input.is_empty() {
             break;
         }
-        
-        // let cur_line = total_lines - input.matches('\n').count();
 
         match next_token(&input) {
             Ok(token) => {
-                input = &input[token.len()..];
-                tokens.push(token);
+                let len = token.len();
+                tokens.push_back(SpannedToken { token, line, column: col });
+                for c in input[..len].chars() {
+                    if c == '\n' {
+                        line += 1;
+                        col = 1;
+                    } else {
+                        col += 1;
+                    }
+                }
+                input = &input[len..];
             }
             Err(e) => return Err(e),
         }
@@ -156,7 +197,7 @@ pub(crate) mod tests {
 
     fn run_lexer_test_valid(file: &str, expected: Vec<Token>) {
         let input = std::fs::read_to_string(file).expect("Failed to read input file");
-        let tokens = tokenizer(&input).expect("Lexer failed");
+        let tokens = tokenizer(&input).expect("Lexer failed").iter().map(|t| t.token.clone()).collect::<Vec<_>>();
         assert_eq!(tokens, expected);
     }
 
