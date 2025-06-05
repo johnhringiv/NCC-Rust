@@ -1,13 +1,20 @@
 use std::collections::VecDeque;
 use std::fmt;
-use crate::lexer::Token;
+use crate::lexer::{SpannedToken, Token};
 
 #[derive(Debug, PartialEq)]
 pub struct Identifier(pub String);
 
 #[derive(Debug, PartialEq)]
 pub enum Expr {
-    Int(i64),
+    Constant(i64),
+    Unary(UnaryOp, Box<Expr>),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum UnaryOp {
+    BitwiseComplement,
+    Negate,
 }
 
 #[derive(Debug, PartialEq)]
@@ -27,22 +34,38 @@ pub struct Program {
 }
 
 pub struct SyntaxError {
-    expected: Option<Token>,
-    found: Option<Token>,
+    message: String,
 }
 
 impl SyntaxError {
-    pub fn new(expected: Option<Token>, found: Option<Token>) -> Self {
-        SyntaxError { expected, found}
+    
+    fn get_found_strs(found: Option<SpannedToken>) -> (String, String) {
+        let loc_str: String = found.as_ref().map(|t| format!(", at {}:{}", t.line, t.column)).unwrap_or("".to_string());
+        let found_str = found.as_ref().map(|t| t.token.variant_str()).unwrap_or("None".to_string());
+        (found_str, loc_str)
+    }
+    pub fn new(expected: Option<Token>, found: Option<SpannedToken>) -> Self {
+        let expected = expected.as_ref().map(|t| t.variant_str()).unwrap_or("None".to_string());
+        let (found_str, loc_str) = Self::get_found_strs(found);
+        SyntaxError { message: format!(r#"expected: {:?}, found: {:?}{}"#, expected, found_str, loc_str) }
+    }
+    
+    pub fn expression(found: Option<SpannedToken>) -> Self {
+        let (found_str, loc_str) = Self::get_found_strs(found);
+        SyntaxError { message: format!(r#"expected an expression <int> | <unop> <exp> | (<exp>), found: {:?}{}"#, found_str, loc_str) }
+    }
+    
+    pub fn new_multiple(expected: Vec<Token>, found: Option<SpannedToken>) -> Self {
+        let expected_str = expected.iter().map(|t| t.variant_str()).collect::<Vec<_>>().join(", ");
+        let (found_str, loc_str) = Self::get_found_strs(found);
+        SyntaxError { message: format!(r#"expected: [{}], found: {:?}{}"#, expected_str, found_str, loc_str) }
     }
 }
 
 
 impl fmt::Debug for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let expected = self.expected.as_ref().map(|t| t.variant_str()).unwrap_or("None".to_string());
-        let found = self.found.as_ref().map(|t| t.variant_str()).unwrap_or("None".to_string());
-        write!(f, "SyntaxError: expected {}, found {}", expected, found)
+        write!(f, "SyntaxError: {}", self.message)
     }
 }
 
@@ -50,60 +73,91 @@ fn variant_eq<T>(a: &T, b: &T) -> bool {
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
-fn expect(expected: &Token, tokens: &mut VecDeque<Token>) -> Result<(), SyntaxError> {
+fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
     let next = tokens.pop_front();
     match next {
         Some(token) => {
-            if !variant_eq(expected, &token) {
-                Err(SyntaxError::new(Option::from(expected.clone()), Some(token.clone())))
+            if !variant_eq(expected, &token.token) {
+                Err(SyntaxError::new(Some(expected.clone()), Some(token.clone())))
             } else {
                 Ok(())
             }
         },
-        None => Err(SyntaxError::new(Option::from(expected.clone()), None)),
+        None => Err(SyntaxError::new(Some(expected.clone()), None)),
     }
 }
 
-fn parse_expr(tokens: &mut VecDeque<Token>) -> Result<Expr, SyntaxError> {
-    match tokens.pop_front() {
-        Some(Token::ConstantInt(value)) => Ok(Expr::Int(value)),
-        x => Err(SyntaxError::new(Some(Token::ConstantInt(0)), x))
+fn parse_expr(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
+    let next_token = tokens.front().cloned();
+    match next_token {
+        Some(ref spanned) => {
+            match &spanned.token {
+                Token::ConstantInt(value) => {
+                    tokens.pop_front();
+                    Ok(Expr::Constant(*value))
+                },
+                Token::BitwiseComplement | Token::Negation => {
+                    let operator = parse_unop(tokens)?;
+                    let inner_exp = parse_expr(tokens)?;
+                    Ok(Expr::Unary(operator, Box::from(inner_exp)))
+                },
+                Token::OpenParen => {
+                    tokens.pop_front();
+                    let inner_exp = parse_expr(tokens)?;
+                    expect(&Token::CloseParen, tokens)?;
+                    Ok(inner_exp)
+                }
+                _ => Err(SyntaxError::expression(next_token))
+            }
+        }
+        _ => Err(SyntaxError::expression(next_token))
+    }
+    
+}
+
+fn parse_unop(tokens: &mut VecDeque<SpannedToken>) -> Result<UnaryOp, SyntaxError> {
+    // only called after correct token is checked
+    let spanned = tokens.pop_front().unwrap();
+    match &spanned.token {
+        Token::BitwiseComplement => Ok(UnaryOp::BitwiseComplement),
+        Token::Negation => Ok(UnaryOp::Negate),
+        _ => Err(SyntaxError::new_multiple(vec![Token::BitwiseComplement, Token::Negation], Some(spanned.clone()))) // unreachable
     }
 }
 
-fn parse_identifier(tokens: &mut VecDeque<Token>) -> Result<Identifier, SyntaxError> {
-    match tokens.pop_front() {
-        Some(Token::Identifier(value)) => Ok(Identifier(value)),
-        x => Err(SyntaxError::new(Option::from(Token::Identifier("whatever".to_string())), x))
+fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<Identifier, SyntaxError> {
+    match tokens.pop_front(){
+        Some(SpannedToken { token: Token::Identifier(value), .. }) => Ok(Identifier(value)),
+        x => Err(SyntaxError::new(Some(Token::Identifier("whatever".to_string())), x))
     }
 }
 
-fn parse_statement(tokens: &mut VecDeque<Token>) -> Result<Stmt, SyntaxError> {
+fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxError> {
     expect(&Token::ReturnKeyword, tokens)?;
     let exp = parse_expr(tokens)?;
     expect(&Token::Semicolon, tokens)?;
     Ok(Stmt::Return(exp))
 }
 
-fn parse_function_definition(tokens: &mut VecDeque<Token>) -> Result<Function, SyntaxError> {
+fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<Function, SyntaxError> {
     expect(&Token::IntKeyword, tokens)?;
     let name = parse_identifier(tokens)?;
     expect(&Token::OpenParen, tokens)?;
     expect(&Token::VoidKeyword, tokens)?;
     expect(&Token::CloseParen, tokens)?;
     expect(&Token::OpenBrace, tokens)?;
-    
+
     let body = parse_statement(tokens)?;
     expect(&Token::CloseBrace, tokens)?;
-    
+
     Ok(Function{name, body})
 }
 
-pub fn parse_program(tokens: &mut VecDeque<Token>) -> Result<Program, SyntaxError> {
+pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, SyntaxError> {
     let fun_def = parse_function_definition(tokens)?;
     if tokens.is_empty() {
         Ok(Program { function: fun_def })
-    } else { 
+    } else {
         Err(SyntaxError::new(None, tokens.front().cloned()))
     }
 }
@@ -115,12 +169,13 @@ mod tests {
 
     #[test]
     fn basic_return() {
-        let mut tokens: VecDeque<Token> = crate::lexer::tests::basic_return(100).into_iter().collect();
+        let input = std::fs::read_to_string("../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c").expect("Failed to read input file");
+        let mut tokens = tokenizer(&input).unwrap();
         let ast = parse_program(&mut tokens).unwrap();
         let expected = Program {
             function: Function {
                 name: Identifier("main".to_string()),
-                body: Stmt::Return(Expr::Int(100)),
+                body: Stmt::Return(Expr::Constant(100)),
             },
         };
         assert_eq!(ast, expected);
@@ -128,12 +183,11 @@ mod tests {
 
     fn run_parser_test_invalid(file: &str) {
         let input = std::fs::read_to_string(file).expect("Failed to read input file");
-        let tokens = tokenizer(&input).unwrap();
-        let mut tokens: VecDeque<Token> = tokens.into_iter().collect();
+        let mut tokens = tokenizer(&input).unwrap();
         let result = parse_program(&mut tokens);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn end_before_expr() {
         run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/end_before_expr.c")
