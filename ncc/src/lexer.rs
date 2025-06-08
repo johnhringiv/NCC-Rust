@@ -17,6 +17,10 @@ pub enum Token {
     BitwiseComplement, // ~
     Negation, // -
     Decrement, // --
+    Plus, // +
+    Asterisk, // *
+    Division, // /
+    Modulus, // %
 }
 
 impl Token {
@@ -36,7 +40,7 @@ impl Token {
             Token::IntKeyword => 3,
             Token::VoidKeyword => 4,
             Token::ReturnKeyword => 6,
-            Token::OpenParen | Token::CloseParen | Token::OpenBrace | Token::CloseBrace | Token::Semicolon | Token::BitwiseComplement | Token::Negation => 1,
+            Token::OpenParen | Token::CloseParen | Token::OpenBrace | Token::CloseBrace | Token::Semicolon | Token::BitwiseComplement | Token::Negation | Token::Plus | Token::Asterisk | Token::Division | Token::Modulus => 1,
         }
     }
 }
@@ -73,6 +77,10 @@ fn next_token(input: &str) -> Result<Token, LexerError> {
         TokenDef { regex: Regex::new(r"^~").unwrap(), variant: Token::BitwiseComplement },
         TokenDef { regex: Regex::new(r"^-").unwrap(), variant: Token::Negation },
         TokenDef { regex: Regex::new(r"^--").unwrap(), variant: Token::Decrement },
+        TokenDef { regex: Regex::new(r"^\+").unwrap(), variant: Token::Plus },
+        TokenDef { regex: Regex::new(r"^\*").unwrap(), variant: Token::Asterisk },
+        TokenDef { regex: Regex::new(r"^/").unwrap(), variant: Token::Division },
+        TokenDef { regex: Regex::new(r"^%").unwrap(), variant: Token::Modulus },
     ] {
         if let Some(mat) = token_def.regex.find(input) {
             let token = match &token_def.variant {
