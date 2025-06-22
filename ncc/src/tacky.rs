@@ -7,6 +7,15 @@ pub enum UnaryOp {
     Negate,
 }
 
+#[derive(Debug, Clone)]
+pub enum BinOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder
+}
+
 #[derive(Clone, Debug)]
 pub enum Val {
     Constant(i64),
@@ -20,7 +29,13 @@ pub enum Instruction {
         op: UnaryOp,
         src: Val,
         dst: Val,
-    }
+    },
+    Binary {
+        op: BinOp,
+        src1: Val,
+        src2: Val,
+        dst: Val,
+    },
 }
 
 #[derive(Debug)]
@@ -61,6 +76,21 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             instructions.push(Instruction::Unary {op: tacky_op, src, dst: dst.clone()});
             dst
         }
+        parser::Expr::Binary(op, e1, e2) => {
+            // C doesn't mandate order of src1 and src2 eval leading to undefined behavior
+            let src1 = tackify_expr(e1, instructions, name_generator);
+            let src2 = tackify_expr(e2, instructions, name_generator);
+            let dst = Val::Var(name_generator.next("temp"));
+            let tacky_op = match op {
+                parser::BinOp::Minus => BinOp::Subtract,
+                parser::BinOp::Plus => BinOp::Add,
+                parser::BinOp::Multiply => BinOp::Multiply,
+                parser::BinOp::Divide => BinOp::Divide,
+                parser::BinOp::Modulus => BinOp::Remainder,
+            };
+            instructions.push(Instruction::Binary {op: tacky_op, src1, src2, dst: dst.clone()});
+            dst
+        }
     }
 }
 
@@ -73,11 +103,9 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
     }
 }
 
-fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
-    
+fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition { 
     let mut instructions = Vec::new();
-    
-   let parser::Identifier(name) = &func.name;
+    let parser::Identifier(name) = &func.name;
     
     tackify_stmt(&func.body, &mut instructions, name_generator);
 

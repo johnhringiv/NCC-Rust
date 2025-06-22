@@ -6,15 +6,34 @@ use crate::lexer::{SpannedToken, Token};
 pub struct Identifier(pub String);
 
 #[derive(Debug, PartialEq)]
-pub enum Expr {
-    Constant(i64),
-    Unary(UnaryOp, Box<Expr>),
-}
-
-#[derive(Debug, PartialEq)]
 pub enum UnaryOp {
     BitwiseComplement,
     Negate,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Expr {
+    Constant(i64),
+    Unary(UnaryOp, Box<Expr>),
+    Binary(BinOp, Box<Expr>, Box<Expr>),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum BinOp {
+    Minus,
+    Plus,
+    Multiply,
+    Divide,
+    Modulus,
+}
+
+impl BinOp {
+    fn precedence(&self) -> u64 {
+        match self {
+            BinOp::Minus | BinOp::Plus => {1}
+            BinOp::Multiply | BinOp::Divide | BinOp::Modulus => {2}
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -87,7 +106,7 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<(), S
     }
 }
 
-fn parse_expr(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
+fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
     let next_token = tokens.front().cloned();
     match next_token {
         Some(ref spanned) => {
@@ -98,12 +117,12 @@ fn parse_expr(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> 
                 },
                 Token::BitwiseComplement | Token::Negation => {
                     let operator = parse_unop(tokens)?;
-                    let inner_exp = parse_expr(tokens)?;
+                    let inner_exp = parse_factor(tokens)?;
                     Ok(Expr::Unary(operator, Box::from(inner_exp)))
                 },
                 Token::OpenParen => {
                     tokens.pop_front();
-                    let inner_exp = parse_expr(tokens)?;
+                    let inner_exp = parse_exp(tokens, 0)?;
                     expect(&Token::CloseParen, tokens)?;
                     Ok(inner_exp)
                 }
@@ -112,12 +131,39 @@ fn parse_expr(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> 
         }
         _ => Err(SyntaxError::expression(next_token))
     }
-    
+}
+
+fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr, SyntaxError> {
+    let mut left = parse_factor(tokens)?;
+    while let Some(operator) = parse_binop(&tokens.front()) {
+        let prec = operator.precedence();
+        if prec >= min_prec {
+            tokens.pop_front();
+            let right = parse_exp(tokens, prec + 1)?;
+            left = Expr::Binary(operator, Box::from(left), Box::from(right));
+        } else { break; }
+    }
+    Ok(left)
+}
+
+fn parse_binop(next_token: &Option<&SpannedToken>) -> Option<BinOp> {
+    match next_token {
+        Some(spanned) => {
+            match spanned.token {
+                Token::Negation => Some(BinOp::Minus),
+                Token::Plus => Some(BinOp::Plus),
+                Token::Asterisk => Some(BinOp::Multiply),
+                Token::Division => Some(BinOp::Divide),
+                Token::Modulus => Some(BinOp::Modulus),
+                _ => None
+            }
+        }
+        _ => None
+    }
 }
 
 fn parse_unop(tokens: &mut VecDeque<SpannedToken>) -> Result<UnaryOp, SyntaxError> {
-    // only called after correct token is checked
-    let spanned = tokens.pop_front().unwrap();
+    let spanned = tokens.pop_front().expect("parse_unop called with no token");
     match &spanned.token {
         Token::BitwiseComplement => Ok(UnaryOp::BitwiseComplement),
         Token::Negation => Ok(UnaryOp::Negate),
@@ -134,7 +180,7 @@ fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<Identifier, S
 
 fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxError> {
     expect(&Token::ReturnKeyword, tokens)?;
-    let exp = parse_expr(tokens)?;
+    let exp = parse_exp(tokens, 0)?;
     expect(&Token::Semicolon, tokens)?;
     Ok(Stmt::Return(exp))
 }
