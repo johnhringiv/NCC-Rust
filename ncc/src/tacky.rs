@@ -1,11 +1,6 @@
 use std::collections::HashMap;
 use crate::parser;
-
-#[derive(Debug, Clone)]
-pub enum UnaryOp {
-    Complement,
-    Negate,
-}
+use crate::parser::{BinOp, UnaryOp };
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -20,7 +15,13 @@ pub enum Instruction {
         op: UnaryOp,
         src: Val,
         dst: Val,
-    }
+    },
+    Binary {
+        op: BinOp,
+        src1: Val,
+        src2: Val,
+        dst: Val,
+    },
 }
 
 #[derive(Debug)]
@@ -54,11 +55,15 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
         parser::Expr::Unary(op, inner) => {
             let src = tackify_expr(inner, instructions, name_generator);
             let dst = Val::Var(name_generator.next("temp"));
-            let tacky_op = match op {
-                parser::UnaryOp::BitwiseComplement => UnaryOp::Complement,
-                parser::UnaryOp::Negate => UnaryOp::Negate,
-            };
-            instructions.push(Instruction::Unary {op: tacky_op, src, dst: dst.clone()});
+            instructions.push(Instruction::Unary {op: op.clone(), src, dst: dst.clone()});
+            dst
+        }
+        parser::Expr::Binary(op, e1, e2) => {
+            // C doesn't mandate order of src1 and src2 eval leading to undefined behavior
+            let src1 = tackify_expr(e1, instructions, name_generator);
+            let src2 = tackify_expr(e2, instructions, name_generator);
+            let dst = Val::Var(name_generator.next("temp"));
+            instructions.push(Instruction::Binary {op: op.clone(), src1, src2, dst: dst.clone()});
             dst
         }
     }
@@ -73,11 +78,9 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
     }
 }
 
-fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
-    
+fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition { 
     let mut instructions = Vec::new();
-    
-   let parser::Identifier(name) = &func.name;
+    let parser::Identifier(name) = &func.name;
     
     tackify_stmt(&func.body, &mut instructions, name_generator);
 

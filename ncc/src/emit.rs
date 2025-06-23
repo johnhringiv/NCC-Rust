@@ -4,6 +4,9 @@ pub fn emit_reg(reg: &codegen::Reg) -> String {
     match reg {
         codegen::Reg::AX => "eax".to_string(),
         codegen::Reg::R10 => "r10d".to_string(),
+        codegen::Reg::R11 => "r11d".to_string(),
+        codegen::Reg::DX => "edx".to_string(),
+        codegen::Reg::CX => "ecx".to_string(),
     }
 }
 
@@ -11,6 +14,19 @@ pub fn emit_unaryop(op: &codegen::UnaryOp) -> String {
     match op {
         codegen::UnaryOp::Neg => "negl".to_string(),
         codegen::UnaryOp::Not => "notl".to_string(),
+    }
+}
+
+pub fn emit_binaryop(op: &codegen::BinaryOp) -> String {
+    match op {
+        codegen::BinaryOp::Add => "addl".to_string(),
+        codegen::BinaryOp::Sub => "subl".to_string(),
+        codegen::BinaryOp::Mult => "imull".to_string(),
+        codegen::BinaryOp::BitAnd => "andl".to_string(),
+        codegen::BinaryOp::BitOr => "orl".to_string(),
+        codegen::BinaryOp::BitXOr => "xorl".to_string(),
+        codegen::BinaryOp::BitShl => "shll".to_string(),
+        codegen::BinaryOp::BitSar => "sarl".to_string(),
     }
 }
 
@@ -48,6 +64,13 @@ pub fn emit_instruction(ins: &codegen::Instruction) -> String {
         codegen::Instruction::AllocateStack(offset) => {
             output.push_str(&format!("subq ${}, %rsp", offset * -1));
         }
+        codegen::Instruction::Binary { op, src, dst} => {
+            output.push_str(&format!("{} {}, {}", emit_binaryop(op), emit_operand(src), emit_operand(dst)));
+        }
+        codegen::Instruction::Idiv(op) => {
+            output.push_str(&format!("idivl {} ", emit_operand(op)));
+        }
+        codegen::Instruction::Cdq => {output.push_str("cdq");}
     }
     output
 }

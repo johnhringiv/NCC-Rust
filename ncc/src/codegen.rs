@@ -1,10 +1,13 @@
-use crate::codegen::Operand::Pseudo;
 use crate::tacky;
+use crate::parser;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {
     AX,
-    R10
+    DX,
+    R10,
+    R11,
+    CX
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -21,7 +24,19 @@ pub enum UnaryOp {
     Not,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mult,
+    BitAnd,
+    BitOr,
+    BitXOr,
+    BitShl,
+    BitSar,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
     Mov {
         src: Operand,
@@ -31,6 +46,13 @@ pub enum Instruction {
         op: UnaryOp,
         dst: Operand,
     },
+    Binary {
+        op: BinaryOp,
+        src: Operand,
+        dst: Operand
+    },
+    Idiv(Operand),
+    Cdq,
     AllocateStack(i64),
     Ret
 }
@@ -61,14 +83,51 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
             let op = convert_unary_op(op);
             vec![Instruction::Mov {src, dst: dst.clone()}, Instruction::Unary {op, dst}]
 
+        },
+        tacky::Instruction::Binary {op, src1, src2, dst} => {
+            let src1 = convert_val(src1);
+            let src2 = convert_val(src2);
+            let dst = convert_val(dst);
+            match op {
+                parser::BinOp::Add | parser::BinOp::Subtract | parser::BinOp::Multiply | parser::BinOp::BitwiseAnd | parser::BinOp::BitwiseOr | parser::BinOp::BitwiseXOr | parser::BinOp::BitwiseLeftShift | parser::BinOp::BitwiseRightShift => {
+                    vec![Instruction::Mov {src: src1, dst: dst.clone()}, Instruction::Binary {op: convert_binary_op(op), src: src2, dst}]
+                }
+                parser::BinOp::Divide => {
+                    vec![Instruction::Mov { src: src1, dst: Operand::Reg(Reg::AX) },
+                         Instruction::Cdq,
+                         Instruction::Idiv(src2),
+                         Instruction::Mov { src: Operand::Reg(Reg::AX), dst }]
+                }
+                parser::BinOp::Remainder => {
+                    vec![Instruction::Mov { src: src1, dst: Operand::Reg(Reg::AX) },
+                         Instruction::Cdq,
+                         Instruction::Idiv(src2),
+                         Instruction::Mov { src: Operand::Reg(Reg::DX), dst }]
+                }
+            }
+
         }
     }
 }
 
-fn convert_unary_op(op: &tacky::UnaryOp) -> UnaryOp {
+fn convert_binary_op(op: &parser::BinOp) -> BinaryOp {
     match op {
-        tacky::UnaryOp::Negate => UnaryOp::Neg,
-        tacky::UnaryOp::Complement => UnaryOp::Not,
+        parser::BinOp::Add => BinaryOp::Add,
+        parser::BinOp::Subtract => BinaryOp::Sub,
+        parser::BinOp::Multiply => BinaryOp::Mult,
+        parser::BinOp::Divide | parser::BinOp::Remainder => unreachable!("Special case for division and remainder should be handled in the instruction conversion"),
+        parser::BinOp::BitwiseAnd => BinaryOp::BitAnd,
+        parser::BinOp::BitwiseOr => BinaryOp::BitOr,
+        parser::BinOp::BitwiseXOr => BinaryOp::BitXOr,
+        parser::BinOp::BitwiseLeftShift => BinaryOp::BitShl,
+        parser::BinOp::BitwiseRightShift => BinaryOp::BitSar
+    }
+}
+
+fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
+    match op {
+        parser::UnaryOp::Negate => UnaryOp::Neg,
+        parser::UnaryOp::BitwiseComplement => UnaryOp::Not,
     }
 }
 
@@ -128,32 +187,30 @@ impl StackMapping {
     
     pub fn replace_pseudo(&mut self, operand: &Operand) -> Operand {
         match operand {
-            Pseudo(pseudo) => self.get_stack_location(pseudo),
+            Operand::Pseudo(pseudo) => self.get_stack_location(pseudo),
             _ => operand.clone()
         }
     }
 }
 
 pub fn replace_pseudo_registers(program: &mut Program) -> i64 {
-    let Program {function : FunctionDefinition { name, body}} = program;
+    let Program {function : FunctionDefinition { name: _, body}} = program;
     let mut stack_mapping = StackMapping::new();
     
     for ins in body.iter_mut(){
         match ins {
             Instruction::Mov { src, dst } => {
-                *ins = Instruction::Mov {
-                    src: stack_mapping.replace_pseudo(src),
-                    dst: stack_mapping.replace_pseudo(dst),
-                };
-                
-                
+                *src = stack_mapping.replace_pseudo(src);
+                *dst = stack_mapping.replace_pseudo(dst);
             }
-            Instruction::Unary {op, dst } => {
-                *ins = Instruction::Unary {
-                    op: op.clone(),
-                    dst: stack_mapping.replace_pseudo(dst),
-                };
+            Instruction::Unary {op: _, dst } => {
+                *dst = stack_mapping.replace_pseudo(dst)
             }
+            Instruction::Binary {op: _, src, dst} => {
+                *src = stack_mapping.replace_pseudo(src);
+                *dst = stack_mapping.replace_pseudo(dst);
+            }
+            Instruction::Idiv(src) => {*src = stack_mapping.replace_pseudo(src);}
             _ => {}
         }
     }
@@ -161,52 +218,35 @@ pub fn replace_pseudo_registers(program: &mut Program) -> i64 {
 }
 
 pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
-    let Program {function : FunctionDefinition { name, body}} = program;
-
-    // Collect indices of invalid instructions
-    let mut to_fix = Vec::new();
-    for (idx, ins) in body.iter().enumerate() {
-        if let Instruction::Mov { src: Operand::Stack(_), dst: Operand::Stack(_) } = ins {
-            to_fix.push(idx);
+    let Program {function : FunctionDefinition { name: _, body}} = program;
+    let mut new_ins = vec![Instruction::AllocateStack(stack_offset)];
+    for ins in body.iter() {
+        match ins {
+            Instruction::Mov {src: Operand::Stack(src), dst: Operand::Stack(dst) } => {
+                new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::R10), });
+                new_ins.push(Instruction::Mov { src: Operand::Reg(Reg::R10), dst: Operand::Stack(*dst), });
+            }
+            Instruction::Idiv(Operand::Imm(c)) => {
+                new_ins.push(Instruction::Mov {src: Operand::Imm(*c), dst: Operand::Reg(Reg::R10), });
+                new_ins.push(Instruction::Idiv(Operand::Reg(Reg::R10)));
+            }
+            Instruction::Binary {op: BinaryOp::Mult, src, dst: Operand::Stack(dst)} => {
+                new_ins.push(Instruction::Mov { src: Operand::Stack(*dst), dst: Operand::Reg(Reg::R11) });
+                new_ins.push(Instruction::Binary { op: BinaryOp::Mult, src: src.clone(), dst: Operand::Reg(Reg::R11)});
+                new_ins.push(Instruction::Mov {src: Operand::Reg(Reg::R11), dst: Operand::Stack(*dst) });
+            }
+            Instruction::Binary {op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr), src: Operand::Stack(src), dst: Operand::Stack(dst)} => { 
+                new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::R10) });
+                new_ins.push(Instruction::Binary { op: op.clone(), src: Operand::Reg(Reg::R10), dst: Operand::Stack(*dst) }); 
+            }
+            Instruction::Binary {op: op @ (BinaryOp::BitShl | BinaryOp::BitSar), src: Operand::Stack(src), dst} => {
+                new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::CX) });
+                new_ins.push(Instruction::Binary { op: op.clone(), src: Operand::Reg(Reg::CX), dst: dst.clone() });
+            }
+            _ => {new_ins.push(ins.clone())}
         }
     }
-    
-    let mut offset = 0;
-    for idx in to_fix {
-        if let Instruction::Mov { src: Operand::Stack(src), dst: Operand::Stack(dst) } = &body[idx + offset] {
-            let tmp_mov = Instruction::Mov {
-                src: Operand::Stack(*src),
-                dst: Operand::Reg(Reg::R10),
-            };
-            let mov = Instruction::Mov {
-                src: Operand::Reg(Reg::R10),
-                dst: Operand::Stack(*dst),
-            };
-            // Replace the original instruction and insert the new one after
-            body.splice(idx + offset..=idx + offset, [tmp_mov, mov]);
-            offset += 1;
-        }
-    }
-    
-    body.insert(0, Instruction::AllocateStack(stack_offset));
-    
-    //this doesn't compile because of the borrow checker
-    // for (idx, ins) in body.iter_mut().enumerate() {
-    //     match ins {
-    //         Instruction::Mov {src : Operand::Stack(src), dst : Operand::Stack(dst)} => {
-    //             let tmp_mov = Instruction::Mov {
-    //                 src: Operand::Stack(*src),
-    //                 dst: Operand::Reg(Reg::R10), // Using a temporary register
-    //             };
-    //             let mov = Instruction::Mov {
-    //                 src: Operand::Reg(Reg::R10),
-    //                 dst: Operand::Stack(*dst),
-    //             };
-    //             body.splice(idx..idx, [tmp_mov, mov]);
-    //         }
-    //         _ => {}
-    //     }
-    // }
+    *body = new_ins;
 }
 
 #[cfg(test)]
