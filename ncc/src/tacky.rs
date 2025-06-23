@@ -1,20 +1,6 @@
 use std::collections::HashMap;
 use crate::parser;
-
-#[derive(Debug, Clone)]
-pub enum UnaryOp {
-    Complement,
-    Negate,
-}
-
-#[derive(Debug, Clone)]
-pub enum BinOp {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Remainder
-}
+use crate::parser::{BinOp, UnaryOp };
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -69,11 +55,7 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
         parser::Expr::Unary(op, inner) => {
             let src = tackify_expr(inner, instructions, name_generator);
             let dst = Val::Var(name_generator.next("temp"));
-            let tacky_op = match op {
-                parser::UnaryOp::BitwiseComplement => UnaryOp::Complement,
-                parser::UnaryOp::Negate => UnaryOp::Negate,
-            };
-            instructions.push(Instruction::Unary {op: tacky_op, src, dst: dst.clone()});
+            instructions.push(Instruction::Unary {op: op.clone(), src, dst: dst.clone()});
             dst
         }
         parser::Expr::Binary(op, e1, e2) => {
@@ -81,14 +63,7 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             let src1 = tackify_expr(e1, instructions, name_generator);
             let src2 = tackify_expr(e2, instructions, name_generator);
             let dst = Val::Var(name_generator.next("temp"));
-            let tacky_op = match op {
-                parser::BinOp::Minus => BinOp::Subtract,
-                parser::BinOp::Plus => BinOp::Add,
-                parser::BinOp::Multiply => BinOp::Multiply,
-                parser::BinOp::Divide => BinOp::Divide,
-                parser::BinOp::Modulus => BinOp::Remainder,
-            };
-            instructions.push(Instruction::Binary {op: tacky_op, src1, src2, dst: dst.clone()});
+            instructions.push(Instruction::Binary {op: op.clone(), src1, src2, dst: dst.clone()});
             dst
         }
     }

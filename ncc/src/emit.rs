@@ -6,6 +6,7 @@ pub fn emit_reg(reg: &codegen::Reg) -> String {
         codegen::Reg::R10 => "r10d".to_string(),
         codegen::Reg::R11 => "r11d".to_string(),
         codegen::Reg::DX => "edx".to_string(),
+        codegen::Reg::CX => "ecx".to_string(),
     }
 }
 
@@ -20,7 +21,12 @@ pub fn emit_binaryop(op: &codegen::BinaryOp) -> String {
     match op {
         codegen::BinaryOp::Add => "addl".to_string(),
         codegen::BinaryOp::Sub => "subl".to_string(),
-        codegen::BinaryOp::Mult => "imull".to_string()
+        codegen::BinaryOp::Mult => "imull".to_string(),
+        codegen::BinaryOp::BitAnd => "andl".to_string(),
+        codegen::BinaryOp::BitOr => "orl".to_string(),
+        codegen::BinaryOp::BitXOr => "xorl".to_string(),
+        codegen::BinaryOp::BitShl => "shll".to_string(),
+        codegen::BinaryOp::BitSar => "sarl".to_string(),
     }
 }
 

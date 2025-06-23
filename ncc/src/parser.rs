@@ -5,7 +5,7 @@ use crate::lexer::{SpannedToken, Token};
 #[derive(Debug, PartialEq)]
 pub struct Identifier(pub String);
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum UnaryOp {
     BitwiseComplement,
     Negate,
@@ -18,20 +18,29 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BinOp {
-    Minus,
-    Plus,
+    Subtract,
+    Add,
     Multiply,
     Divide,
-    Modulus,
+    Remainder,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXOr,
+    BitwiseLeftShift,
+    BitwiseRightShift,
 }
 
 impl BinOp {
     fn precedence(&self) -> u64 {
         match self {
-            BinOp::Minus | BinOp::Plus => {1}
-            BinOp::Multiply | BinOp::Divide | BinOp::Modulus => {2}
+            BinOp::Subtract | BinOp::Add => 45,
+            BinOp::Multiply | BinOp::Divide | BinOp::Remainder => 50,
+            BinOp::BitwiseLeftShift | BinOp::BitwiseRightShift => 44,
+            BinOp::BitwiseAnd => 43,
+            BinOp::BitwiseXOr => 42,
+            BinOp::BitwiseOr => 41,
         }
     }
 }
@@ -150,11 +159,16 @@ fn parse_binop(next_token: &Option<&SpannedToken>) -> Option<BinOp> {
     match next_token {
         Some(spanned) => {
             match spanned.token {
-                Token::Negation => Some(BinOp::Minus),
-                Token::Plus => Some(BinOp::Plus),
+                Token::Negation => Some(BinOp::Subtract),
+                Token::Plus => Some(BinOp::Add),
                 Token::Asterisk => Some(BinOp::Multiply),
                 Token::Division => Some(BinOp::Divide),
-                Token::Modulus => Some(BinOp::Modulus),
+                Token::Modulus => Some(BinOp::Remainder),
+                Token::BitwiseAnd => Some(BinOp::BitwiseAnd),
+                Token::BitwiseOr => Some(BinOp::BitwiseOr),
+                Token::BitwiseXOr => Some(BinOp::BitwiseXOr),
+                Token::BitwiseLeftShift => Some(BinOp::BitwiseLeftShift),
+                Token::BitwiseRightShift => Some(BinOp::BitwiseRightShift),
                 _ => None
             }
         }

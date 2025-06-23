@@ -21,6 +21,11 @@ pub enum Token {
     Asterisk, // *
     Division, // /
     Modulus, // %
+    BitwiseAnd, // &
+    BitwiseOr, // |
+    BitwiseXOr, // ^
+    BitwiseLeftShift, // <<
+    BitwiseRightShift, // >>
 }
 
 impl Token {
@@ -31,19 +36,9 @@ impl Token {
             other => format!("{:?}", other),
         }
     }
-    
-    pub fn len(&self) -> usize {
-        match self {
-            Token::Identifier(s) => s.len(),
-            Token::ConstantInt(i) => i.to_string().len(),
-            Token::Decrement => 2,
-            Token::IntKeyword => 3,
-            Token::VoidKeyword => 4,
-            Token::ReturnKeyword => 6,
-            Token::OpenParen | Token::CloseParen | Token::OpenBrace | Token::CloseBrace | Token::Semicolon | Token::BitwiseComplement | Token::Negation | Token::Plus | Token::Asterisk | Token::Division | Token::Modulus => 1,
-        }
-    }
 }
+
+#[derive(Clone)]
 struct TokenMatch {
     token: Token,
     length: usize,
@@ -61,7 +56,7 @@ pub struct SpannedToken {
     pub column: usize,
 }
 
-fn next_token(input: &str) -> Result<Token, LexerError> {
+fn next_token(input: &str) -> Result<TokenMatch, LexerError> {
     let mut matches = vec![];
     for token_def in &[
         TokenDef { regex: Regex::new(r"^[a-zA-Z_]\w*\b").unwrap(), variant: Token::Identifier(String::new()) },
@@ -81,6 +76,11 @@ fn next_token(input: &str) -> Result<Token, LexerError> {
         TokenDef { regex: Regex::new(r"^\*").unwrap(), variant: Token::Asterisk },
         TokenDef { regex: Regex::new(r"^/").unwrap(), variant: Token::Division },
         TokenDef { regex: Regex::new(r"^%").unwrap(), variant: Token::Modulus },
+        TokenDef { regex: Regex::new(r"^&").unwrap(), variant: Token::BitwiseAnd },
+        TokenDef { regex: Regex::new(r"^\|").unwrap(), variant: Token::BitwiseOr },
+        TokenDef { regex: Regex::new(r"^\^").unwrap(), variant: Token::BitwiseXOr },
+        TokenDef { regex: Regex::new(r"^<<").unwrap(), variant: Token::BitwiseLeftShift },
+        TokenDef { regex: Regex::new(r"^>>").unwrap(), variant: Token::BitwiseRightShift },
     ] {
         if let Some(mat) = token_def.regex.find(input) {
             let token = match &token_def.variant {
@@ -95,7 +95,7 @@ fn next_token(input: &str) -> Result<Token, LexerError> {
         }
     }
     if let Some(best_match) = matches.iter().max_by_key(|m| m.length) {
-        Ok(best_match.token.clone())
+        Ok(best_match.clone())
     } else {
         Err(LexerError::new(format!("No token matched on: '{}'", input)))
     }
@@ -131,7 +131,8 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
         input = trimmed;
         
         // check for comments and skip them need to support both // and /* */
-        if input.starts_with("//") | input.starts_with("\n") { // same line, col logic
+        // also skipping # for now
+        if ["//", "\n", "#"].iter().any(|s| input.starts_with(s)) { // same line, col logic
             if let Some(newline_index) = input.find('\n') {
                 line += 1;
                 col = 1;
@@ -165,18 +166,10 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
         }
 
         match next_token(&input) {
-            Ok(token) => {
-                let len = token.len();
+            Ok(TokenMatch { token, length }) => {
                 tokens.push_back(SpannedToken { token, line, column: col });
-                for c in input[..len].chars() {
-                    if c == '\n' {
-                        line += 1;
-                        col = 1;
-                    } else {
-                        col += 1;
-                    }
-                }
-                input = &input[len..];
+                col += length; // no newline in tokens
+                input = &input[length..];
             }
             Err(e) => return Err(e),
         }

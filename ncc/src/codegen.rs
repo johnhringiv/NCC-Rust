@@ -1,11 +1,13 @@
 use crate::tacky;
+use crate::parser;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {
     AX,
     DX,
     R10,
-    R11
+    R11,
+    CX
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,7 +28,12 @@ pub enum UnaryOp {
 pub enum BinaryOp {
     Add,
     Sub,
-    Mult
+    Mult,
+    BitAnd,
+    BitOr,
+    BitXOr,
+    BitShl,
+    BitSar,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,16 +89,16 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
             let src2 = convert_val(src2);
             let dst = convert_val(dst);
             match op {
-                tacky::BinOp::Add | tacky::BinOp::Subtract | tacky::BinOp::Multiply => {
+                parser::BinOp::Add | parser::BinOp::Subtract | parser::BinOp::Multiply | parser::BinOp::BitwiseAnd | parser::BinOp::BitwiseOr | parser::BinOp::BitwiseXOr | parser::BinOp::BitwiseLeftShift | parser::BinOp::BitwiseRightShift => {
                     vec![Instruction::Mov {src: src1, dst: dst.clone()}, Instruction::Binary {op: convert_binary_op(op), src: src2, dst}]
                 }
-                tacky::BinOp::Divide => {
+                parser::BinOp::Divide => {
                     vec![Instruction::Mov { src: src1, dst: Operand::Reg(Reg::AX) },
                          Instruction::Cdq,
                          Instruction::Idiv(src2),
                          Instruction::Mov { src: Operand::Reg(Reg::AX), dst }]
                 }
-                tacky::BinOp::Remainder => {
+                parser::BinOp::Remainder => {
                     vec![Instruction::Mov { src: src1, dst: Operand::Reg(Reg::AX) },
                          Instruction::Cdq,
                          Instruction::Idiv(src2),
@@ -103,19 +110,24 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
     }
 }
 
-fn convert_binary_op(op: &tacky::BinOp) -> BinaryOp {
+fn convert_binary_op(op: &parser::BinOp) -> BinaryOp {
     match op {
-        tacky::BinOp::Add => BinaryOp::Add,
-        tacky::BinOp::Subtract => BinaryOp::Sub,
-        tacky::BinOp::Multiply => BinaryOp::Mult,
-        tacky::BinOp::Divide | tacky::BinOp::Remainder => unreachable!("Special case for division and remainder should be handled in the instruction conversion"),
+        parser::BinOp::Add => BinaryOp::Add,
+        parser::BinOp::Subtract => BinaryOp::Sub,
+        parser::BinOp::Multiply => BinaryOp::Mult,
+        parser::BinOp::Divide | parser::BinOp::Remainder => unreachable!("Special case for division and remainder should be handled in the instruction conversion"),
+        parser::BinOp::BitwiseAnd => BinaryOp::BitAnd,
+        parser::BinOp::BitwiseOr => BinaryOp::BitOr,
+        parser::BinOp::BitwiseXOr => BinaryOp::BitXOr,
+        parser::BinOp::BitwiseLeftShift => BinaryOp::BitShl,
+        parser::BinOp::BitwiseRightShift => BinaryOp::BitSar
     }
 }
 
-fn convert_unary_op(op: &tacky::UnaryOp) -> UnaryOp {
+fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
     match op {
-        tacky::UnaryOp::Negate => UnaryOp::Neg,
-        tacky::UnaryOp::Complement => UnaryOp::Not,
+        parser::UnaryOp::Negate => UnaryOp::Neg,
+        parser::UnaryOp::BitwiseComplement => UnaryOp::Not,
     }
 }
 
@@ -218,18 +230,18 @@ pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
                 new_ins.push(Instruction::Mov {src: Operand::Imm(*c), dst: Operand::Reg(Reg::R10), });
                 new_ins.push(Instruction::Idiv(Operand::Reg(Reg::R10)));
             }
-            Instruction::Binary {op: BinaryOp::Add, src: Operand::Stack(src), dst: Operand::Stack(dst)} => {
-                new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::R10) });
-                new_ins.push(Instruction::Binary { op: BinaryOp::Add, src: Operand::Reg(Reg::R10), dst: Operand::Stack(*dst) });
-            }
-            Instruction::Binary {op: BinaryOp::Sub, src: Operand::Stack(src), dst: Operand::Stack(dst)} => {
-                new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::R10) });
-                new_ins.push(Instruction::Binary { op: BinaryOp::Sub, src: Operand::Reg(Reg::R10), dst: Operand::Stack(*dst) });
-            }
             Instruction::Binary {op: BinaryOp::Mult, src, dst: Operand::Stack(dst)} => {
                 new_ins.push(Instruction::Mov { src: Operand::Stack(*dst), dst: Operand::Reg(Reg::R11) });
                 new_ins.push(Instruction::Binary { op: BinaryOp::Mult, src: src.clone(), dst: Operand::Reg(Reg::R11)});
                 new_ins.push(Instruction::Mov {src: Operand::Reg(Reg::R11), dst: Operand::Stack(*dst) });
+            }
+            Instruction::Binary {op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr), src: Operand::Stack(src), dst: Operand::Stack(dst)} => { 
+                new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::R10) });
+                new_ins.push(Instruction::Binary { op: op.clone(), src: Operand::Reg(Reg::R10), dst: Operand::Stack(*dst) }); 
+            }
+            Instruction::Binary {op: op @ (BinaryOp::BitShl | BinaryOp::BitSar), src: Operand::Stack(src), dst} => {
+                new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::CX) });
+                new_ins.push(Instruction::Binary { op: op.clone(), src: Operand::Reg(Reg::CX), dst: dst.clone() });
             }
             _ => {new_ins.push(ins.clone())}
         }
