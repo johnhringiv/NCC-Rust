@@ -13,7 +13,7 @@ use clap::{ArgGroup, Parser};
 #[command(group(
     ArgGroup::new("mode")
         .required(false)
-        .args(&["lex", "parse", "codegen", "s", "tacky"])
+        .args(&["lex", "parse", "codegen", "s", "tacky", "run"])
 ))]
 struct Args {
     /// Run lexer
@@ -35,6 +35,10 @@ struct Args {
     /// emits assembly
     #[arg(short = 'S')]
     s: bool,
+
+    /// Run the compiled program
+    #[arg(long, name = "run")]
+    run: bool,
 
     #[arg(short = 'o', long)]
     output: Option<String>,
@@ -97,7 +101,7 @@ fn main() {
     let status = std::process::Command::new("gcc")
         .arg(&asm_file)
         .arg("-o")
-        .arg(out_file)
+        .arg(out_file.clone())
         .status()
         .expect("Failed to execute gcc");
     
@@ -108,4 +112,11 @@ fn main() {
     
     fs::remove_file(&asm_file)
         .expect("Failed to delete assembly file");
+    
+    if args.run {
+        let run_status = std::process::Command::new(&out_file)
+            .status()
+            .expect("Failed to execute compiled binary");
+        println!("Result: {}", run_status.code().unwrap());
+    }
 }

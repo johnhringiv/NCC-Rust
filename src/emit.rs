@@ -1,23 +1,40 @@
 use crate::codegen;
 
-pub fn emit_reg(reg: &codegen::Reg) -> String {
-    match reg {
-        codegen::Reg::AX => "eax".to_string(),
-        codegen::Reg::R10 => "r10d".to_string(),
-        codegen::Reg::R11 => "r11d".to_string(),
-        codegen::Reg::DX => "edx".to_string(),
-        codegen::Reg::CX => "ecx".to_string(),
+enum RegWidth {
+    Byte,
+    DWord,
+}
+fn emit_reg(reg: &codegen::Reg, reg_width: &RegWidth) -> String {
+    match reg_width {
+        RegWidth::Byte => {
+            match reg {
+                codegen::Reg::AX => "al".to_string(),
+                codegen::Reg::R10 => "r10b".to_string(),
+                codegen::Reg::R11 => "r11b".to_string(),
+                codegen::Reg::DX => "dl".to_string(),
+                codegen::Reg::CX => "cl".to_string(),
+            }
+        }
+        RegWidth::DWord => {
+            match reg {
+                codegen::Reg::AX => "eax".to_string(),
+                codegen::Reg::R10 => "r10d".to_string(),
+                codegen::Reg::R11 => "r11d".to_string(),
+                codegen::Reg::DX => "edx".to_string(),
+                codegen::Reg::CX => "ecx".to_string(),
+            }
+        }
     }
 }
 
-pub fn emit_unaryop(op: &codegen::UnaryOp) -> String {
+fn emit_unaryop(op: &codegen::UnaryOp) -> String {
     match op {
         codegen::UnaryOp::Neg => "negl".to_string(),
         codegen::UnaryOp::Not => "notl".to_string(),
     }
 }
 
-pub fn emit_binaryop(op: &codegen::BinaryOp) -> String {
+fn emit_binaryop(op: &codegen::BinaryOp) -> String {
     match op {
         codegen::BinaryOp::Add => "addl".to_string(),
         codegen::BinaryOp::Sub => "subl".to_string(),
@@ -30,14 +47,14 @@ pub fn emit_binaryop(op: &codegen::BinaryOp) -> String {
     }
 }
 
-pub fn emit_operand(operand: &codegen::Operand) -> String {
+fn emit_operand(operand: &codegen::Operand, reg_width: &RegWidth) -> String {
     let mut output = String::new();
     match operand {
         codegen::Operand::Imm(value) => {
             output.push_str(&format!("${}", value));
         },
         codegen::Operand::Reg(reg) => {
-            output.push_str(&format!("%{}", emit_reg(&reg)))
+            output.push_str(&format!("%{}", emit_reg(reg, reg_width)));
         }
         codegen::Operand::Stack(offset) => {
             output.push_str(&format!("{}(%rbp)", offset));
@@ -47,11 +64,14 @@ pub fn emit_operand(operand: &codegen::Operand) -> String {
     output
 }
 
-pub fn emit_instruction(ins: &codegen::Instruction) -> String {
+fn emit_instruction(ins: &codegen::Instruction) -> String {
+    fn emit_operand_dw(operand: &codegen::Operand) -> String {
+        emit_operand(operand, &RegWidth::DWord)
+    }
     let mut output = String::new();
     match ins {
         codegen::Instruction::Mov { src, dst } => {
-            output.push_str(&format!("movl {}, {}", emit_operand(src), emit_operand(dst)));
+            output.push_str(&format!("movl {}, {}", emit_operand_dw(src), emit_operand_dw(dst)));
         }
         codegen::Instruction::Ret => {
             output.push_str("movq %rbp, %rsp\n");
@@ -59,23 +79,38 @@ pub fn emit_instruction(ins: &codegen::Instruction) -> String {
             output.push_str("\tret");
         }
         codegen::Instruction::Unary { op, dst } => {
-            output.push_str(&format!("{} {}\n", emit_unaryop(op), emit_operand(dst)));
+            output.push_str(&format!("{} {}\n", emit_unaryop(op), emit_operand_dw(dst)));
         }
         codegen::Instruction::AllocateStack(offset) => {
             output.push_str(&format!("subq ${}, %rsp", offset * -1));
         }
         codegen::Instruction::Binary { op, src, dst} => {
-            output.push_str(&format!("{} {}, {}", emit_binaryop(op), emit_operand(src), emit_operand(dst)));
+            output.push_str(&format!("{} {}, {}", emit_binaryop(op), emit_operand_dw(src), emit_operand_dw(dst)));
         }
         codegen::Instruction::Idiv(op) => {
-            output.push_str(&format!("idivl {} ", emit_operand(op)));
+            output.push_str(&format!("idivl {} ", emit_operand_dw(op)));
         }
         codegen::Instruction::Cdq => {output.push_str("cdq");}
+        codegen::Instruction::Cmp { v1, v2 } => {
+            output.push_str(&format!("cmpl {}, {}", emit_operand_dw(v1), emit_operand_dw(v2)));
+        }
+        codegen::Instruction::Jmp(target) => {
+            output.push_str(&format!("jmp {}", target));
+        }
+        codegen::Instruction::JmpCC {code, label} => {
+            output.push_str(&format!("j{} {}", code.ins_suffix(), label));
+        }
+        codegen::Instruction::Label(label) => {
+            output.push_str(&format!("{}:", label));
+        }
+        codegen::Instruction::SetCC {code, op} => {
+            output.push_str(&format!("set{} {}", code.ins_suffix(), emit_operand(op, &RegWidth::Byte)));
+        }
     }
     output
 }
 
-pub fn emit_function(fun_def: &codegen::FunctionDefinition) -> String {
+fn emit_function(fun_def: &codegen::FunctionDefinition) -> String {
     let mut output = String::new();
     let codegen::FunctionDefinition { name, body } = fun_def;
     let processed_name = if cfg!(target_os = "macos") {
