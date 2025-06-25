@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::LazyLock;
 use regex::Regex;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,7 +27,50 @@ pub enum Token {
     BitwiseXOr, // ^
     BitwiseLeftShift, // <<
     BitwiseRightShift, // >>
+    LogicalNot, // !
+    LogicalAnd, // &&
+    LogicalOr, // ||
+    Equal, // ==
+    NotEqual, // !=
+    LessThan, // <
+    GreaterThan, // >
+    LessThanOrEqual, // <=
+    GreaterThanOrEqual, // >=
 }
+
+static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| vec![
+    TokenDef { regex: Regex::new(r"^[a-zA-Z_]\w*\b").unwrap(), variant: Token::Identifier(String::new()) },
+    TokenDef { regex: Regex::new(r"^[0-9]+\b").unwrap(), variant: Token::ConstantInt(0) },
+    TokenDef { regex: Regex::new(r"^int\b").unwrap(), variant: Token::IntKeyword },
+    TokenDef { regex: Regex::new(r"^void\b").unwrap(), variant: Token::VoidKeyword },
+    TokenDef { regex: Regex::new(r"^return\b").unwrap(), variant: Token::ReturnKeyword },
+    TokenDef { regex: Regex::new(r"^\(").unwrap(), variant: Token::OpenParen },
+    TokenDef { regex: Regex::new(r"^\)").unwrap(), variant: Token::CloseParen },
+    TokenDef { regex: Regex::new(r"^\{").unwrap(), variant: Token::OpenBrace },
+    TokenDef { regex: Regex::new(r"^}").unwrap(), variant: Token::CloseBrace },
+    TokenDef { regex: Regex::new(r"^;").unwrap(), variant: Token::Semicolon },
+    TokenDef { regex: Regex::new(r"^~").unwrap(), variant: Token::BitwiseComplement },
+    TokenDef { regex: Regex::new(r"^--").unwrap(), variant: Token::Decrement },
+    TokenDef { regex: Regex::new(r"^-").unwrap(), variant: Token::Negation },
+    TokenDef { regex: Regex::new(r"^\+").unwrap(), variant: Token::Plus },
+    TokenDef { regex: Regex::new(r"^\*").unwrap(), variant: Token::Asterisk },
+    TokenDef { regex: Regex::new(r"^/").unwrap(), variant: Token::Division },
+    TokenDef { regex: Regex::new(r"^%").unwrap(), variant: Token::Modulus },
+    TokenDef { regex: Regex::new(r"^&").unwrap(), variant: Token::BitwiseAnd },
+    TokenDef { regex: Regex::new(r"^\|").unwrap(), variant: Token::BitwiseOr },
+    TokenDef { regex: Regex::new(r"^\^").unwrap(), variant: Token::BitwiseXOr },
+    TokenDef { regex: Regex::new(r"^<<").unwrap(), variant: Token::BitwiseLeftShift },
+    TokenDef { regex: Regex::new(r"^>>").unwrap(), variant: Token::BitwiseRightShift },
+    TokenDef { regex: Regex::new(r"^!").unwrap(), variant: Token::LogicalNot },
+    TokenDef { regex: Regex::new(r"^&&").unwrap(), variant: Token::LogicalAnd },
+    TokenDef { regex: Regex::new(r"^\|\|").unwrap(), variant: Token::LogicalOr },
+    TokenDef { regex: Regex::new(r"^==").unwrap(), variant: Token::Equal },
+    TokenDef { regex: Regex::new(r"^!=").unwrap(), variant: Token::NotEqual },
+    TokenDef { regex: Regex::new(r"^<=").unwrap(), variant: Token::LessThanOrEqual },
+    TokenDef { regex: Regex::new(r"^>=").unwrap(), variant: Token::GreaterThanOrEqual },
+    TokenDef { regex: Regex::new(r"^<").unwrap(), variant: Token::LessThan },
+    TokenDef { regex: Regex::new(r"^>").unwrap(), variant: Token::GreaterThan },
+]);
 
 impl Token {
     pub fn variant_str(&self) -> String {
@@ -58,32 +102,9 @@ pub struct SpannedToken {
 
 fn next_token(input: &str) -> Result<TokenMatch, LexerError> {
     let mut matches = vec![];
-    for token_def in &[
-        TokenDef { regex: Regex::new(r"^[a-zA-Z_]\w*\b").unwrap(), variant: Token::Identifier(String::new()) },
-        TokenDef { regex: Regex::new(r"^[0-9]+\b").unwrap(), variant: Token::ConstantInt(0) },
-        TokenDef { regex: Regex::new(r"^int\b").unwrap(), variant: Token::IntKeyword },
-        TokenDef { regex: Regex::new(r"^void\b").unwrap(), variant: Token::VoidKeyword },
-        TokenDef { regex: Regex::new(r"^return\b").unwrap(), variant: Token::ReturnKeyword },
-        TokenDef { regex: Regex::new(r"^\(").unwrap(), variant: Token::OpenParen },
-        TokenDef { regex: Regex::new(r"^\)").unwrap(), variant: Token::CloseParen },
-        TokenDef { regex: Regex::new(r"^\{").unwrap(), variant: Token::OpenBrace },
-        TokenDef { regex: Regex::new(r"^}").unwrap(), variant: Token::CloseBrace },
-        TokenDef { regex: Regex::new(r"^;").unwrap(), variant: Token::Semicolon },
-        TokenDef { regex: Regex::new(r"^~").unwrap(), variant: Token::BitwiseComplement },
-        TokenDef { regex: Regex::new(r"^-").unwrap(), variant: Token::Negation },
-        TokenDef { regex: Regex::new(r"^--").unwrap(), variant: Token::Decrement },
-        TokenDef { regex: Regex::new(r"^\+").unwrap(), variant: Token::Plus },
-        TokenDef { regex: Regex::new(r"^\*").unwrap(), variant: Token::Asterisk },
-        TokenDef { regex: Regex::new(r"^/").unwrap(), variant: Token::Division },
-        TokenDef { regex: Regex::new(r"^%").unwrap(), variant: Token::Modulus },
-        TokenDef { regex: Regex::new(r"^&").unwrap(), variant: Token::BitwiseAnd },
-        TokenDef { regex: Regex::new(r"^\|").unwrap(), variant: Token::BitwiseOr },
-        TokenDef { regex: Regex::new(r"^\^").unwrap(), variant: Token::BitwiseXOr },
-        TokenDef { regex: Regex::new(r"^<<").unwrap(), variant: Token::BitwiseLeftShift },
-        TokenDef { regex: Regex::new(r"^>>").unwrap(), variant: Token::BitwiseRightShift },
-    ] {
-        if let Some(mat) = token_def.regex.find(input) {
-            let token = match &token_def.variant {
+    for TokenDef{regex, variant} in TOKEN_DEFS.iter() {
+        if let Some(mat) = regex.find(input) {
+            let token = match variant {
                 Token::Identifier(_) => Token::Identifier(mat.as_str().to_string()),
                 Token::ConstantInt(_) => Token::ConstantInt(mat.as_str().parse().unwrap()),
                 other => other.clone(),
@@ -101,7 +122,6 @@ fn next_token(input: &str) -> Result<TokenMatch, LexerError> {
     }
 }
 
-#[derive(Clone)]
 pub struct LexerError {
     message: String,
 }

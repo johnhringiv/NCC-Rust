@@ -1,5 +1,7 @@
 use crate::tacky;
 use crate::parser;
+use crate::parser::Identifier;
+use crate::tacky::{BinOp};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {
@@ -51,10 +53,42 @@ pub enum Instruction {
         src: Operand,
         dst: Operand
     },
+    Cmp {
+        v1: Operand,
+        v2: Operand,
+    },
     Idiv(Operand),
     Cdq,
+    Jmp(Identifier),
+    JmpCC {
+        code: CondCode,
+        label: Identifier,
+    },
+    SetCC {
+        code: CondCode,
+        op: Operand,
+    },
+    Label(Identifier),
     AllocateStack(i64),
     Ret
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CondCode {
+    E, NE, G, GE, L, LE
+}
+
+impl CondCode {
+    pub fn ins_suffix(&self) -> String {
+        match self {
+            CondCode::E => "e".to_string(),
+            CondCode::NE => "ne".to_string(),
+            CondCode::G => "g".to_string(),
+            CondCode::GE => "ge".to_string(),
+            CondCode::L => "l".to_string(),
+            CondCode::LE => "le".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -77,6 +111,11 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
                 dst: Operand::Reg(Reg::AX),
             }, Instruction::Ret]
         },
+        tacky::Instruction::Unary {op: parser::UnaryOp::Not, src, dst} => {
+            let src = convert_val(src);
+            let dst = convert_val(dst);
+            vec![Instruction::Cmp{v1: Operand::Imm(0), v2: src}, Instruction::Mov {src: Operand::Imm(0), dst: dst.clone()}, Instruction::SetCC {code: CondCode::E, op: dst}]
+        }
         tacky::Instruction::Unary {op, src, dst } => {
             let src = convert_val(src);
             let dst = convert_val(dst);
@@ -89,38 +128,69 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
             let src2 = convert_val(src2);
             let dst = convert_val(dst);
             match op {
-                parser::BinOp::Add | parser::BinOp::Subtract | parser::BinOp::Multiply | parser::BinOp::BitwiseAnd | parser::BinOp::BitwiseOr | parser::BinOp::BitwiseXOr | parser::BinOp::BitwiseLeftShift | parser::BinOp::BitwiseRightShift => {
-                    vec![Instruction::Mov {src: src1, dst: dst.clone()}, Instruction::Binary {op: convert_binary_op(op), src: src2, dst}]
+                BinOp::Add | BinOp::Subtract | BinOp::Multiply | BinOp::BitwiseAnd | BinOp::BitwiseOr | BinOp::BitwiseXOr | BinOp::BitwiseLeftShift | BinOp::BitwiseRightShift => {
+                    vec![Instruction::Mov {src: src1, dst: dst.clone()}, Instruction::Binary {op: BinaryOp::from(op), src: src2, dst}]
                 }
-                parser::BinOp::Divide => {
+                BinOp::Divide => {
                     vec![Instruction::Mov { src: src1, dst: Operand::Reg(Reg::AX) },
                          Instruction::Cdq,
                          Instruction::Idiv(src2),
                          Instruction::Mov { src: Operand::Reg(Reg::AX), dst }]
                 }
-                parser::BinOp::Remainder => {
+                BinOp::Remainder => {
                     vec![Instruction::Mov { src: src1, dst: Operand::Reg(Reg::AX) },
                          Instruction::Cdq,
                          Instruction::Idiv(src2),
                          Instruction::Mov { src: Operand::Reg(Reg::DX), dst }]
                 }
+                BinOp::Equal | BinOp::NotEqual | BinOp::LessThan | BinOp::LessOrEqual | BinOp::GreaterThan | BinOp::GreaterOrEqual => {
+                    let code = match op {
+                        BinOp::Equal => CondCode::E,
+                        BinOp::NotEqual => CondCode::NE,
+                        BinOp::LessThan => CondCode::L,
+                        BinOp::LessOrEqual => CondCode::LE,
+                        BinOp::GreaterThan => CondCode::G,
+                        BinOp::GreaterOrEqual => CondCode::GE,
+                        _ => unreachable!(),
+                    };
+                    vec![Instruction::Cmp {v1: src2, v2: src1}, Instruction::Mov {src: Operand::Imm(0), dst: dst.clone()}, Instruction::SetCC {code, op: dst}]
+                }
             }
-
+        }
+        tacky::Instruction::JumpIfZero {condition, target} => {
+            vec![Instruction::Cmp {v1: Operand::Imm(0), v2: convert_val(condition)}, Instruction::JmpCC {code: CondCode::E, label: target.clone()}]
+        }
+        tacky::Instruction::JumpIfNotZero {condition, target} => {
+            vec![Instruction::Cmp {v1: Operand::Imm(0), v2: convert_val(condition)}, Instruction::JmpCC {code: CondCode::NE, label: target.clone()}]
+        }
+        tacky::Instruction::Jump {target} => {
+            vec![Instruction::Jmp(target.clone())]
+        }
+        tacky::Instruction::Label(label) => {
+            vec![Instruction::Label(label.clone())]
+        }
+        tacky::Instruction::Copy { src, dst } => {
+            let src = convert_val(src);
+            let dst = convert_val(dst);
+            vec![Instruction::Mov { src, dst }]
         }
     }
 }
 
-fn convert_binary_op(op: &parser::BinOp) -> BinaryOp {
-    match op {
-        parser::BinOp::Add => BinaryOp::Add,
-        parser::BinOp::Subtract => BinaryOp::Sub,
-        parser::BinOp::Multiply => BinaryOp::Mult,
-        parser::BinOp::Divide | parser::BinOp::Remainder => unreachable!("Special case for division and remainder should be handled in the instruction conversion"),
-        parser::BinOp::BitwiseAnd => BinaryOp::BitAnd,
-        parser::BinOp::BitwiseOr => BinaryOp::BitOr,
-        parser::BinOp::BitwiseXOr => BinaryOp::BitXOr,
-        parser::BinOp::BitwiseLeftShift => BinaryOp::BitShl,
-        parser::BinOp::BitwiseRightShift => BinaryOp::BitSar
+impl From<&BinOp> for BinaryOp {
+    fn from(op: &BinOp) -> Self {
+        match op {
+            BinOp::Add => BinaryOp::Add,
+            BinOp::Subtract => BinaryOp::Sub,
+            BinOp::Multiply => BinaryOp::Mult,
+            BinOp::Divide | BinOp::Remainder => unreachable!("Special case for division and remainder should be handled in the instruction conversion"),
+            BinOp::BitwiseAnd => BinaryOp::BitAnd,
+            BinOp::BitwiseOr => BinaryOp::BitOr,
+            BinOp::BitwiseXOr => BinaryOp::BitXOr,
+            BinOp::BitwiseLeftShift => BinaryOp::BitShl,
+            BinOp::BitwiseRightShift => BinaryOp::BitSar,
+            _ => unimplemented!("Binary operation not implemented: {:?}", op),
+        }
     }
 }
 
@@ -128,6 +198,7 @@ fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
     match op {
         parser::UnaryOp::Negate => UnaryOp::Neg,
         parser::UnaryOp::BitwiseComplement => UnaryOp::Not,
+        _ => unreachable!("Unary operation not implemented: {:?}", op),
     }
 }
 
@@ -211,6 +282,13 @@ pub fn replace_pseudo_registers(program: &mut Program) -> i64 {
                 *dst = stack_mapping.replace_pseudo(dst);
             }
             Instruction::Idiv(src) => {*src = stack_mapping.replace_pseudo(src);}
+            Instruction::Cmp {v1, v2} => {
+                *v1 = stack_mapping.replace_pseudo(v1);
+                *v2 = stack_mapping.replace_pseudo(v2);
+            }
+            Instruction::SetCC {op, ..} => {
+                *op = stack_mapping.replace_pseudo(op);
+            }
             _ => {}
         }
     }
@@ -235,13 +313,21 @@ pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
                 new_ins.push(Instruction::Binary { op: BinaryOp::Mult, src: src.clone(), dst: Operand::Reg(Reg::R11)});
                 new_ins.push(Instruction::Mov {src: Operand::Reg(Reg::R11), dst: Operand::Stack(*dst) });
             }
-            Instruction::Binary {op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr), src: Operand::Stack(src), dst: Operand::Stack(dst)} => { 
+            Instruction::Binary {op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr), src: Operand::Stack(src), dst: Operand::Stack(dst)} => {
                 new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::R10) });
                 new_ins.push(Instruction::Binary { op: op.clone(), src: Operand::Reg(Reg::R10), dst: Operand::Stack(*dst) }); 
             }
             Instruction::Binary {op: op @ (BinaryOp::BitShl | BinaryOp::BitSar), src: Operand::Stack(src), dst} => {
                 new_ins.push(Instruction::Mov { src: Operand::Stack(*src), dst: Operand::Reg(Reg::CX) });
                 new_ins.push(Instruction::Binary { op: op.clone(), src: Operand::Reg(Reg::CX), dst: dst.clone() });
+            }
+            Instruction::Cmp {v1: Operand::Stack(v1), v2: Operand::Stack(v2)} => {
+                new_ins.push(Instruction::Mov { src: Operand::Stack(*v1), dst: Operand::Reg(Reg::R10) });
+                new_ins.push(Instruction::Cmp { v1: Operand::Reg(Reg::R10), v2: Operand::Stack(*v2) });
+            }
+            Instruction::Cmp {v1, v2: Operand::Imm(c)} => {
+                new_ins.push(Instruction::Mov { src: Operand::Imm(*c), dst: Operand::Reg(Reg::R11) });
+                new_ins.push(Instruction::Cmp { v1: v1.clone(), v2: Operand::Reg(Reg::R11) });
             }
             _ => {new_ins.push(ins.clone())}
         }

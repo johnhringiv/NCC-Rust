@@ -2,13 +2,21 @@ use std::collections::VecDeque;
 use std::fmt;
 use crate::lexer::{SpannedToken, Token};
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Identifier(pub String);
+
+impl fmt::Display for Identifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = if cfg!(target_os = "macos") { "L" } else { ".L" };
+        write!(f, "{}{}", prefix, self.0)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum UnaryOp {
     BitwiseComplement,
     Negate,
+    Not,
 }
 
 #[derive(Debug, PartialEq)]
@@ -30,17 +38,30 @@ pub enum BinOp {
     BitwiseXOr,
     BitwiseLeftShift,
     BitwiseRightShift,
+    And,
+    Or,
+    Equal,
+    NotEqual,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
 }
 
 impl BinOp {
     fn precedence(&self) -> u64 {
+        //https://en.cppreference.com/w/c/language/operator_precedence.html
         match self {
-            BinOp::Subtract | BinOp::Add => 45,
             BinOp::Multiply | BinOp::Divide | BinOp::Remainder => 50,
+            BinOp::Subtract | BinOp::Add => 45,
             BinOp::BitwiseLeftShift | BinOp::BitwiseRightShift => 44,
-            BinOp::BitwiseAnd => 43,
-            BinOp::BitwiseXOr => 42,
-            BinOp::BitwiseOr => 41,
+            BinOp::LessThan | BinOp::GreaterThan | BinOp::LessOrEqual | BinOp::GreaterOrEqual => 35,
+            BinOp::Equal | BinOp::NotEqual => 30,
+            BinOp::BitwiseAnd => 29,
+            BinOp::BitwiseXOr => 28,
+            BinOp::BitwiseOr => 27,
+            BinOp::And => 10,
+            BinOp::Or => 5,
         }
     }
 }
@@ -82,12 +103,6 @@ impl SyntaxError {
         let (found_str, loc_str) = Self::get_found_strs(found);
         SyntaxError { message: format!(r#"expected an expression <int> | <unop> <exp> | (<exp>), found: {:?}{}"#, found_str, loc_str) }
     }
-    
-    pub fn new_multiple(expected: Vec<Token>, found: Option<SpannedToken>) -> Self {
-        let expected_str = expected.iter().map(|t| t.variant_str()).collect::<Vec<_>>().join(", ");
-        let (found_str, loc_str) = Self::get_found_strs(found);
-        SyntaxError { message: format!(r#"expected: [{}], found: {:?}{}"#, expected_str, found_str, loc_str) }
-    }
 }
 
 
@@ -124,7 +139,7 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                     tokens.pop_front();
                     Ok(Expr::Constant(*value))
                 },
-                Token::BitwiseComplement | Token::Negation => {
+                Token::BitwiseComplement | Token::Negation | Token::LogicalNot => {
                     let operator = parse_unop(tokens)?;
                     let inner_exp = parse_factor(tokens)?;
                     Ok(Expr::Unary(operator, Box::from(inner_exp)))
@@ -169,6 +184,14 @@ fn parse_binop(next_token: &Option<&SpannedToken>) -> Option<BinOp> {
                 Token::BitwiseXOr => Some(BinOp::BitwiseXOr),
                 Token::BitwiseLeftShift => Some(BinOp::BitwiseLeftShift),
                 Token::BitwiseRightShift => Some(BinOp::BitwiseRightShift),
+                Token::LessThan => Some(BinOp::LessThan),
+                Token::GreaterThan => Some(BinOp::GreaterThan),
+                Token::LessThanOrEqual => Some(BinOp::LessOrEqual),
+                Token::GreaterThanOrEqual => Some(BinOp::GreaterOrEqual),
+                Token::Equal => Some(BinOp::Equal),
+                Token::NotEqual => Some(BinOp::NotEqual),
+                Token::LogicalAnd => Some(BinOp::And),
+                Token::LogicalOr => Some(BinOp::Or),
                 _ => None
             }
         }
@@ -181,7 +204,8 @@ fn parse_unop(tokens: &mut VecDeque<SpannedToken>) -> Result<UnaryOp, SyntaxErro
     match &spanned.token {
         Token::BitwiseComplement => Ok(UnaryOp::BitwiseComplement),
         Token::Negation => Ok(UnaryOp::Negate),
-        _ => Err(SyntaxError::new_multiple(vec![Token::BitwiseComplement, Token::Negation], Some(spanned.clone()))) // unreachable
+        Token::LogicalNot => Ok(UnaryOp::Not),
+        _ => unreachable!("parse_unop called with non-unary operator token: {:?}", spanned.token)
     }
 }
 
