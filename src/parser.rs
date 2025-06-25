@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use std::fmt;
 use crate::lexer::{SpannedToken, Token};
-use crate::pretty::{ItfDisplay, simple_display, indent_line};
+use crate::pretty::{ItfDisplay, simple_node, Node};
+use colored::Colorize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Identifier(pub String);
@@ -13,8 +14,8 @@ impl fmt::Display for Identifier {
     }
 }
 impl ItfDisplay for Identifier {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
-        indent_line(f, indent, &self.0);
+    fn itf_node(&self) -> Node {
+        Node::leaf(format!("Identifier(\"{}\")", self.0).green().to_string())
     }
 }
 
@@ -339,55 +340,37 @@ mod tests {
         run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c");
     }
 }
-simple_display!(UnaryOp);
-simple_display!(BinOp);
-
+simple_node!(UnaryOp);
+simple_node!(BinOp);
 impl ItfDisplay for Expr {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
+    fn itf_node(&self) -> Node {
         match self {
-            Expr::Constant(c) => {
-                indent_line(f, indent, "Constant");
-                c.itf_fmt(f, indent + 2);
-            }
-            Expr::Unary(op, e) => {
-                indent_line(f, indent, "Unary");
-                op.itf_fmt(f, indent + 2);
-                e.itf_fmt(f, indent + 2);
-            }
-            Expr::Binary(op, e1, e2) => {
-                indent_line(f, indent, "Binary");
-                op.itf_fmt(f, indent + 2);
-                e1.itf_fmt(f, indent + 2);
-                e2.itf_fmt(f, indent + 2);
-            }
+            Expr::Constant(c) => Node::leaf(format!("Constant({})", c).yellow().to_string()),
+            Expr::Unary(op, e) => Node::branch(format!("Unary ({:?})", op).cyan().to_string(), vec![e.itf_node()]),
+            Expr::Binary(op, e1, e2) => Node::branch(
+                format!("Binary ({:?})", op).cyan().to_string(),
+                vec![e1.itf_node(), e2.itf_node()],
+            ),
         }
     }
 }
-
 impl ItfDisplay for Stmt {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
+    fn itf_node(&self) -> Node {
         match self {
-            Stmt::Return(expr) => {
-                indent_line(f, indent, "Return");
-                expr.itf_fmt(f, indent + 2);
-            }
+            Stmt::Return(expr) => Node::branch("Return".cyan().to_string(), vec![expr.itf_node()]),
         }
     }
 }
-
 impl ItfDisplay for Function {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
-        indent_line(f, indent, "Function");
-        indent_line(f, indent + 2, "name");
-        self.name.itf_fmt(f, indent + 4);
-        indent_line(f, indent + 2, "body");
-        self.body.itf_fmt(f, indent + 4);
+    fn itf_node(&self) -> Node {
+        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
+        let mut body_node = self.body.itf_node();
+        body_node.text = format!("body: {}", body_node.text);
+        Node::branch("Function".cyan().to_string(), vec![name_line, body_node])
     }
 }
-
 impl ItfDisplay for Program {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
-        indent_line(f, indent, "Program");
-        self.function.itf_fmt(f, indent + 2);
+    fn itf_node(&self) -> Node {
+        Node::branch("Program".cyan().to_string(), vec![self.function.itf_node()])
     }
 }

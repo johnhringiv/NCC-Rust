@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use crate::parser;
 use crate::parser::{Identifier, UnaryOp};
-use crate::pretty::{ItfDisplay, simple_display, indent_line};
+use crate::pretty::{ItfDisplay, simple_node, Node};
+use colored::Colorize;
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -188,85 +189,58 @@ pub fn tackify_program(program: &parser::Program) -> Program {
     
     Program { function }
 }
-simple_display!(BinOp);
+simple_node!(BinOp);
 
 impl ItfDisplay for Val {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
+    fn itf_node(&self) -> Node {
         match self {
-            Val::Constant(c) => {
-                indent_line(f, indent, "Const");
-                c.itf_fmt(f, indent + 2);
-            }
-            Val::Var(s) => {
-                indent_line(f, indent, "Var");
-                s.itf_fmt(f, indent + 2);
-            }
+            Val::Constant(c) => Node::branch("Const".cyan().to_string(), vec![c.itf_node()]),
+            Val::Var(s) => Node::branch("Var".cyan().to_string(), vec![s.itf_node()]),
         }
     }
 }
 
 impl ItfDisplay for Instruction {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
+    fn itf_node(&self) -> Node {
         match self {
-            Instruction::Return(v) => {
-                indent_line(f, indent, "Return");
-                v.itf_fmt(f, indent + 2);
-            }
-            Instruction::Unary { op, src, dst } => {
-                indent_line(f, indent, "Unary");
-                op.itf_fmt(f, indent + 2);
-                src.itf_fmt(f, indent + 2);
-                dst.itf_fmt(f, indent + 2);
-            }
-            Instruction::Binary { op, src1, src2, dst } => {
-                indent_line(f, indent, "Binary");
-                op.itf_fmt(f, indent + 2);
-                src1.itf_fmt(f, indent + 2);
-                src2.itf_fmt(f, indent + 2);
-                dst.itf_fmt(f, indent + 2);
-            }
-            Instruction::Copy { src, dst } => {
-                indent_line(f, indent, "Copy");
-                src.itf_fmt(f, indent + 2);
-                dst.itf_fmt(f, indent + 2);
-            }
-            Instruction::Jump { target } => {
-                indent_line(f, indent, "Jump");
-                target.itf_fmt(f, indent + 2);
-            }
-            Instruction::JumpIfZero { condition, target } => {
-                indent_line(f, indent, "JumpIfZero");
-                condition.itf_fmt(f, indent + 2);
-                target.itf_fmt(f, indent + 2);
-            }
-            Instruction::JumpIfNotZero { condition, target } => {
-                indent_line(f, indent, "JumpIfNotZero");
-                condition.itf_fmt(f, indent + 2);
-                target.itf_fmt(f, indent + 2);
-            }
-            Instruction::Label(lbl) => {
-                indent_line(f, indent, "Label");
-                lbl.itf_fmt(f, indent + 2);
-            }
+            Instruction::Return(v) => Node::branch("Return".cyan().to_string(), vec![v.itf_node()]),
+            Instruction::Unary { op, src, dst } => Node::branch(
+                "Unary".cyan().to_string(),
+                vec![op.itf_node(), src.itf_node(), dst.itf_node()],
+            ),
+            Instruction::Binary { op, src1, src2, dst } => Node::branch(
+                "Binary".cyan().to_string(),
+                vec![op.itf_node(), src1.itf_node(), src2.itf_node(), dst.itf_node()],
+            ),
+            Instruction::Copy { src, dst } => Node::branch(
+                "Copy".cyan().to_string(),
+                vec![src.itf_node(), dst.itf_node()],
+            ),
+            Instruction::Jump { target } => Node::branch("Jump".cyan().to_string(), vec![target.itf_node()]),
+            Instruction::JumpIfZero { condition, target } => Node::branch(
+                "JumpIfZero".cyan().to_string(),
+                vec![condition.itf_node(), target.itf_node()],
+            ),
+            Instruction::JumpIfNotZero { condition, target } => Node::branch(
+                "JumpIfNotZero".cyan().to_string(),
+                vec![condition.itf_node(), target.itf_node()],
+            ),
+            Instruction::Label(lbl) => Node::branch("Label".cyan().to_string(), vec![lbl.itf_node()]),
         }
     }
 }
 
 impl ItfDisplay for FunctionDefinition {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
-        indent_line(f, indent, "FunctionDefinition");
-        indent_line(f, indent + 2, "name");
-        self.name.itf_fmt(f, indent + 4);
-        indent_line(f, indent + 2, "body");
-        for ins in &self.body {
-            ins.itf_fmt(f, indent + 4);
-        }
+    fn itf_node(&self) -> Node {
+        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
+        let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
+        let body_node = Node::branch("body".cyan().to_string(), body_children);
+        Node::branch("FunctionDefinition".cyan().to_string(), vec![name_line, body_node])
     }
 }
 
 impl ItfDisplay for Program {
-    fn itf_fmt(&self, f: &mut String, indent: usize) {
-        indent_line(f, indent, "Program");
-        self.function.itf_fmt(f, indent + 2);
+    fn itf_node(&self) -> Node {
+        Node::branch("Program".cyan().to_string(), vec![self.function.itf_node()])
     }
 }
