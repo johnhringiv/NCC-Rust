@@ -2,6 +2,7 @@ use crate::tacky;
 use crate::parser;
 use crate::parser::Identifier;
 use crate::tacky::{BinOp};
+use crate::pretty::{ItfDisplay, simple_display, indent_line};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {
@@ -351,5 +352,107 @@ mod tests {
         
         let expected = Program {function : FunctionDefinition { name: "main".to_string(), body: vec![Instruction::AllocateStack(0), Instruction::Mov {src: Operand::Imm(100), dst: Operand::Reg(Reg::AX)}] }};
         assert_eq!(generate(&tacky), expected);
+    }
+}
+simple_display!(Reg);
+simple_display!(UnaryOp);
+simple_display!(BinaryOp);
+simple_display!(CondCode);
+
+impl ItfDisplay for Operand {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        match self {
+            Operand::Imm(i) => {
+                indent_line(f, indent, "Imm");
+                i.itf_fmt(f, indent + 2);
+            }
+            Operand::Reg(r) => {
+                indent_line(f, indent, "Reg");
+                r.itf_fmt(f, indent + 2);
+            }
+            Operand::Pseudo(s) => {
+                indent_line(f, indent, "Pseudo");
+                s.itf_fmt(f, indent + 2);
+            }
+            Operand::Stack(o) => {
+                indent_line(f, indent, "Stack");
+                o.itf_fmt(f, indent + 2);
+            }
+        }
+    }
+}
+
+impl ItfDisplay for Instruction {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        match self {
+            Instruction::Mov { src, dst } => {
+                indent_line(f, indent, "Mov");
+                src.itf_fmt(f, indent + 2);
+                dst.itf_fmt(f, indent + 2);
+            }
+            Instruction::Unary { op, dst } => {
+                indent_line(f, indent, "Unary");
+                op.itf_fmt(f, indent + 2);
+                dst.itf_fmt(f, indent + 2);
+            }
+            Instruction::Binary { op, src, dst } => {
+                indent_line(f, indent, "Binary");
+                op.itf_fmt(f, indent + 2);
+                src.itf_fmt(f, indent + 2);
+                dst.itf_fmt(f, indent + 2);
+            }
+            Instruction::Cmp { v1, v2 } => {
+                indent_line(f, indent, "Cmp");
+                v1.itf_fmt(f, indent + 2);
+                v2.itf_fmt(f, indent + 2);
+            }
+            Instruction::Idiv(op) => {
+                indent_line(f, indent, "Idiv");
+                op.itf_fmt(f, indent + 2);
+            }
+            Instruction::Cdq => indent_line(f, indent, "Cdq"),
+            Instruction::Jmp(label) => {
+                indent_line(f, indent, "Jmp");
+                label.itf_fmt(f, indent + 2);
+            }
+            Instruction::JmpCC { code, label } => {
+                indent_line(f, indent, "JmpCC");
+                code.itf_fmt(f, indent + 2);
+                label.itf_fmt(f, indent + 2);
+            }
+            Instruction::SetCC { code, op } => {
+                indent_line(f, indent, "SetCC");
+                code.itf_fmt(f, indent + 2);
+                op.itf_fmt(f, indent + 2);
+            }
+            Instruction::Label(l) => {
+                indent_line(f, indent, "Label");
+                l.itf_fmt(f, indent + 2);
+            }
+            Instruction::AllocateStack(off) => {
+                indent_line(f, indent, "AllocateStack");
+                off.itf_fmt(f, indent + 2);
+            }
+            Instruction::Ret => indent_line(f, indent, "Ret"),
+        }
+    }
+}
+
+impl ItfDisplay for FunctionDefinition {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        indent_line(f, indent, "FunctionDefinition");
+        indent_line(f, indent + 2, "name");
+        self.name.itf_fmt(f, indent + 4);
+        indent_line(f, indent + 2, "body");
+        for ins in &self.body {
+            ins.itf_fmt(f, indent + 4);
+        }
+    }
+}
+
+impl ItfDisplay for Program {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        indent_line(f, indent, "Program");
+        self.function.itf_fmt(f, indent + 2);
     }
 }

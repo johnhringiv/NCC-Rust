@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use crate::lexer::{SpannedToken, Token};
+use crate::pretty::{ItfDisplay, simple_display, indent_line};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Identifier(pub String);
@@ -11,6 +12,12 @@ impl fmt::Display for Identifier {
         write!(f, "{}{}", prefix, self.0)
     }
 }
+impl ItfDisplay for Identifier {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        indent_line(f, indent, &self.0);
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum UnaryOp {
@@ -330,5 +337,57 @@ mod tests {
     #[test]
     fn test_unclosed_paren() {
         run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c");
+    }
+}
+simple_display!(UnaryOp);
+simple_display!(BinOp);
+
+impl ItfDisplay for Expr {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        match self {
+            Expr::Constant(c) => {
+                indent_line(f, indent, "Constant");
+                c.itf_fmt(f, indent + 2);
+            }
+            Expr::Unary(op, e) => {
+                indent_line(f, indent, "Unary");
+                op.itf_fmt(f, indent + 2);
+                e.itf_fmt(f, indent + 2);
+            }
+            Expr::Binary(op, e1, e2) => {
+                indent_line(f, indent, "Binary");
+                op.itf_fmt(f, indent + 2);
+                e1.itf_fmt(f, indent + 2);
+                e2.itf_fmt(f, indent + 2);
+            }
+        }
+    }
+}
+
+impl ItfDisplay for Stmt {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        match self {
+            Stmt::Return(expr) => {
+                indent_line(f, indent, "Return");
+                expr.itf_fmt(f, indent + 2);
+            }
+        }
+    }
+}
+
+impl ItfDisplay for Function {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        indent_line(f, indent, "Function");
+        indent_line(f, indent + 2, "name");
+        self.name.itf_fmt(f, indent + 4);
+        indent_line(f, indent + 2, "body");
+        self.body.itf_fmt(f, indent + 4);
+    }
+}
+
+impl ItfDisplay for Program {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        indent_line(f, indent, "Program");
+        self.function.itf_fmt(f, indent + 2);
     }
 }

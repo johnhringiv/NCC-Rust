@@ -3,10 +3,12 @@ mod parser;
 mod codegen;
 mod emit;
 mod tacky;
+mod pretty;
 
 use std::fs;
 use std::path::Path;
 use clap::{ArgGroup, Parser};
+use crate::pretty::ItfDisplay;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -70,20 +72,21 @@ fn main() {
     }
 
     if args.parse {
-        println!("Processed ast: {:?}", ast.unwrap());
+        let ast_val = ast.unwrap();
+        println!("{}", ast_val.itf_string());
         std::process::exit(0);
     }
     
     let tacky_ast = tacky::tackify_program(&ast.unwrap());
     
     if args.tacky {
-        println!("Tacky IR: {:?}", tacky_ast);
+        println!("{}", tacky_ast.itf_string());
         std::process::exit(0);
     }
 
     let code_ast = codegen::generate(&tacky_ast);
     if args.codegen {
-        println!("Generated code as: {:?}", code_ast);
+        println!("{}", code_ast.itf_string());
         std::process::exit(0);
     }
     

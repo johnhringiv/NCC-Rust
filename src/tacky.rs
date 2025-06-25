@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use crate::parser;
 use crate::parser::{Identifier, UnaryOp};
+use crate::pretty::{ItfDisplay, simple_display, indent_line};
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -186,4 +187,86 @@ pub fn tackify_program(program: &parser::Program) -> Program {
     let function = tackify_function(&program.function, &mut name_generator);
     
     Program { function }
+}
+simple_display!(BinOp);
+
+impl ItfDisplay for Val {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        match self {
+            Val::Constant(c) => {
+                indent_line(f, indent, "Const");
+                c.itf_fmt(f, indent + 2);
+            }
+            Val::Var(s) => {
+                indent_line(f, indent, "Var");
+                s.itf_fmt(f, indent + 2);
+            }
+        }
+    }
+}
+
+impl ItfDisplay for Instruction {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        match self {
+            Instruction::Return(v) => {
+                indent_line(f, indent, "Return");
+                v.itf_fmt(f, indent + 2);
+            }
+            Instruction::Unary { op, src, dst } => {
+                indent_line(f, indent, "Unary");
+                op.itf_fmt(f, indent + 2);
+                src.itf_fmt(f, indent + 2);
+                dst.itf_fmt(f, indent + 2);
+            }
+            Instruction::Binary { op, src1, src2, dst } => {
+                indent_line(f, indent, "Binary");
+                op.itf_fmt(f, indent + 2);
+                src1.itf_fmt(f, indent + 2);
+                src2.itf_fmt(f, indent + 2);
+                dst.itf_fmt(f, indent + 2);
+            }
+            Instruction::Copy { src, dst } => {
+                indent_line(f, indent, "Copy");
+                src.itf_fmt(f, indent + 2);
+                dst.itf_fmt(f, indent + 2);
+            }
+            Instruction::Jump { target } => {
+                indent_line(f, indent, "Jump");
+                target.itf_fmt(f, indent + 2);
+            }
+            Instruction::JumpIfZero { condition, target } => {
+                indent_line(f, indent, "JumpIfZero");
+                condition.itf_fmt(f, indent + 2);
+                target.itf_fmt(f, indent + 2);
+            }
+            Instruction::JumpIfNotZero { condition, target } => {
+                indent_line(f, indent, "JumpIfNotZero");
+                condition.itf_fmt(f, indent + 2);
+                target.itf_fmt(f, indent + 2);
+            }
+            Instruction::Label(lbl) => {
+                indent_line(f, indent, "Label");
+                lbl.itf_fmt(f, indent + 2);
+            }
+        }
+    }
+}
+
+impl ItfDisplay for FunctionDefinition {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        indent_line(f, indent, "FunctionDefinition");
+        indent_line(f, indent + 2, "name");
+        self.name.itf_fmt(f, indent + 4);
+        indent_line(f, indent + 2, "body");
+        for ins in &self.body {
+            ins.itf_fmt(f, indent + 4);
+        }
+    }
+}
+
+impl ItfDisplay for Program {
+    fn itf_fmt(&self, f: &mut String, indent: usize) {
+        indent_line(f, indent, "Program");
+        self.function.itf_fmt(f, indent + 2);
+    }
 }
