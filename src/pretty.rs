@@ -17,11 +17,13 @@ impl Node {
     }
 
     fn fmt_impl(&self, f: &mut fmt::Formatter<'_>, prefix: &str, last: bool) -> fmt::Result {
-        if !prefix.is_empty() {
+        if prefix.is_empty() && last {
+            writeln!(f, "{}", self.text)?;
+        } else {
             write!(f, "{}{} ", prefix, if last { "└──" } else { "├──" })?;
+            writeln!(f, "{}", self.text)?;
         }
-        writeln!(f, "{}", self.text)?;
-        let new_prefix = if prefix.is_empty() {
+        let new_prefix = if prefix.is_empty() && last {
             String::new()
         } else if last {
             format!("{}    ", prefix)
