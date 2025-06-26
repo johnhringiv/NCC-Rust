@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use crate::lexer::{SpannedToken, Token};
 use crate::pretty::{ItfDisplay, simple_node, Node};
-use colored::Colorize;
+use crate::color::{cyan, green, yellow};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Identifier(pub String);
@@ -15,7 +15,7 @@ impl fmt::Display for Identifier {
 }
 impl ItfDisplay for Identifier {
     fn itf_node(&self) -> Node {
-        Node::leaf(format!("Identifier(\"{}\")", self.0).green().to_string())
+        Node::leaf(green(format!("Identifier(\"{}\")", self.0)))
     }
 }
 
@@ -345,10 +345,10 @@ simple_node!(BinOp);
 impl ItfDisplay for Expr {
     fn itf_node(&self) -> Node {
         match self {
-            Expr::Constant(c) => Node::leaf(format!("Constant({})", c).yellow().to_string()),
-            Expr::Unary(op, e) => Node::branch(format!("Unary ({:?})", op).cyan().to_string(), vec![e.itf_node()]),
+            Expr::Constant(c) => Node::leaf(yellow(format!("Constant({})", c))),
+            Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({:?})", op)), vec![e.itf_node()]),
             Expr::Binary(op, e1, e2) => Node::branch(
-                format!("Binary ({:?})", op).cyan().to_string(),
+                cyan(format!("Binary ({:?})", op)),
                 vec![e1.itf_node(), e2.itf_node()],
             ),
         }
@@ -357,7 +357,7 @@ impl ItfDisplay for Expr {
 impl ItfDisplay for Stmt {
     fn itf_node(&self) -> Node {
         match self {
-            Stmt::Return(expr) => Node::branch("Return".cyan().to_string(), vec![expr.itf_node()]),
+            Stmt::Return(expr) => Node::branch(cyan("Return"), vec![expr.itf_node()]),
         }
     }
 }
@@ -366,11 +366,11 @@ impl ItfDisplay for Function {
         let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
         let mut body_node = self.body.itf_node();
         body_node.text = format!("body: {}", body_node.text);
-        Node::branch("Function".cyan().to_string(), vec![name_line, body_node])
+        Node::branch(cyan("Function"), vec![name_line, body_node])
     }
 }
 impl ItfDisplay for Program {
     fn itf_node(&self) -> Node {
-        Node::branch("Program".cyan().to_string(), vec![self.function.itf_node()])
+        Node::branch(cyan("Program"), vec![self.function.itf_node()])
     }
 }

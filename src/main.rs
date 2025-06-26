@@ -4,6 +4,7 @@ mod codegen;
 mod emit;
 mod tacky;
 mod pretty;
+mod color;
 
 use std::fs;
 use std::path::Path;

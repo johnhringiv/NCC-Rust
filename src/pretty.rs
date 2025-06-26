@@ -1,4 +1,4 @@
-use colored::Colorize;
+use crate::color::{green, magenta};
 use std::fmt;
 
 #[derive(Clone)]
@@ -16,14 +16,14 @@ impl Node {
         Node { text: text.into(), children }
     }
 
-    fn fmt_impl(&self, f: &mut fmt::Formatter<'_>, prefix: &str, last: bool) -> fmt::Result {
-        if prefix.is_empty() && last {
+    fn fmt_impl(&self, f: &mut fmt::Formatter<'_>, prefix: &str, last: bool, root: bool) -> fmt::Result {
+        if root {
             writeln!(f, "{}", self.text)?;
         } else {
             write!(f, "{}{} ", prefix, if last { "└──" } else { "├──" })?;
             writeln!(f, "{}", self.text)?;
         }
-        let new_prefix = if prefix.is_empty() && last {
+        let new_prefix = if root {
             String::new()
         } else if last {
             format!("{}    ", prefix)
@@ -31,7 +31,7 @@ impl Node {
             format!("{}│   ", prefix)
         };
         for (i, child) in self.children.iter().enumerate() {
-            child.fmt_impl(f, &new_prefix, i + 1 == self.children.len())?;
+            child.fmt_impl(f, &new_prefix, i + 1 == self.children.len(), false)?;
         }
         Ok(())
     }
@@ -39,7 +39,7 @@ impl Node {
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_impl(f, "", true)
+        self.fmt_impl(f, "", true, true)
     }
 }
 
@@ -54,7 +54,7 @@ macro_rules! simple_node {
     ($ty:ty) => {
         impl ItfDisplay for $ty {
             fn itf_node(&self) -> Node {
-                Node::leaf(format!("{:?}", self).cyan().to_string())
+                Node::leaf(crate::color::cyan(format!("{:?}", self)))
             }
         }
     };
@@ -64,18 +64,18 @@ pub(crate) use simple_node;
 
 impl ItfDisplay for String {
     fn itf_node(&self) -> Node {
-        Node::leaf(self.green().to_string())
+        Node::leaf(green(self))
     }
 }
 
 impl ItfDisplay for &str {
     fn itf_node(&self) -> Node {
-        Node::leaf(self.green().to_string())
+        Node::leaf(green(self))
     }
 }
 
 impl ItfDisplay for i64 {
     fn itf_node(&self) -> Node {
-        Node::leaf(self.to_string().magenta().to_string())
+        Node::leaf(magenta(self))
     }
 }
