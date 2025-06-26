@@ -2,8 +2,7 @@ use crate::tacky;
 use crate::parser;
 use crate::parser::Identifier;
 use crate::tacky::BinOp;
-use crate::pretty::{ItfDisplay, simple_node, Node};
-use crate::color::cyan;
+use crate::pretty::{ItfDisplay, simple_node, Node, cyan};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {

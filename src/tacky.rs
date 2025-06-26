@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use crate::parser;
 use crate::parser::{Identifier, UnaryOp};
-use crate::pretty::{ItfDisplay, simple_node, Node};
-use crate::color::cyan;
+use crate::pretty::{ItfDisplay, simple_node, Node, cyan};
 
 #[derive(Clone, Debug)]
 pub enum Val {

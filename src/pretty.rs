@@ -1,5 +1,21 @@
-use crate::color::{green, magenta};
 use std::fmt;
+
+pub fn cyan<T: std::fmt::Display>(text: T) -> String {
+    format!("\x1b[36m{}\x1b[0m", text)
+}
+
+pub fn green<T: std::fmt::Display>(text: T) -> String {
+    format!("\x1b[32m{}\x1b[0m", text)
+}
+
+pub fn magenta<T: std::fmt::Display>(text: T) -> String {
+    format!("\x1b[35m{}\x1b[0m", text)
+}
+
+pub fn yellow<T: std::fmt::Display>(text: T) -> String {
+    format!("\x1b[33m{}\x1b[0m", text)
+}
+
 
 #[derive(Clone)]
 pub struct Node {
@@ -54,7 +70,7 @@ macro_rules! simple_node {
     ($ty:ty) => {
         impl ItfDisplay for $ty {
             fn itf_node(&self) -> Node {
-                Node::leaf(crate::color::cyan(format!("{:?}", self)))
+                Node::leaf(cyan(format!("{:?}", self)))
             }
         }
     };

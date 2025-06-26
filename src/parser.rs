@@ -1,8 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use crate::lexer::{SpannedToken, Token};
-use crate::pretty::{ItfDisplay, simple_node, Node};
-use crate::color::{cyan, green, yellow};
+use crate::pretty::{ItfDisplay, simple_node, Node, cyan, green, yellow};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Identifier(pub String);

@@ -4,7 +4,6 @@ mod codegen;
 mod emit;
 mod tacky;
 mod pretty;
-mod color;
 
 use std::fs;
 use std::path::Path;
@@ -74,6 +73,7 @@ fn main() {
 
     if args.parse {
         let ast_val = ast.unwrap();
+        println!("{:?}", ast_val);
         println!("{}", ast_val.itf_string());
         std::process::exit(0);
     }
@@ -81,6 +81,7 @@ fn main() {
     let tacky_ast = tacky::tackify_program(&ast.unwrap());
     
     if args.tacky {
+        println!("{:?}", tacky_ast);
         println!("{}", tacky_ast.itf_string());
         std::process::exit(0);
     }
