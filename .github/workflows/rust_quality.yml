@@ -18,8 +18,10 @@ jobs:
 
       - uses: actions-rs/toolchain@v1
         with:
-          components: rustfmt, clippy
-          override: false
+          profile: minimal           # faster install
+          toolchain: "1.87.0"
+          components: clippy, rustfmt
+          override: true
 
       # Cache crates + build artefacts + helper binaries
       - name: Cache cargo, target and helper bins
@@ -32,7 +34,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v1
+            ${{ runner.os }}-cargo-
 
       # Install helpers only if cache missed them
       - name: Install cargo-sort
