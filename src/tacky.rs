@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use crate::parser;
 use crate::parser::{Identifier, UnaryOp};
+use crate::pretty::{ItfDisplay, simple_node, Node, cyan};
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -186,4 +187,59 @@ pub fn tackify_program(program: &parser::Program) -> Program {
     let function = tackify_function(&program.function, &mut name_generator);
     
     Program { function }
+}
+simple_node!(BinOp);
+
+impl ItfDisplay for Val {
+    fn itf_node(&self) -> Node {
+        match self {
+            Val::Constant(c) => Node::branch(cyan("Const"), vec![c.itf_node()]),
+            Val::Var(s) => Node::branch(cyan("Var"), vec![s.itf_node()]),
+        }
+    }
+}
+
+impl ItfDisplay for Instruction {
+    fn itf_node(&self) -> Node {
+        match self {
+            Instruction::Return(v) => Node::branch(cyan("Return"), vec![v.itf_node()]),
+            Instruction::Unary { op, src, dst } => Node::branch(
+                cyan("Unary"),
+                vec![op.itf_node(), src.itf_node(), dst.itf_node()],
+            ),
+            Instruction::Binary { op, src1, src2, dst } => Node::branch(
+                cyan("Binary"),
+                vec![op.itf_node(), src1.itf_node(), src2.itf_node(), dst.itf_node()],
+            ),
+            Instruction::Copy { src, dst } => Node::branch(
+                cyan("Copy"),
+                vec![src.itf_node(), dst.itf_node()],
+            ),
+            Instruction::Jump { target } => Node::branch(cyan("Jump"), vec![target.itf_node()]),
+            Instruction::JumpIfZero { condition, target } => Node::branch(
+                cyan("JumpIfZero"),
+                vec![condition.itf_node(), target.itf_node()],
+            ),
+            Instruction::JumpIfNotZero { condition, target } => Node::branch(
+                cyan("JumpIfNotZero"),
+                vec![condition.itf_node(), target.itf_node()],
+            ),
+            Instruction::Label(lbl) => Node::branch(cyan("Label"), vec![lbl.itf_node()]),
+        }
+    }
+}
+
+impl ItfDisplay for FunctionDefinition {
+    fn itf_node(&self) -> Node {
+        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
+        let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
+        let body_node = Node::branch(cyan("body"), body_children);
+        Node::branch(cyan("FunctionDefinition"), vec![name_line, body_node])
+    }
+}
+
+impl ItfDisplay for Program {
+    fn itf_node(&self) -> Node {
+        Node::branch(cyan("Program"), vec![self.function.itf_node()])
+    }
 }
