@@ -12,12 +12,6 @@ impl fmt::Display for Identifier {
         write!(f, "{}{}", prefix, self.0)
     }
 }
-impl ItfDisplay for Identifier {
-    fn itf_node(&self) -> Node {
-        Node::leaf(green(format!("Identifier(\"{}\")", self.0)))
-    }
-}
-
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum UnaryOp {
@@ -253,6 +247,48 @@ pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, Syn
     }
 }
 
+// AST pretty printing
+simple_node!(UnaryOp);
+simple_node!(BinOp);
+
+impl ItfDisplay for Identifier {
+    fn itf_node(&self) -> Node {
+        Node::leaf(green(format!("Identifier(\"{}\")", self.0)))
+    }
+}
+impl ItfDisplay for Expr {
+    fn itf_node(&self) -> Node {
+        match self {
+            Expr::Constant(c) => Node::leaf(yellow(format!("Constant({})", c))),
+            Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({:?})", op)), vec![e.itf_node()]),
+            Expr::Binary(op, e1, e2) => Node::branch(
+                cyan(format!("Binary ({:?})", op)),
+                vec![e1.itf_node(), e2.itf_node()],
+            ),
+        }
+    }
+}
+impl ItfDisplay for Stmt {
+    fn itf_node(&self) -> Node {
+        match self {
+            Stmt::Return(expr) => Node::branch(cyan("Return"), vec![expr.itf_node()]),
+        }
+    }
+}
+impl ItfDisplay for Function {
+    fn itf_node(&self) -> Node {
+        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
+        let mut body_node = self.body.itf_node();
+        body_node.text = format!("body: {}", body_node.text);
+        Node::branch(cyan("Function"), vec![name_line, body_node])
+    }
+}
+impl ItfDisplay for Program {
+    fn itf_node(&self) -> Node {
+        Node::branch(cyan("Program"), vec![self.function.itf_node()])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::lexer::tokenizer;
@@ -337,39 +373,5 @@ mod tests {
     #[test]
     fn test_unclosed_paren() {
         run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c");
-    }
-}
-simple_node!(UnaryOp);
-simple_node!(BinOp);
-impl ItfDisplay for Expr {
-    fn itf_node(&self) -> Node {
-        match self {
-            Expr::Constant(c) => Node::leaf(yellow(format!("Constant({})", c))),
-            Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({:?})", op)), vec![e.itf_node()]),
-            Expr::Binary(op, e1, e2) => Node::branch(
-                cyan(format!("Binary ({:?})", op)),
-                vec![e1.itf_node(), e2.itf_node()],
-            ),
-        }
-    }
-}
-impl ItfDisplay for Stmt {
-    fn itf_node(&self) -> Node {
-        match self {
-            Stmt::Return(expr) => Node::branch(cyan("Return"), vec![expr.itf_node()]),
-        }
-    }
-}
-impl ItfDisplay for Function {
-    fn itf_node(&self) -> Node {
-        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
-        let mut body_node = self.body.itf_node();
-        body_node.text = format!("body: {}", body_node.text);
-        Node::branch(cyan("Function"), vec![name_line, body_node])
-    }
-}
-impl ItfDisplay for Program {
-    fn itf_node(&self) -> Node {
-        Node::branch(cyan("Program"), vec![self.function.itf_node()])
     }
 }
