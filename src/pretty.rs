@@ -37,13 +37,7 @@ impl Node {
         }
     }
 
-    fn fmt_impl(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        prefix: &str,
-        last: bool,
-        root: bool,
-    ) -> fmt::Result {
+    fn fmt_impl(&self, f: &mut fmt::Formatter<'_>, prefix: &str, last: bool, root: bool) -> fmt::Result {
         if root {
             writeln!(f, "{}", self.text)?;
         } else {

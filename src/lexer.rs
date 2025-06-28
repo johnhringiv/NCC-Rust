@@ -387,36 +387,26 @@ pub(crate) mod tests {
 
     #[test]
     fn test_lexer_at_sign() {
-        run_lexer_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/at_sign.c",
-        )
+        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/at_sign.c")
     }
 
     #[test]
     fn test_lexer_backslash() {
-        run_lexer_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backslash.c",
-        )
+        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backslash.c")
     }
 
     #[test]
     fn test_lexer_backtick() {
-        run_lexer_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backtick.c",
-        )
+        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backtick.c")
     }
 
     #[test]
     fn test_lexer_invalid_identifier() {
-        run_lexer_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier.c",
-        )
+        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier.c")
     }
 
     #[test]
     fn test_lexer_invalid_identifier2() {
-        run_lexer_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier_2.c",
-        )
+        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier_2.c")
     }
 }

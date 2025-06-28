@@ -67,11 +67,7 @@ fn emit_instruction(ins: &codegen::Instruction) -> String {
     let mut output = String::new();
     match ins {
         codegen::Instruction::Mov { src, dst } => {
-            output.push_str(&format!(
-                "movl {}, {}",
-                emit_operand_dw(src),
-                emit_operand_dw(dst)
-            ));
+            output.push_str(&format!("movl {}, {}", emit_operand_dw(src), emit_operand_dw(dst)));
         }
         codegen::Instruction::Ret => {
             output.push_str("movq %rbp, %rsp\n");
@@ -99,11 +95,7 @@ fn emit_instruction(ins: &codegen::Instruction) -> String {
             output.push_str("cdq");
         }
         codegen::Instruction::Cmp { v1, v2 } => {
-            output.push_str(&format!(
-                "cmpl {}, {}",
-                emit_operand_dw(v1),
-                emit_operand_dw(v2)
-            ));
+            output.push_str(&format!("cmpl {}, {}", emit_operand_dw(v1), emit_operand_dw(v2)));
         }
         codegen::Instruction::Jmp(target) => {
             output.push_str(&format!("jmp {}", target));

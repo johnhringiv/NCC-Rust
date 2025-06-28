@@ -100,16 +100,10 @@ impl SyntaxError {
         (found_str, loc_str)
     }
     pub fn new(expected: Option<Token>, found: Option<SpannedToken>) -> Self {
-        let expected = expected
-            .as_ref()
-            .map(|t| t.variant_str())
-            .unwrap_or("None".to_string());
+        let expected = expected.as_ref().map(|t| t.variant_str()).unwrap_or("None".to_string());
         let (found_str, loc_str) = Self::get_found_strs(found);
         SyntaxError {
-            message: format!(
-                r#"expected: {:?}, found: {:?}{}"#,
-                expected, found_str, loc_str
-            ),
+            message: format!(r#"expected: {:?}, found: {:?}{}"#, expected, found_str, loc_str),
         }
     }
 
@@ -139,10 +133,7 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<(), S
     match next {
         Some(token) => {
             if !variant_eq(expected, &token.token) {
-                Err(SyntaxError::new(
-                    Some(expected.clone()),
-                    Some(token.clone()),
-                ))
+                Err(SyntaxError::new(Some(expected.clone()), Some(token.clone())))
             } else {
                 Ok(())
             }
@@ -224,10 +215,7 @@ fn parse_unop(tokens: &mut VecDeque<SpannedToken>) -> Result<UnaryOp, SyntaxErro
         Token::BitwiseComplement => Ok(UnaryOp::BitwiseComplement),
         Token::Negation => Ok(UnaryOp::Negate),
         Token::LogicalNot => Ok(UnaryOp::Not),
-        _ => unreachable!(
-            "parse_unop called with non-unary operator token: {:?}",
-            spanned.token
-        ),
+        _ => unreachable!("parse_unop called with non-unary operator token: {:?}", spanned.token),
     }
 }
 
@@ -237,10 +225,7 @@ fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<Identifier, S
             token: Token::Identifier(value),
             ..
         }) => Ok(Identifier(value)),
-        x => Err(SyntaxError::new(
-            Some(Token::Identifier("whatever".to_string())),
-            x,
-        )),
+        x => Err(SyntaxError::new(Some(Token::Identifier("whatever".to_string())), x)),
     }
 }
 
@@ -287,13 +272,10 @@ impl ItfDisplay for Expr {
     fn itf_node(&self) -> Node {
         match self {
             Expr::Constant(c) => Node::leaf(yellow(format!("Constant({})", c))),
-            Expr::Unary(op, e) => {
-                Node::branch(cyan(format!("Unary ({:?})", op)), vec![e.itf_node()])
+            Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({:?})", op)), vec![e.itf_node()]),
+            Expr::Binary(op, e1, e2) => {
+                Node::branch(cyan(format!("Binary ({:?})", op)), vec![e1.itf_node(), e2.itf_node()])
             }
-            Expr::Binary(op, e1, e2) => Node::branch(
-                cyan(format!("Binary ({:?})", op)),
-                vec![e1.itf_node(), e2.itf_node()],
-            ),
         }
     }
 }
@@ -325,10 +307,8 @@ mod tests {
 
     #[test]
     fn basic_return() {
-        let input = std::fs::read_to_string(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c",
-        )
-        .expect("Failed to read input file");
+        let input = std::fs::read_to_string("../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
+            .expect("Failed to read input file");
         let mut tokens = tokenizer(&input).unwrap();
         let ast = parse_program(&mut tokens).unwrap();
         let expected = Program {
@@ -349,85 +329,61 @@ mod tests {
 
     #[test]
     fn end_before_expr() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/end_before_expr.c",
-        )
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/end_before_expr.c")
     }
 
     #[test]
     fn test_extra_junk() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/extra_junk.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/extra_junk.c");
     }
 
     #[test]
     fn test_invalid_function_name() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/invalid_function_name.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/invalid_function_name.c");
     }
 
     #[test]
     fn test_keyword_wrong_case() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/keyword_wrong_case.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/keyword_wrong_case.c");
     }
 
     #[test]
     fn test_missing_type() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/missing_type.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/missing_type.c");
     }
 
     #[test]
     fn test_misspelled_keyword() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/misspelled_keyword.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/misspelled_keyword.c");
     }
 
     #[test]
     fn test_no_semicolon() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/no_semicolon.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/no_semicolon.c");
     }
 
     #[test]
     fn test_not_expression() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/not_expression.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/not_expression.c");
     }
 
     #[test]
     fn test_space_in_keyword() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/space_in_keyword.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/space_in_keyword.c");
     }
 
     #[test]
     fn test_switched_parens() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/switched_parens.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/switched_parens.c");
     }
 
     #[test]
     fn test_unclosed_brace() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_brace.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_brace.c");
     }
 
     #[test]
     fn test_unclosed_paren() {
-        run_parser_test_invalid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c",
-        );
+        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c");
     }
 }

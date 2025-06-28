@@ -41,34 +41,15 @@ pub enum BinaryOp {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
-    Mov {
-        src: Operand,
-        dst: Operand,
-    },
-    Unary {
-        op: UnaryOp,
-        dst: Operand,
-    },
-    Binary {
-        op: BinaryOp,
-        src: Operand,
-        dst: Operand,
-    },
-    Cmp {
-        v1: Operand,
-        v2: Operand,
-    },
+    Mov { src: Operand, dst: Operand },
+    Unary { op: UnaryOp, dst: Operand },
+    Binary { op: BinaryOp, src: Operand, dst: Operand },
+    Cmp { v1: Operand, v2: Operand },
     Idiv(Operand),
     Cdq,
     Jmp(Identifier),
-    JmpCC {
-        code: CondCode,
-        label: Identifier,
-    },
-    SetCC {
-        code: CondCode,
-        op: Operand,
-    },
+    JmpCC { code: CondCode, label: Identifier },
+    SetCC { code: CondCode, op: Operand },
     Label(Identifier),
     AllocateStack(i64),
     Ret,
@@ -147,19 +128,11 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
             let dst = convert_val(dst);
             let op = convert_unary_op(op);
             vec![
-                Instruction::Mov {
-                    src,
-                    dst: dst.clone(),
-                },
+                Instruction::Mov { src, dst: dst.clone() },
                 Instruction::Unary { op, dst },
             ]
         }
-        tacky::Instruction::Binary {
-            op,
-            src1,
-            src2,
-            dst,
-        } => {
+        tacky::Instruction::Binary { op, src1, src2, dst } => {
             let src1 = convert_val(src1);
             let src2 = convert_val(src2);
             let dst = convert_val(dst);
@@ -282,9 +255,9 @@ impl From<&BinOp> for BinaryOp {
             BinOp::Add => BinaryOp::Add,
             BinOp::Subtract => BinaryOp::Sub,
             BinOp::Multiply => BinaryOp::Mult,
-            BinOp::Divide | BinOp::Remainder => unreachable!(
-                "Special case for division and remainder should be handled in the instruction conversion"
-            ),
+            BinOp::Divide | BinOp::Remainder => {
+                unreachable!("Special case for division and remainder should be handled in the instruction conversion")
+            }
             BinOp::BitwiseAnd => BinaryOp::BitAnd,
             BinOp::BitwiseOr => BinaryOp::BitOr,
             BinOp::BitwiseXOr => BinaryOp::BitXOr,
@@ -444,12 +417,7 @@ pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
                 });
             }
             Instruction::Binary {
-                op:
-                    op @ (BinaryOp::Add
-                    | BinaryOp::Sub
-                    | BinaryOp::BitAnd
-                    | BinaryOp::BitOr
-                    | BinaryOp::BitXOr),
+                op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr),
                 src: Operand::Stack(src),
                 dst: Operand::Stack(dst),
             } => {
@@ -530,32 +498,19 @@ impl ItfDisplay for Operand {
 impl ItfDisplay for Instruction {
     fn itf_node(&self) -> Node {
         match self {
-            Instruction::Mov { src, dst } => {
-                Node::branch(cyan("Mov"), vec![src.itf_node(), dst.itf_node()])
+            Instruction::Mov { src, dst } => Node::branch(cyan("Mov"), vec![src.itf_node(), dst.itf_node()]),
+            Instruction::Unary { op, dst } => Node::branch(cyan("Unary"), vec![op.itf_node(), dst.itf_node()]),
+            Instruction::Binary { op, src, dst } => {
+                Node::branch(cyan("Binary"), vec![op.itf_node(), src.itf_node(), dst.itf_node()])
             }
-            Instruction::Unary { op, dst } => {
-                Node::branch(cyan("Unary"), vec![op.itf_node(), dst.itf_node()])
-            }
-            Instruction::Binary { op, src, dst } => Node::branch(
-                cyan("Binary"),
-                vec![op.itf_node(), src.itf_node(), dst.itf_node()],
-            ),
-            Instruction::Cmp { v1, v2 } => {
-                Node::branch(cyan("Cmp"), vec![v1.itf_node(), v2.itf_node()])
-            }
+            Instruction::Cmp { v1, v2 } => Node::branch(cyan("Cmp"), vec![v1.itf_node(), v2.itf_node()]),
             Instruction::Idiv(op) => Node::branch(cyan("Idiv"), vec![op.itf_node()]),
             Instruction::Cdq => Node::leaf(cyan("Cdq")),
             Instruction::Jmp(label) => Node::branch(cyan("Jmp"), vec![label.itf_node()]),
-            Instruction::JmpCC { code, label } => {
-                Node::branch(cyan("JmpCC"), vec![code.itf_node(), label.itf_node()])
-            }
-            Instruction::SetCC { code, op } => {
-                Node::branch(cyan("SetCC"), vec![code.itf_node(), op.itf_node()])
-            }
+            Instruction::JmpCC { code, label } => Node::branch(cyan("JmpCC"), vec![code.itf_node(), label.itf_node()]),
+            Instruction::SetCC { code, op } => Node::branch(cyan("SetCC"), vec![code.itf_node(), op.itf_node()]),
             Instruction::Label(l) => Node::branch(cyan("Label"), vec![l.itf_node()]),
-            Instruction::AllocateStack(off) => {
-                Node::branch(cyan("AllocateStack"), vec![off.itf_node()])
-            }
+            Instruction::AllocateStack(off) => Node::branch(cyan("AllocateStack"), vec![off.itf_node()]),
             Instruction::Ret => Node::leaf(cyan("Ret")),
         }
     }
@@ -585,10 +540,8 @@ mod tests {
 
     #[test]
     fn basic_return() {
-        let input = std::fs::read_to_string(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c",
-        )
-        .expect("Failed to read input file");
+        let input = std::fs::read_to_string("../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
+            .expect("Failed to read input file");
         let mut tokens = tokenizer(&input).unwrap();
         let ast = parse_program(&mut tokens).unwrap();
         let tacky = tacky::tackify_program(&ast);

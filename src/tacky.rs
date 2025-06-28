@@ -56,32 +56,12 @@ impl From<&parser::BinOp> for BinOp {
 #[derive(Clone, Debug)]
 pub enum Instruction {
     Return(Val),
-    Unary {
-        op: UnaryOp,
-        src: Val,
-        dst: Val,
-    },
-    Binary {
-        op: BinOp,
-        src1: Val,
-        src2: Val,
-        dst: Val,
-    },
-    Copy {
-        src: Val,
-        dst: Val,
-    },
-    Jump {
-        target: Identifier,
-    },
-    JumpIfZero {
-        condition: Val,
-        target: Identifier,
-    },
-    JumpIfNotZero {
-        condition: Val,
-        target: Identifier,
-    },
+    Unary { op: UnaryOp, src: Val, dst: Val },
+    Binary { op: BinOp, src1: Val, src2: Val, dst: Val },
+    Copy { src: Val, dst: Val },
+    Jump { target: Identifier },
+    JumpIfZero { condition: Val, target: Identifier },
+    JumpIfNotZero { condition: Val, target: Identifier },
     Label(Identifier),
 }
 
@@ -102,9 +82,7 @@ pub struct NameGenerator {
 
 impl NameGenerator {
     pub fn new() -> NameGenerator {
-        NameGenerator {
-            counts: HashMap::new(),
-        }
+        NameGenerator { counts: HashMap::new() }
     }
 
     pub fn next(&mut self, base: &str) -> String {
@@ -114,11 +92,7 @@ impl NameGenerator {
     }
 }
 
-fn tackify_expr(
-    e: &parser::Expr,
-    instructions: &mut Vec<Instruction>,
-    name_generator: &mut NameGenerator,
-) -> Val {
+fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) -> Val {
     match e {
         parser::Expr::Constant(c) => Val::Constant(*c),
         parser::Expr::Unary(op, inner) => {
@@ -205,11 +179,7 @@ fn tackify_expr(
     }
 }
 
-fn tackify_stmt(
-    stmt: &parser::Stmt,
-    instructions: &mut Vec<Instruction>,
-    name_generator: &mut NameGenerator,
-) {
+fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
     match stmt {
         parser::Stmt::Return(expr) => {
             let val = tackify_expr(expr, instructions, name_generator);
@@ -218,10 +188,7 @@ fn tackify_stmt(
     }
 }
 
-fn tackify_function(
-    func: &parser::Function,
-    name_generator: &mut NameGenerator,
-) -> FunctionDefinition {
+fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let parser::Identifier(name) = &func.name;
 
@@ -255,36 +222,21 @@ impl ItfDisplay for Instruction {
     fn itf_node(&self) -> Node {
         match self {
             Instruction::Return(v) => Node::branch(cyan("Return"), vec![v.itf_node()]),
-            Instruction::Unary { op, src, dst } => Node::branch(
-                cyan("Unary"),
-                vec![op.itf_node(), src.itf_node(), dst.itf_node()],
-            ),
-            Instruction::Binary {
-                op,
-                src1,
-                src2,
-                dst,
-            } => Node::branch(
-                cyan("Binary"),
-                vec![
-                    op.itf_node(),
-                    src1.itf_node(),
-                    src2.itf_node(),
-                    dst.itf_node(),
-                ],
-            ),
-            Instruction::Copy { src, dst } => {
-                Node::branch(cyan("Copy"), vec![src.itf_node(), dst.itf_node()])
+            Instruction::Unary { op, src, dst } => {
+                Node::branch(cyan("Unary"), vec![op.itf_node(), src.itf_node(), dst.itf_node()])
             }
+            Instruction::Binary { op, src1, src2, dst } => Node::branch(
+                cyan("Binary"),
+                vec![op.itf_node(), src1.itf_node(), src2.itf_node(), dst.itf_node()],
+            ),
+            Instruction::Copy { src, dst } => Node::branch(cyan("Copy"), vec![src.itf_node(), dst.itf_node()]),
             Instruction::Jump { target } => Node::branch(cyan("Jump"), vec![target.itf_node()]),
-            Instruction::JumpIfZero { condition, target } => Node::branch(
-                cyan("JumpIfZero"),
-                vec![condition.itf_node(), target.itf_node()],
-            ),
-            Instruction::JumpIfNotZero { condition, target } => Node::branch(
-                cyan("JumpIfNotZero"),
-                vec![condition.itf_node(), target.itf_node()],
-            ),
+            Instruction::JumpIfZero { condition, target } => {
+                Node::branch(cyan("JumpIfZero"), vec![condition.itf_node(), target.itf_node()])
+            }
+            Instruction::JumpIfNotZero { condition, target } => {
+                Node::branch(cyan("JumpIfNotZero"), vec![condition.itf_node(), target.itf_node()])
+            }
             Instruction::Label(lbl) => Node::branch(cyan("Label"), vec![lbl.itf_node()]),
         }
     }
