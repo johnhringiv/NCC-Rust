@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn basic_return() {
-        let input = std::fs::read_to_string("../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
+        let input = std::fs::read_to_string("writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
             .expect("Failed to read input file");
         let mut tokens = tokenizer(&input).unwrap();
         let ast = parse_program(&mut tokens).unwrap();
@@ -555,6 +555,7 @@ mod tests {
                         src: Operand::Imm(100),
                         dst: Operand::Reg(Reg::AX),
                     },
+                    Instruction::Ret,
                 ],
             },
         };

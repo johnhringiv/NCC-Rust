@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn basic_return() {
-        let input = std::fs::read_to_string("../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
+        let input = std::fs::read_to_string("writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
             .expect("Failed to read input file");
         let mut tokens = tokenizer(&input).unwrap();
         let ast = parse_program(&mut tokens).unwrap();
@@ -329,61 +329,61 @@ mod tests {
 
     #[test]
     fn end_before_expr() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/end_before_expr.c")
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/end_before_expr.c")
     }
 
     #[test]
     fn test_extra_junk() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/extra_junk.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/extra_junk.c");
     }
 
     #[test]
     fn test_invalid_function_name() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/invalid_function_name.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/invalid_function_name.c");
     }
 
     #[test]
     fn test_keyword_wrong_case() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/keyword_wrong_case.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/keyword_wrong_case.c");
     }
 
     #[test]
     fn test_missing_type() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/missing_type.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/missing_type.c");
     }
 
     #[test]
     fn test_misspelled_keyword() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/misspelled_keyword.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/misspelled_keyword.c");
     }
 
     #[test]
     fn test_no_semicolon() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/no_semicolon.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/no_semicolon.c");
     }
 
     #[test]
     fn test_not_expression() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/not_expression.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/not_expression.c");
     }
 
     #[test]
     fn test_space_in_keyword() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/space_in_keyword.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/space_in_keyword.c");
     }
 
     #[test]
     fn test_switched_parens() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/switched_parens.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/switched_parens.c");
     }
 
     #[test]
     fn test_unclosed_brace() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_brace.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_brace.c");
     }
 
     #[test]
     fn test_unclosed_paren() {
-        run_parser_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c");
+        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c");
     }
 }

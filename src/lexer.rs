@@ -279,7 +279,7 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
             break;
         }
 
-        match next_token(&input) {
+        match next_token(input) {
             Ok(TokenMatch { token, length }) => {
                 tokens.push_back(SpannedToken {
                     token,
@@ -332,7 +332,7 @@ pub(crate) mod tests {
     #[test]
     fn test_lexer_multi_digit() {
         run_lexer_test_valid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c",
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c",
             basic_return(100),
         );
     }
@@ -340,7 +340,7 @@ pub(crate) mod tests {
     #[test]
     fn test_lexer_newlines() {
         run_lexer_test_valid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/newlines.c",
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/newlines.c",
             basic_return(0),
         )
     }
@@ -348,7 +348,7 @@ pub(crate) mod tests {
     #[test]
     fn test_lexer_no_newlines() {
         run_lexer_test_valid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/no_newlines.c",
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/no_newlines.c",
             basic_return(0),
         )
     }
@@ -356,7 +356,7 @@ pub(crate) mod tests {
     #[test]
     fn test_lexer_return_0() {
         run_lexer_test_valid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/return_0.c",
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/return_0.c",
             basic_return(0),
         )
     }
@@ -364,7 +364,7 @@ pub(crate) mod tests {
     #[test]
     fn test_lexer_return_2() {
         run_lexer_test_valid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/return_2.c",
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/return_2.c",
             basic_return(2),
         )
     }
@@ -372,7 +372,7 @@ pub(crate) mod tests {
     #[test]
     fn test_lexer_spaces() {
         run_lexer_test_valid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/spaces.c",
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/spaces.c",
             basic_return(0),
         )
     }
@@ -380,33 +380,33 @@ pub(crate) mod tests {
     #[test]
     fn test_lexer_tabs() {
         run_lexer_test_valid(
-            "../writing-a-c-compiler-tests/tests/chapter_1/valid/tabs.c",
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/tabs.c",
             basic_return(0),
         )
     }
 
     #[test]
     fn test_lexer_at_sign() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/at_sign.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/at_sign.c")
     }
 
     #[test]
     fn test_lexer_backslash() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backslash.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backslash.c")
     }
 
     #[test]
     fn test_lexer_backtick() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backtick.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backtick.c")
     }
 
     #[test]
     fn test_lexer_invalid_identifier() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier.c")
     }
 
     #[test]
     fn test_lexer_invalid_identifier2() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier_2.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier_2.c")
     }
 }
