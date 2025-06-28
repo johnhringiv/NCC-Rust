@@ -1,0 +1,62 @@
+name: Rust quality gates
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+          override: true
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ---------- Formatter --------------------------------------------------
+      - name: rustfmt (check mode)
+        run: cargo fmt --all -- --check
+
+      # ---------- Dependency ordering ----------------------------------------
+      - name: Install cargo-sort
+        run: cargo install cargo-sort --locked --version ^1
+      - name: cargo sort (check only)
+        run: cargo sort --workspace --check
+
+      # ---------- Compilation & lints ----------------------------------------
+      - name: cargo check
+        run: cargo check --workspace --all-features
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # ---------- Tests ------------------------------------------------------
+      - name: cargo test
+        run: cargo test --workspace --all-features --no-fail-fast
+
+      # ---------- Unused dependencies ----------------------------------------
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked --version ^0.2
+      - name: cargo udeps (detect unused deps)
+        run: cargo udeps --all-targets --workspace --benches

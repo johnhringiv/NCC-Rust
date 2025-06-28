@@ -46,3 +46,14 @@ Usage: ncc [OPTIONS] `FILENAME`
 
 
 Note: `--lex`, `--parse`, `--code-gen`, `--tacky`, `--run` are mutually exclusive options.
+
+## Contributing
+As a reminder to myself.
+Use the Makefile to check code quality `make quality` and fix formatting `make fix`.
+
+### Requirements for Makefile
+```shell
+sudo apt-get install pkg-config libssl-dev make
+```
+
+
