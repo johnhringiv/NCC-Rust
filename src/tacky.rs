@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use crate::parser;
 use crate::parser::{Identifier, UnaryOp};
-use crate::pretty::{ItfDisplay, simple_node, Node, cyan};
+use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub enum Val {
     Constant(i64),
-    Var(String)
+    Var(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,32 +56,12 @@ impl From<&parser::BinOp> for BinOp {
 #[derive(Clone, Debug)]
 pub enum Instruction {
     Return(Val),
-    Unary {
-        op: UnaryOp,
-        src: Val,
-        dst: Val,
-    },
-    Binary {
-        op: BinOp,
-        src1: Val,
-        src2: Val,
-        dst: Val,
-    },
-    Copy {
-        src: Val,
-        dst: Val,
-    },
-    Jump {
-        target: Identifier
-    },
-    JumpIfZero {
-        condition: Val,
-        target: Identifier
-    },
-    JumpIfNotZero {
-        condition: Val,
-        target: Identifier
-    },
+    Unary { op: UnaryOp, src: Val, dst: Val },
+    Binary { op: BinOp, src1: Val, src2: Val, dst: Val },
+    Copy { src: Val, dst: Val },
+    Jump { target: Identifier },
+    JumpIfZero { condition: Val, target: Identifier },
+    JumpIfNotZero { condition: Val, target: Identifier },
     Label(Identifier),
 }
 
@@ -101,8 +81,10 @@ pub struct NameGenerator {
 }
 
 impl NameGenerator {
-    pub fn new() -> NameGenerator { NameGenerator {counts: HashMap::new()}}
-    
+    pub fn new() -> NameGenerator {
+        NameGenerator { counts: HashMap::new() }
+    }
+
     pub fn next(&mut self, base: &str) -> String {
         let count = self.counts.entry(base.to_string()).or_insert(0);
         *count += 1;
@@ -116,36 +98,68 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
         parser::Expr::Unary(op, inner) => {
             let src = tackify_expr(inner, instructions, name_generator);
             let dst = Val::Var(name_generator.next("temp"));
-            instructions.push(Instruction::Unary {op: op.clone(), src, dst: dst.clone()});
+            instructions.push(Instruction::Unary {
+                op: op.clone(),
+                src,
+                dst: dst.clone(),
+            });
             dst
         }
         parser::Expr::Binary(parser::BinOp::And, e1, e2) => {
             let src1 = tackify_expr(e1, instructions, name_generator);
             let false_label = Identifier(name_generator.next("and_false"));
-            instructions.push(Instruction::JumpIfZero {condition: src1, target: false_label.clone()});
+            instructions.push(Instruction::JumpIfZero {
+                condition: src1,
+                target: false_label.clone(),
+            });
             let src2 = tackify_expr(e2, instructions, name_generator);
-            instructions.push(Instruction::JumpIfZero {condition: src2, target: false_label.clone()});
+            instructions.push(Instruction::JumpIfZero {
+                condition: src2,
+                target: false_label.clone(),
+            });
             let result = Val::Var(name_generator.next("temp"));
-            instructions.push(Instruction::Copy {src: Val::Constant(1), dst: result.clone()});
+            instructions.push(Instruction::Copy {
+                src: Val::Constant(1),
+                dst: result.clone(),
+            });
             let end_label = Identifier(name_generator.next("end"));
-            instructions.push(Instruction::Jump {target: end_label.clone()});
+            instructions.push(Instruction::Jump {
+                target: end_label.clone(),
+            });
             instructions.push(Instruction::Label(false_label));
-            instructions.push(Instruction::Copy {src: Val::Constant(0), dst: result.clone()});
+            instructions.push(Instruction::Copy {
+                src: Val::Constant(0),
+                dst: result.clone(),
+            });
             instructions.push(Instruction::Label(end_label));
             result
         }
         parser::Expr::Binary(parser::BinOp::Or, e1, e2) => {
             let src1 = tackify_expr(e1, instructions, name_generator);
             let false_label = Identifier(name_generator.next("or_false"));
-            instructions.push(Instruction::JumpIfNotZero {condition: src1, target: false_label.clone()});
+            instructions.push(Instruction::JumpIfNotZero {
+                condition: src1,
+                target: false_label.clone(),
+            });
             let src2 = tackify_expr(e2, instructions, name_generator);
-            instructions.push(Instruction::JumpIfNotZero {condition: src2, target: false_label.clone()});
+            instructions.push(Instruction::JumpIfNotZero {
+                condition: src2,
+                target: false_label.clone(),
+            });
             let result = Val::Var(name_generator.next("temp"));
-            instructions.push(Instruction::Copy {src: Val::Constant(0), dst: result.clone()});
+            instructions.push(Instruction::Copy {
+                src: Val::Constant(0),
+                dst: result.clone(),
+            });
             let end_label = Identifier(name_generator.next("end"));
-            instructions.push(Instruction::Jump {target: end_label.clone()});
+            instructions.push(Instruction::Jump {
+                target: end_label.clone(),
+            });
             instructions.push(Instruction::Label(false_label));
-            instructions.push(Instruction::Copy {src: Val::Constant(1), dst: result.clone()});
+            instructions.push(Instruction::Copy {
+                src: Val::Constant(1),
+                dst: result.clone(),
+            });
             instructions.push(Instruction::Label(end_label));
             result
         }
@@ -154,7 +168,12 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             let src1 = tackify_expr(e1, instructions, name_generator);
             let src2 = tackify_expr(e2, instructions, name_generator);
             let dst = Val::Var(name_generator.next("temp"));
-            instructions.push(Instruction::Binary {op: BinOp::from(op), src1, src2, dst: dst.clone()});
+            instructions.push(Instruction::Binary {
+                op: BinOp::from(op),
+                src1,
+                src2,
+                dst: dst.clone(),
+            });
             dst
         }
     }
@@ -169,10 +188,10 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
     }
 }
 
-fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition { 
+fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let parser::Identifier(name) = &func.name;
-    
+
     tackify_stmt(&func.body, &mut instructions, name_generator);
 
     FunctionDefinition {
@@ -183,9 +202,9 @@ fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator)
 
 pub fn tackify_program(program: &parser::Program) -> Program {
     let mut name_generator = NameGenerator::new();
-    
+
     let function = tackify_function(&program.function, &mut name_generator);
-    
+
     Program { function }
 }
 simple_node!(BinOp);
@@ -203,27 +222,21 @@ impl ItfDisplay for Instruction {
     fn itf_node(&self) -> Node {
         match self {
             Instruction::Return(v) => Node::branch(cyan("Return"), vec![v.itf_node()]),
-            Instruction::Unary { op, src, dst } => Node::branch(
-                cyan("Unary"),
-                vec![op.itf_node(), src.itf_node(), dst.itf_node()],
-            ),
+            Instruction::Unary { op, src, dst } => {
+                Node::branch(cyan("Unary"), vec![op.itf_node(), src.itf_node(), dst.itf_node()])
+            }
             Instruction::Binary { op, src1, src2, dst } => Node::branch(
                 cyan("Binary"),
                 vec![op.itf_node(), src1.itf_node(), src2.itf_node(), dst.itf_node()],
             ),
-            Instruction::Copy { src, dst } => Node::branch(
-                cyan("Copy"),
-                vec![src.itf_node(), dst.itf_node()],
-            ),
+            Instruction::Copy { src, dst } => Node::branch(cyan("Copy"), vec![src.itf_node(), dst.itf_node()]),
             Instruction::Jump { target } => Node::branch(cyan("Jump"), vec![target.itf_node()]),
-            Instruction::JumpIfZero { condition, target } => Node::branch(
-                cyan("JumpIfZero"),
-                vec![condition.itf_node(), target.itf_node()],
-            ),
-            Instruction::JumpIfNotZero { condition, target } => Node::branch(
-                cyan("JumpIfNotZero"),
-                vec![condition.itf_node(), target.itf_node()],
-            ),
+            Instruction::JumpIfZero { condition, target } => {
+                Node::branch(cyan("JumpIfZero"), vec![condition.itf_node(), target.itf_node()])
+            }
+            Instruction::JumpIfNotZero { condition, target } => {
+                Node::branch(cyan("JumpIfNotZero"), vec![condition.itf_node(), target.itf_node()])
+            }
             Instruction::Label(lbl) => Node::branch(cyan("Label"), vec![lbl.itf_node()]),
         }
     }

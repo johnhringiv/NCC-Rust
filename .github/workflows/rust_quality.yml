@@ -1,0 +1,69 @@
+name: Rust quality gates
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { rust: [stable] }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal           # faster install
+          toolchain: "1.87.0"
+          components: clippy, rustfmt
+          override: true
+
+      # Cache crates + build artefacts + helper binaries
+      - name: Cache cargo, target and helper bins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Install helpers only if cache missed them
+      - name: Install cargo-sort
+        run: if ! command -v cargo-sort >/dev/null; then cargo install cargo-sort --locked --version ^1; fi
+
+      - name: Install cargo-machete
+        run: if ! command -v cargo-machete >/dev/null; then cargo install cargo-machete --locked; fi
+
+      # ---------- Formatter -----------------------------------
+      - name: rustfmt (check mode)
+        run: cargo fmt --all -- --check
+
+      # ---------- Dependency ordering --------------------------
+      - name: cargo sort (check only)
+        run: cargo sort --workspace --check
+
+      # ---------- Compilation & lints --------------------------
+      - name: cargo check
+        run: cargo check --workspace --all-features
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # ---------- Tests ---------------------------------------
+      - name: cargo test
+        run: cargo test --workspace --all-features --no-fail-fast
+
+      # ---------- Unused dependencies --------------------------
+      - name: cargo machete (detect unused deps)
+        run: cargo machete --with-metadata

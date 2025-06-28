@@ -1,0 +1,5 @@
+max_width = 120                 # or higher, if needed to fit line + comment
+# not in stable yet
+#wrap_comments = true            # wraps doc/comments, not trailing ones
+#normalize_comments = false      # preserves spacing and alignment of `//` comments
+#format_code_in_doc_comments = false  # don't rewrap code inside doc comments

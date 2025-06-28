@@ -1,7 +1,7 @@
+use regex::Regex;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::LazyLock;
-use regex::Regex;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
@@ -15,62 +15,157 @@ pub enum Token {
     OpenBrace,
     CloseBrace,
     Semicolon,
-    BitwiseComplement, // ~
-    Negation, // -
-    Decrement, // --
-    Plus, // +
-    Asterisk, // *
-    Division, // /
-    Modulus, // %
-    BitwiseAnd, // &
-    BitwiseOr, // |
-    BitwiseXOr, // ^
-    BitwiseLeftShift, // <<
-    BitwiseRightShift, // >>
-    LogicalNot, // !
-    LogicalAnd, // &&
-    LogicalOr, // ||
-    Equal, // ==
-    NotEqual, // !=
-    LessThan, // <
-    GreaterThan, // >
-    LessThanOrEqual, // <=
+    BitwiseComplement,  // ~
+    Negation,           // -
+    Decrement,          // --
+    Plus,               // +
+    Asterisk,           // *
+    Division,           // /
+    Modulus,            // %
+    BitwiseAnd,         // &
+    BitwiseOr,          // |
+    BitwiseXOr,         // ^
+    BitwiseLeftShift,   // <<
+    BitwiseRightShift,  // >>
+    LogicalNot,         // !
+    LogicalAnd,         // &&
+    LogicalOr,          // ||
+    Equal,              // ==
+    NotEqual,           // !=
+    LessThan,           // <
+    GreaterThan,        // >
+    LessThanOrEqual,    // <=
     GreaterThanOrEqual, // >=
 }
 
-static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| vec![
-    TokenDef { regex: Regex::new(r"^[a-zA-Z_]\w*\b").unwrap(), variant: Token::Identifier(String::new()) },
-    TokenDef { regex: Regex::new(r"^[0-9]+\b").unwrap(), variant: Token::ConstantInt(0) },
-    TokenDef { regex: Regex::new(r"^int\b").unwrap(), variant: Token::IntKeyword },
-    TokenDef { regex: Regex::new(r"^void\b").unwrap(), variant: Token::VoidKeyword },
-    TokenDef { regex: Regex::new(r"^return\b").unwrap(), variant: Token::ReturnKeyword },
-    TokenDef { regex: Regex::new(r"^\(").unwrap(), variant: Token::OpenParen },
-    TokenDef { regex: Regex::new(r"^\)").unwrap(), variant: Token::CloseParen },
-    TokenDef { regex: Regex::new(r"^\{").unwrap(), variant: Token::OpenBrace },
-    TokenDef { regex: Regex::new(r"^}").unwrap(), variant: Token::CloseBrace },
-    TokenDef { regex: Regex::new(r"^;").unwrap(), variant: Token::Semicolon },
-    TokenDef { regex: Regex::new(r"^~").unwrap(), variant: Token::BitwiseComplement },
-    TokenDef { regex: Regex::new(r"^--").unwrap(), variant: Token::Decrement },
-    TokenDef { regex: Regex::new(r"^-").unwrap(), variant: Token::Negation },
-    TokenDef { regex: Regex::new(r"^\+").unwrap(), variant: Token::Plus },
-    TokenDef { regex: Regex::new(r"^\*").unwrap(), variant: Token::Asterisk },
-    TokenDef { regex: Regex::new(r"^/").unwrap(), variant: Token::Division },
-    TokenDef { regex: Regex::new(r"^%").unwrap(), variant: Token::Modulus },
-    TokenDef { regex: Regex::new(r"^&").unwrap(), variant: Token::BitwiseAnd },
-    TokenDef { regex: Regex::new(r"^\|").unwrap(), variant: Token::BitwiseOr },
-    TokenDef { regex: Regex::new(r"^\^").unwrap(), variant: Token::BitwiseXOr },
-    TokenDef { regex: Regex::new(r"^<<").unwrap(), variant: Token::BitwiseLeftShift },
-    TokenDef { regex: Regex::new(r"^>>").unwrap(), variant: Token::BitwiseRightShift },
-    TokenDef { regex: Regex::new(r"^!").unwrap(), variant: Token::LogicalNot },
-    TokenDef { regex: Regex::new(r"^&&").unwrap(), variant: Token::LogicalAnd },
-    TokenDef { regex: Regex::new(r"^\|\|").unwrap(), variant: Token::LogicalOr },
-    TokenDef { regex: Regex::new(r"^==").unwrap(), variant: Token::Equal },
-    TokenDef { regex: Regex::new(r"^!=").unwrap(), variant: Token::NotEqual },
-    TokenDef { regex: Regex::new(r"^<=").unwrap(), variant: Token::LessThanOrEqual },
-    TokenDef { regex: Regex::new(r"^>=").unwrap(), variant: Token::GreaterThanOrEqual },
-    TokenDef { regex: Regex::new(r"^<").unwrap(), variant: Token::LessThan },
-    TokenDef { regex: Regex::new(r"^>").unwrap(), variant: Token::GreaterThan },
-]);
+static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
+    vec![
+        TokenDef {
+            regex: Regex::new(r"^[a-zA-Z_]\w*\b").unwrap(),
+            variant: Token::Identifier(String::new()),
+        },
+        TokenDef {
+            regex: Regex::new(r"^[0-9]+\b").unwrap(),
+            variant: Token::ConstantInt(0),
+        },
+        TokenDef {
+            regex: Regex::new(r"^int\b").unwrap(),
+            variant: Token::IntKeyword,
+        },
+        TokenDef {
+            regex: Regex::new(r"^void\b").unwrap(),
+            variant: Token::VoidKeyword,
+        },
+        TokenDef {
+            regex: Regex::new(r"^return\b").unwrap(),
+            variant: Token::ReturnKeyword,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\(").unwrap(),
+            variant: Token::OpenParen,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\)").unwrap(),
+            variant: Token::CloseParen,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\{").unwrap(),
+            variant: Token::OpenBrace,
+        },
+        TokenDef {
+            regex: Regex::new(r"^}").unwrap(),
+            variant: Token::CloseBrace,
+        },
+        TokenDef {
+            regex: Regex::new(r"^;").unwrap(),
+            variant: Token::Semicolon,
+        },
+        TokenDef {
+            regex: Regex::new(r"^~").unwrap(),
+            variant: Token::BitwiseComplement,
+        },
+        TokenDef {
+            regex: Regex::new(r"^--").unwrap(),
+            variant: Token::Decrement,
+        },
+        TokenDef {
+            regex: Regex::new(r"^-").unwrap(),
+            variant: Token::Negation,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\+").unwrap(),
+            variant: Token::Plus,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\*").unwrap(),
+            variant: Token::Asterisk,
+        },
+        TokenDef {
+            regex: Regex::new(r"^/").unwrap(),
+            variant: Token::Division,
+        },
+        TokenDef {
+            regex: Regex::new(r"^%").unwrap(),
+            variant: Token::Modulus,
+        },
+        TokenDef {
+            regex: Regex::new(r"^&").unwrap(),
+            variant: Token::BitwiseAnd,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\|").unwrap(),
+            variant: Token::BitwiseOr,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\^").unwrap(),
+            variant: Token::BitwiseXOr,
+        },
+        TokenDef {
+            regex: Regex::new(r"^<<").unwrap(),
+            variant: Token::BitwiseLeftShift,
+        },
+        TokenDef {
+            regex: Regex::new(r"^>>").unwrap(),
+            variant: Token::BitwiseRightShift,
+        },
+        TokenDef {
+            regex: Regex::new(r"^!").unwrap(),
+            variant: Token::LogicalNot,
+        },
+        TokenDef {
+            regex: Regex::new(r"^&&").unwrap(),
+            variant: Token::LogicalAnd,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\|\|").unwrap(),
+            variant: Token::LogicalOr,
+        },
+        TokenDef {
+            regex: Regex::new(r"^==").unwrap(),
+            variant: Token::Equal,
+        },
+        TokenDef {
+            regex: Regex::new(r"^!=").unwrap(),
+            variant: Token::NotEqual,
+        },
+        TokenDef {
+            regex: Regex::new(r"^<=").unwrap(),
+            variant: Token::LessThanOrEqual,
+        },
+        TokenDef {
+            regex: Regex::new(r"^>=").unwrap(),
+            variant: Token::GreaterThanOrEqual,
+        },
+        TokenDef {
+            regex: Regex::new(r"^<").unwrap(),
+            variant: Token::LessThan,
+        },
+        TokenDef {
+            regex: Regex::new(r"^>").unwrap(),
+            variant: Token::GreaterThan,
+        },
+    ]
+});
 
 impl Token {
     pub fn variant_str(&self) -> String {
@@ -102,7 +197,7 @@ pub struct SpannedToken {
 
 fn next_token(input: &str) -> Result<TokenMatch, LexerError> {
     let mut matches = vec![];
-    for TokenDef{regex, variant} in TOKEN_DEFS.iter() {
+    for TokenDef { regex, variant } in TOKEN_DEFS.iter() {
         if let Some(mat) = regex.find(input) {
             let token = match variant {
                 Token::Identifier(_) => Token::Identifier(mat.as_str().to_string()),
@@ -128,9 +223,7 @@ pub struct LexerError {
 
 impl LexerError {
     fn new(message: String) -> Self {
-        LexerError {
-            message
-        }
+        LexerError { message }
     }
 }
 
@@ -149,10 +242,11 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
         let trimmed = input.trim_start_matches([' ', '\t']);
         col += input.len() - trimmed.len();
         input = trimmed;
-        
+
         // check for comments and skip them need to support both // and /* */
         // also skipping # for now
-        if ["//", "\n", "#"].iter().any(|s| input.starts_with(s)) { // same line, col logic
+        if ["//", "\n", "#"].iter().any(|s| input.starts_with(s)) {
+            // same line, col logic
             if let Some(newline_index) = input.find('\n') {
                 line += 1;
                 col = 1;
@@ -185,9 +279,13 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
             break;
         }
 
-        match next_token(&input) {
+        match next_token(input) {
             Ok(TokenMatch { token, length }) => {
-                tokens.push_back(SpannedToken { token, line, column: col });
+                tokens.push_back(SpannedToken {
+                    token,
+                    line,
+                    column: col,
+                });
                 col += length; // no newline in tokens
                 input = &input[length..];
             }
@@ -218,7 +316,11 @@ pub(crate) mod tests {
 
     fn run_lexer_test_valid(file: &str, expected: Vec<Token>) {
         let input = std::fs::read_to_string(file).expect("Failed to read input file");
-        let tokens = tokenizer(&input).expect("Lexer failed").iter().map(|t| t.token.clone()).collect::<Vec<_>>();
+        let tokens = tokenizer(&input)
+            .expect("Lexer failed")
+            .iter()
+            .map(|t| t.token.clone())
+            .collect::<Vec<_>>();
         assert_eq!(tokens, expected);
     }
 
@@ -229,61 +331,82 @@ pub(crate) mod tests {
 
     #[test]
     fn test_lexer_multi_digit() {
-        run_lexer_test_valid("../writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c", basic_return(100));
+        run_lexer_test_valid(
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c",
+            basic_return(100),
+        );
     }
 
     #[test]
     fn test_lexer_newlines() {
-        run_lexer_test_valid("../writing-a-c-compiler-tests/tests/chapter_1/valid/newlines.c", basic_return(0))
+        run_lexer_test_valid(
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/newlines.c",
+            basic_return(0),
+        )
     }
 
     #[test]
     fn test_lexer_no_newlines() {
-        run_lexer_test_valid("../writing-a-c-compiler-tests/tests/chapter_1/valid/no_newlines.c", basic_return(0))
+        run_lexer_test_valid(
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/no_newlines.c",
+            basic_return(0),
+        )
     }
 
     #[test]
     fn test_lexer_return_0() {
-        run_lexer_test_valid("../writing-a-c-compiler-tests/tests/chapter_1/valid/return_0.c", basic_return(0))
+        run_lexer_test_valid(
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/return_0.c",
+            basic_return(0),
+        )
     }
 
     #[test]
     fn test_lexer_return_2() {
-        run_lexer_test_valid("../writing-a-c-compiler-tests/tests/chapter_1/valid/return_2.c", basic_return(2))
+        run_lexer_test_valid(
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/return_2.c",
+            basic_return(2),
+        )
     }
 
     #[test]
     fn test_lexer_spaces() {
-        run_lexer_test_valid("../writing-a-c-compiler-tests/tests/chapter_1/valid/spaces.c", basic_return(0))
+        run_lexer_test_valid(
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/spaces.c",
+            basic_return(0),
+        )
     }
 
     #[test]
     fn test_lexer_tabs() {
-        run_lexer_test_valid("../writing-a-c-compiler-tests/tests/chapter_1/valid/tabs.c", basic_return(0))
+        run_lexer_test_valid(
+            "writing-a-c-compiler-tests/tests/chapter_1/valid/tabs.c",
+            basic_return(0),
+        )
     }
 
     #[test]
     fn test_lexer_at_sign() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/at_sign.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/at_sign.c")
     }
 
     #[test]
     fn test_lexer_backslash() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backslash.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backslash.c")
     }
 
     #[test]
     fn test_lexer_backtick() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backtick.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backtick.c")
     }
 
     #[test]
     fn test_lexer_invalid_identifier() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier.c")
     }
 
     #[test]
     fn test_lexer_invalid_identifier2() {
-        run_lexer_test_invalid("../writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier_2.c")
+        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier_2.c")
     }
 }
