@@ -18,9 +18,8 @@ jobs:
 
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
-          override: true
+          override: false
 
       # Cache crates + build artefacts + helper binaries
       - name: Cache cargo, target and helper bins
