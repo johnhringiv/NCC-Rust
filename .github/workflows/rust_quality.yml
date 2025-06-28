@@ -31,8 +31,21 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # ──────────────────────────────────────────────────────────────
+          # Primary key – exact Cargo.lock hash (reliable, reproducible)
+          # Fallback  – hash of all Cargo.toml files if lock file missing
+          # ──────────────────────────────────────────────────────────────
+          key: |
+            ${{ runner.os }}-cargo-${{
+              hashFiles('**/Cargo.lock') != '' &&
+              hashFiles('**/Cargo.lock') || 'nolock-' + hashFiles('**/Cargo.toml')
+            }}
           restore-keys: |
+            # Exact match (if it exists)
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            # Any cache for this OS that was produced without a lock file
+            ${{ runner.os }}-cargo-nolock-
+            # Last-ditch: any cargo cache on this OS
             ${{ runner.os }}-cargo-
 
       # Install helpers only if cache missed them
