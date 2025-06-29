@@ -4,9 +4,11 @@ mod lexer;
 mod parser;
 mod pretty;
 mod tacky;
+mod emit_iced;
 
 use crate::pretty::ItfDisplay;
 use clap::{ArgGroup, Parser};
+use libc;
 use std::fs;
 use std::path::Path;
 
@@ -15,7 +17,7 @@ use std::path::Path;
 #[command(group(
     ArgGroup::new("mode")
         .required(false)
-        .args(&["lex", "parse", "codegen", "s", "tacky", "run"])
+        .args(&["lex", "parse", "codegen", "s", "tacky", "run", "iced"])
 ))]
 struct Args {
     /// Run lexer
@@ -41,6 +43,10 @@ struct Args {
     /// Run the compiled program
     #[arg(long, name = "run")]
     run: bool,
+
+    /// Use iced-x86 JIT
+    #[arg(long)]
+    iced: bool,
 
     #[arg(short = 'o', long)]
     output: Option<String>,
@@ -92,36 +98,57 @@ fn main() {
         std::process::exit(0);
     }
 
-    let asm = emit::emit_program(&code_ast);
-    if args.s {
-        print!("Generated asm:\n\n{}", asm);
-    }
-    let path = Path::new(&args.filename);
-    let out_file = args
-        .output
-        .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
-    let asm_file = format!("{}.s", out_file);
+    if args.iced {
+        let code = emit_iced::emit_program(&code_ast).expect("iced emission");
+        unsafe {
+            let ptr = libc::mmap(
+                std::ptr::null_mut(),
+                code.len(),
+                libc::PROT_WRITE | libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            );
+            if ptr == libc::MAP_FAILED {
+                panic!("mmap failed");
+            }
+            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+            let func: extern "C" fn() -> i32 = std::mem::transmute(ptr);
+            let result = func();
+            println!("Result: {}", result);
+        }
+    } else {
+        let asm = emit::emit_program(&code_ast);
+        if args.s {
+            print!("Generated asm:\n\n{}", asm);
+        }
+        let path = Path::new(&args.filename);
+        let out_file = args
+            .output
+            .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
+        let asm_file = format!("{}.s", out_file);
 
-    fs::write(&asm_file, asm).expect("Failed to write assembly file");
+        fs::write(&asm_file, asm).expect("Failed to write assembly file");
 
-    let status = std::process::Command::new("gcc")
-        .arg(&asm_file)
-        .arg("-o")
-        .arg(out_file.clone())
-        .status()
-        .expect("Failed to execute gcc");
-
-    if !status.success() {
-        println!("Compilation failed with status: {}", status);
-        std::process::exit(1);
-    }
-
-    fs::remove_file(&asm_file).expect("Failed to delete assembly file");
-
-    if args.run {
-        let run_status = std::process::Command::new(&out_file)
+        let status = std::process::Command::new("gcc")
+            .arg(&asm_file)
+            .arg("-o")
+            .arg(out_file.clone())
             .status()
-            .expect("Failed to execute compiled binary");
-        println!("Result: {}", run_status.code().unwrap());
+            .expect("Failed to execute gcc");
+
+        if !status.success() {
+            println!("Compilation failed with status: {}", status);
+            std::process::exit(1);
+        }
+
+        fs::remove_file(&asm_file).expect("Failed to delete assembly file");
+
+        if args.run {
+            let run_status = std::process::Command::new(&out_file)
+                .status()
+                .expect("Failed to execute compiled binary");
+            println!("Result: {}", run_status.code().unwrap());
+        }
     }
 }
