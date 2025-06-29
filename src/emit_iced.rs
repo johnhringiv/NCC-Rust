@@ -138,6 +138,8 @@ fn emit_instruction(a: &mut CodeAssembler, ins: &Instruction, labels: &mut HashM
                 (Operand::Reg(r1), Operand::Stack(off)) => a.cmp(gpr32(r1), mem_rbp(*off))?,
                 (Operand::Stack(off), Operand::Reg(r)) => a.cmp(mem_rbp(*off), gpr32(r))?,
                 (Operand::Stack(o1), Operand::Imm(v)) => a.cmp(mem_rbp(*o1), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(r)) => a.cmp(gpr32(r), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.cmp(mem_rbp(*off), *v as i32)?,
                 _ => unimplemented!(),
             }
         }
