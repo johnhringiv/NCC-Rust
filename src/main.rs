@@ -8,7 +8,7 @@ mod emit_iced;
 
 use crate::pretty::ItfDisplay;
 use clap::{ArgGroup, Parser};
-use libc;
+use libwild::{Args as WildArgs, Linker};
 use std::fs;
 use std::path::Path;
 
@@ -99,23 +99,24 @@ fn main() {
     }
 
     if args.iced {
-        let code = emit_iced::emit_program(&code_ast).expect("iced emission");
-        unsafe {
-            let ptr = libc::mmap(
-                std::ptr::null_mut(),
-                code.len(),
-                libc::PROT_WRITE | libc::PROT_READ | libc::PROT_EXEC,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            );
-            if ptr == libc::MAP_FAILED {
-                panic!("mmap failed");
-            }
-            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
-            let func: extern "C" fn() -> i32 = std::mem::transmute(ptr);
-            let result = func();
-            println!("Result: {}", result);
+        let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
+        let path = Path::new(&args.filename);
+        let out_file = args
+            .output
+            .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
+        let obj_file = format!("{}.o", out_file);
+        fs::write(&obj_file, &obj).expect("Failed to write object file");
+        let linker = Linker::new();
+        let args_vec = ["-o", &out_file, &obj_file, "--entry", "_start"];
+        let parsed = WildArgs::parse(args_vec.iter()).expect("parse args");
+        let _ = libwild::setup_tracing(&parsed);
+        linker.run(&parsed).expect("link failed");
+        fs::remove_file(&obj_file).ok();
+        if args.run {
+            let run_status = std::process::Command::new(&out_file)
+                .status()
+                .expect("Failed to execute compiled binary");
+            println!("Result: {}", run_status.code().unwrap());
         }
     } else {
         let asm = emit::emit_program(&code_ast);

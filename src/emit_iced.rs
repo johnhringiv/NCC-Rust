@@ -2,6 +2,9 @@
 use iced_x86::code_asm::*;
 use iced_x86::code_asm::registers::{self, gpr64, gpr8};
 use iced_x86::IcedError;
+use iced_x86::BlockEncoderOptions;
+use object::write::{Object, StandardSection, Symbol, SymbolSection, SymbolFlags, SymbolKind, SymbolScope};
+use object::{Architecture, BinaryFormat, Endianness};
 use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp};
 use std::collections::HashMap;
 
@@ -9,6 +12,50 @@ pub fn emit_program(program: &codegen::Program) -> Result<Vec<u8>, IcedError> {
     let mut a = CodeAssembler::new(64)?;
     emit_function(&mut a, &program.function)?;
     a.assemble(0)
+}
+
+pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut a = CodeAssembler::new(64)?;
+    let mut start_lbl = a.create_label();
+    let mut main_lbl = a.create_label();
+    a.set_label(&mut start_lbl)?;
+    a.call(main_lbl)?;
+    a.mov(gpr64::rdi, gpr64::rax)?;
+    a.mov(gpr64::rax, 60i64)?;
+    a.syscall()?;
+    a.set_label(&mut main_lbl)?;
+    emit_function(&mut a, &program.function)?;
+    let result = a.assemble_options(0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
+    let start_off = result.label_ip(&start_lbl)?;
+    let main_off = result.label_ip(&main_lbl)?;
+    let code = result.inner.code_buffer;
+    let start_size = main_off - start_off;
+    let main_size = code.len() as u64 - main_off;
+    let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    obj.add_file_symbol(b"ncc".to_vec());
+    let text = obj.section_id(StandardSection::Text);
+    obj.append_section_data(text, &code, 1);
+    obj.add_symbol(Symbol {
+        name: b"_start".to_vec(),
+        value: start_off,
+        size: start_size,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    obj.add_symbol(Symbol {
+        name: b"main".to_vec(),
+        value: main_off,
+        size: main_size,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    Ok(obj.write()?)
 }
 
 fn emit_function(a: &mut CodeAssembler, fun_def: &codegen::FunctionDefinition) -> Result<(), IcedError> {
