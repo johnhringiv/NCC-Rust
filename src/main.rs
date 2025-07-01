@@ -107,7 +107,7 @@ fn main() {
         let obj_file = format!("{}.o", out_file);
         fs::write(&obj_file, &obj).expect("Failed to write object file");
         let linker = Linker::new();
-        let args_vec = ["-o", &out_file, &obj_file, "--entry", "_start"];
+        let args_vec = ["-o", &out_file, &obj_file, "--entry=_start"];
         let parsed = WildArgs::parse(args_vec.iter()).expect("parse args");
         let _ = libwild::setup_tracing(&parsed);
         linker.run(&parsed).expect("link failed");
