@@ -20,6 +20,13 @@ Clone the repository and build with Cargo:
 cargo build --release
 ```
 
+If Cargo fails with an error about `symbolic-common` not matching any
+available versions, update the crates index and lock file:
+
+```sh
+cargo update
+```
+
 ### Running Tests
 ```sh
  ./writing-a-c-compiler-tests/test_compiler target/release/ncc --chapter 4 --bitwise
