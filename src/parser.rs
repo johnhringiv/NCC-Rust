@@ -103,17 +103,14 @@ impl SyntaxError {
         let expected = expected.as_ref().map(|t| t.variant_str()).unwrap_or("None".to_string());
         let (found_str, loc_str) = Self::get_found_strs(found);
         SyntaxError {
-            message: format!(r#"expected: {:?}, found: {:?}{}"#, expected, found_str, loc_str),
+            message: format!(r#"expected: {expected:?}, found: {found_str:?}{loc_str}"#),
         }
     }
 
     pub fn expression(found: Option<SpannedToken>) -> Self {
         let (found_str, loc_str) = Self::get_found_strs(found);
         SyntaxError {
-            message: format!(
-                r#"expected an expression <int> | <unop> <exp> | (<exp>), found: {:?}{}"#,
-                found_str, loc_str
-            ),
+            message: format!(r#"expected an expression <int> | <unop> <exp> | (<exp>), found: {found_str:?}{loc_str}"#),
         }
     }
 }
@@ -271,10 +268,10 @@ impl ItfDisplay for Identifier {
 impl ItfDisplay for Expr {
     fn itf_node(&self) -> Node {
         match self {
-            Expr::Constant(c) => Node::leaf(yellow(format!("Constant({})", c))),
-            Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({:?})", op)), vec![e.itf_node()]),
+            Expr::Constant(c) => Node::leaf(yellow(format!("Constant({c})"))),
+            Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({op:?})")), vec![e.itf_node()]),
             Expr::Binary(op, e1, e2) => {
-                Node::branch(cyan(format!("Binary ({:?})", op)), vec![e1.itf_node(), e2.itf_node()])
+                Node::branch(cyan(format!("Binary ({op:?})")), vec![e1.itf_node(), e2.itf_node()])
             }
         }
     }

@@ -172,7 +172,7 @@ impl Token {
         match self {
             Token::Identifier(_) => "Identifier".to_string(),
             Token::ConstantInt(_) => "ConstantInt".to_string(),
-            other => format!("{:?}", other),
+            other => format!("{other:?}"),
         }
     }
 }
@@ -213,7 +213,7 @@ fn next_token(input: &str) -> Result<TokenMatch, LexerError> {
     if let Some(best_match) = matches.iter().max_by_key(|m| m.length) {
         Ok(best_match.clone())
     } else {
-        Err(LexerError::new(format!("No token matched on: '{}'", input)))
+        Err(LexerError::new(format!("No token matched on: '{input}'")))
     }
 }
 

@@ -635,7 +635,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "iced-x86",
- "libc",
  "libwild",
  "object 0.37.1",
  "regex",
