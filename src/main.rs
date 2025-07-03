@@ -1,5 +1,6 @@
 mod codegen;
 mod emit;
+mod emit_iced;
 mod lexer;
 mod parser;
 mod pretty;
@@ -7,6 +8,8 @@ mod tacky;
 
 use crate::pretty::ItfDisplay;
 use clap::{ArgGroup, Parser};
+use iced_x86::Formatter;
+use libwild::{Args as WildArgs, Linker};
 use std::fs;
 use std::path::Path;
 
@@ -42,6 +45,10 @@ struct Args {
     #[arg(long, name = "run")]
     run: bool,
 
+    /// Use GCC for assembling and linking
+    #[arg(long)]
+    gcc: bool,
+
     #[arg(short = 'o', long)]
     output: Option<String>,
 
@@ -73,7 +80,7 @@ fn main() {
 
     if args.parse {
         let ast_val = ast.unwrap();
-        println!("{:?}", ast_val);
+        println!("{ast_val:?}");
         println!("{}", ast_val.itf_string());
         std::process::exit(0);
     }
@@ -81,7 +88,7 @@ fn main() {
     let tacky_ast = tacky::tackify_program(&ast.unwrap());
 
     if args.tacky {
-        println!("{:?}", tacky_ast);
+        println!("{tacky_ast:?}");
         println!("{}", tacky_ast.itf_string());
         std::process::exit(0);
     }
@@ -92,31 +99,59 @@ fn main() {
         std::process::exit(0);
     }
 
-    let asm = emit::emit_program(&code_ast);
-    if args.s {
-        print!("Generated asm:\n\n{}", asm);
-    }
     let path = Path::new(&args.filename);
     let out_file = args
         .output
         .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
-    let asm_file = format!("{}.s", out_file);
 
-    fs::write(&asm_file, asm).expect("Failed to write assembly file");
+    if !args.gcc {
+        // use iced_x86 for assembly generation
+        let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
 
-    let status = std::process::Command::new("gcc")
-        .arg(&asm_file)
-        .arg("-o")
-        .arg(out_file.clone())
-        .status()
-        .expect("Failed to execute gcc");
+        if args.s {
+            let mut formatter = iced_x86::GasFormatter::new();
+            let mut output = String::new();
 
-    if !status.success() {
-        println!("Compilation failed with status: {}", status);
-        std::process::exit(1);
+            println!("Generated ASM");
+            let asm = emit_iced::get_instructions(&code_ast).unwrap();
+            for ins in asm {
+                output.clear();
+                formatter.format(&ins, &mut output);
+                println!("{output}");
+            }
+        }
+
+        let obj_file = format!("{out_file}.o");
+        fs::write(&obj_file, &obj).expect("Failed to write object file");
+        let linker = Linker::new();
+        let args_vec = ["-o", &out_file, &obj_file, "--entry=_start"];
+        let parsed = WildArgs::parse(args_vec.iter()).expect("parse args");
+        let _ = libwild::setup_tracing(&parsed);
+        linker.run(&parsed).expect("link failed");
+        fs::remove_file(&obj_file).ok();
+    } else {
+        let asm = emit::emit_program(&code_ast);
+        if args.s {
+            print!("Generated asm:\n\n{asm}");
+        }
+        let asm_file = format!("{out_file}.s");
+
+        fs::write(&asm_file, asm).expect("Failed to write assembly file");
+
+        let status = std::process::Command::new("gcc")
+            .arg(&asm_file)
+            .arg("-o")
+            .arg(out_file.clone())
+            .status()
+            .expect("Failed to execute gcc");
+
+        if !status.success() {
+            println!("Compilation failed with status: {status}");
+            std::process::exit(1);
+        }
+
+        fs::remove_file(&asm_file).expect("Failed to delete assembly file");
     }
-
-    fs::remove_file(&asm_file).expect("Failed to delete assembly file");
 
     if args.run {
         let run_status = std::process::Command::new(&out_file)

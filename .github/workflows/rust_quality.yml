@@ -21,7 +21,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal           # faster install
-          toolchain: "1.87.0"
+          toolchain: "1.88.0"
           components: clippy, rustfmt
           override: true
 
