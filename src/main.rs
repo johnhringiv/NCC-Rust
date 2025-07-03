@@ -104,7 +104,8 @@ fn main() {
         .output
         .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
 
-    if !args.gcc { // use iced_x86 for assembly generation
+    if !args.gcc {
+        // use iced_x86 for assembly generation
         let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
 
         if args.s {

@@ -3,8 +3,10 @@ use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryO
 use iced_x86::BlockEncoderOptions;
 use iced_x86::IcedError;
 use iced_x86::code_asm::*;
-use object::write::{Object, StandardSection, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection};
-use object::{Architecture, BinaryFormat, Endianness};
+use object::write::{
+    Object, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection,
+};
+use object::{Architecture, BinaryFormat, Endianness, SectionKind};
 use std::collections::HashMap;
 
 pub fn get_instructions(program: &codegen::Program) -> Result<Vec<iced_x86::Instruction>, IcedError> {
@@ -24,14 +26,27 @@ pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::e
     a.syscall()?;
     a.set_label(&mut main_lbl)?;
     emit_function(&mut a, &program.function)?;
-
     let result = a.assemble_options(0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
     let start_off = result.label_ip(&start_lbl)?;
     let main_off = result.label_ip(&main_lbl)?;
     let code = result.inner.code_buffer;
     let start_size = main_off - start_off;
     let main_size = code.len() as u64 - main_off;
-    let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+
+    let mut obj = if cfg!(target_os = "linux") {
+        let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+
+        let note_stack = obj.add_section(
+            obj.segment_name(StandardSegment::Data).to_vec(),
+            b".note.GNU-stack".to_vec(),
+            SectionKind::Metadata,
+        );
+        obj.append_section_data(note_stack, &[], 1);
+        obj
+    } else {
+        Object::new(BinaryFormat::MachO, Architecture::X86_64, Endianness::Little)
+    };
+
     obj.add_file_symbol(b"ncc".to_vec());
     let text = obj.section_id(StandardSection::Text);
     obj.append_section_data(text, &code, 1);
