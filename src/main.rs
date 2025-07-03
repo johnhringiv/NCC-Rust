@@ -45,9 +45,9 @@ struct Args {
     #[arg(long, name = "run")]
     run: bool,
 
-    /// Use iced-x86 JIT
+    /// Use GCC for assembling and linking
     #[arg(long)]
-    iced: bool,
+    gcc: bool,
 
     #[arg(short = 'o', long)]
     output: Option<String>,
@@ -104,7 +104,7 @@ fn main() {
         .output
         .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
 
-    if args.iced {
+    if !args.gcc { // use iced_x86 for assembly generation
         let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
 
         if args.s {

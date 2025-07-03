@@ -2,7 +2,6 @@
 use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp};
 use iced_x86::BlockEncoderOptions;
 use iced_x86::IcedError;
-use iced_x86::code_asm::registers::{self, gpr8, gpr64};
 use iced_x86::code_asm::*;
 use object::write::{Object, StandardSection, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness};
