@@ -65,19 +65,6 @@ pub enum CondCode {
     LE,
 }
 
-impl CondCode {
-    pub fn ins_suffix(&self) -> String {
-        match self {
-            CondCode::E => "e".to_string(),
-            CondCode::NE => "ne".to_string(),
-            CondCode::G => "g".to_string(),
-            CondCode::GE => "ge".to_string(),
-            CondCode::L => "l".to_string(),
-            CondCode::LE => "le".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq)]
 pub struct FunctionDefinition {
     pub name: String,
@@ -370,6 +357,7 @@ pub fn replace_pseudo_registers(program: &mut Program) -> i64 {
     stack_mapping.offset
 }
 
+// todo this could be merged into emit_iced
 pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
     let Program {
         function: FunctionDefinition { name: _, body },

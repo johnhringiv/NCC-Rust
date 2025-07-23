@@ -5,4 +5,8 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.39", features = ["derive"] }
+colored = "3.0.0"
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "code_asm", "gas"] }
+libwild = "0.5.0"
+object = { version = "0.37.1", features = ["write"] }
 regex = "1.11.1"
