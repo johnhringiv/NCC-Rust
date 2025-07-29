@@ -84,14 +84,18 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
     }
 }
 
-// todo default to external linker on macOS
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
     let input = fs::read_to_string(&args.filename).expect("Failed to read input file");
     let tokens = lexer::tokenizer(&input);
     if tokens.is_err() {
         println!("Failed to tokenize: {:?}", tokens.err().unwrap());
         std::process::exit(1)
+    }
+
+    if cfg!(target_os = "macos") & !args.gcc {
+        println!("Using GCC as libwild does not support MacOS");
+        args.gcc = true;
     }
 
     if args.lex {
@@ -179,4 +183,11 @@ fn main() {
         linker.run(&parsed).expect("link failed");
     }
     fs::remove_file(&obj_file).ok();
+
+    if args.run {
+        let run_status = std::process::Command::new(&out_file)
+            .status()
+            .expect("Failed to execute compiled binary");
+        println!("Result: {}", run_status.code().unwrap());
+    }
 }

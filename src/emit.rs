@@ -22,7 +22,13 @@ pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::e
     a.set_label(&mut start_lbl)?;
     a.call(main_lbl)?;
     a.mov(gpr64::rdi, gpr64::rax)?;
-    a.mov(gpr64::rax, 60i64)?;
+    if cfg!(target_os = "macos") {
+        // macOS exit syscall is 0x2000001
+        a.mov(gpr64::rax, 0x2000001i64)?;
+    } else {
+        // Linux exit syscall is 60
+        a.mov(gpr64::rax, 60i64)?;
+    }
     a.syscall()?;
     a.set_label(&mut main_lbl)?;
     emit_function(&mut a, &program.function)?;
@@ -50,8 +56,13 @@ pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::e
     obj.add_file_symbol(b"ncc".to_vec());
     let text = obj.section_id(StandardSection::Text);
     obj.append_section_data(text, &code, 1);
+    let symbol_name = if cfg!(target_os = "macos") {
+        b"start".to_vec()
+    } else {
+        b"_start".to_vec() 
+    };
     obj.add_symbol(Symbol {
-        name: b"_start".to_vec(),
+        name: symbol_name,
         value: start_off,
         size: start_size,
         kind: SymbolKind::Text,
