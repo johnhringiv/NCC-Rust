@@ -65,6 +65,19 @@ pub enum CondCode {
     LE,
 }
 
+impl CondCode {
+    pub fn ins_suffix(&self) -> String {
+        match self {
+            CondCode::E => "e".to_string(),
+            CondCode::NE => "ne".to_string(),
+            CondCode::G => "g".to_string(),
+            CondCode::GE => "ge".to_string(),
+            CondCode::L => "l".to_string(),
+            CondCode::LE => "le".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct FunctionDefinition {
     pub name: String,
