@@ -370,6 +370,7 @@ pub fn replace_pseudo_registers(program: &mut Program) -> i64 {
     stack_mapping.offset
 }
 
+// todo this could be merged into emit_iced
 pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
     let Program {
         function: FunctionDefinition { name: _, body },

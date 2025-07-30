@@ -1,19 +1,19 @@
 use std::fmt;
 
 pub fn cyan<T: std::fmt::Display>(text: T) -> String {
-    format!("\x1b[36m{}\x1b[0m", text)
+    format!("\x1b[36m{text}\x1b[0m")
 }
 
 pub fn green<T: fmt::Display>(text: T) -> String {
-    format!("\x1b[32m{}\x1b[0m", text)
+    format!("\x1b[32m{text}\x1b[0m")
 }
 
 pub fn magenta<T: fmt::Display>(text: T) -> String {
-    format!("\x1b[35m{}\x1b[0m", text)
+    format!("\x1b[35m{text}\x1b[0m")
 }
 
 pub fn yellow<T: fmt::Display>(text: T) -> String {
-    format!("\x1b[33m{}\x1b[0m", text)
+    format!("\x1b[33m{text}\x1b[0m")
 }
 
 #[derive(Clone)]
@@ -47,9 +47,9 @@ impl Node {
         let new_prefix = if root {
             String::new()
         } else if last {
-            format!("{}    ", prefix)
+            format!("{prefix}    ")
         } else {
-            format!("{}│   ", prefix)
+            format!("{prefix}│   ")
         };
         for (i, child) in self.children.iter().enumerate() {
             child.fmt_impl(f, &new_prefix, i + 1 == self.children.len(), false)?;

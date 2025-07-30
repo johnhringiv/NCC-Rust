@@ -88,7 +88,7 @@ impl NameGenerator {
     pub fn next(&mut self, base: &str) -> String {
         let count = self.counts.entry(base.to_string()).or_insert(0);
         *count += 1;
-        format!("{}.{}", base, count)
+        format!("{base}.{count}")
     }
 }
 
