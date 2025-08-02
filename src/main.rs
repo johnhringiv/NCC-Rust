@@ -128,18 +128,19 @@ fn main() {
         std::process::exit(0);
     }
 
-    let validated_program = validate::resolve_program(&ast.unwrap());
-    if validated_program.is_err() {
-        println!("{:?}", validated_program.err().unwrap());
+    let mut ast = ast.unwrap();
+    let validated_result = validate::resolve_program(&mut ast);
+    if validated_result.is_err() {
+        println!("{:?}", validated_result.err().unwrap());
         std::process::exit(1);
     }
-    let (valid_ast, mut name_gen) = validated_program.unwrap();
+    let mut name_gen = validated_result.unwrap();
     if args.validate {
         println!("Program Valid");
         std::process::exit(0);
     }
 
-    let tacky_ast = tacky::tackify_program(&valid_ast, &mut name_gen);
+    let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
 
     if args.tacky {
         println!("{tacky_ast:?}");
