@@ -20,11 +20,13 @@ pub enum UnaryOp {
     Not,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Constant(i64),
+    Var(Identifier),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
+    Assignment(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +49,7 @@ pub enum BinOp {
     LessOrEqual,
     GreaterThan,
     GreaterOrEqual,
+    Assignment, // not a binop but we include it for parsing convenience
 }
 
 impl BinOp {
@@ -63,6 +66,7 @@ impl BinOp {
             BinOp::BitwiseOr => 27,
             BinOp::And => 10,
             BinOp::Or => 5,
+            BinOp::Assignment => 1,
         }
     }
 }
@@ -70,12 +74,26 @@ impl BinOp {
 #[derive(Debug, PartialEq)]
 pub enum Stmt {
     Return(Expr),
+    Expression(Expr),
+    Null,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Declaration {
+    pub name: Identifier,
+    pub init: Option<Expr>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum BlockItem {
+    Statement(Stmt),
+    Declaration(Declaration),
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Function {
     pub name: Identifier,
-    pub body: Stmt,
+    pub body: Vec<BlockItem>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -158,6 +176,10 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 expect(&Token::CloseParen, tokens)?;
                 Ok(inner_exp)
             }
+            Token::Identifier(name) => {
+                tokens.pop_front();
+                Ok(Expr::Var(Identifier(name.clone())))
+            }
             _ => Err(SyntaxError::expression(next_token)),
         },
         _ => Err(SyntaxError::expression(next_token)),
@@ -169,9 +191,15 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
     while let Some(operator) = parse_binop(&tokens.front()) {
         let prec = operator.precedence();
         if prec >= min_prec {
-            tokens.pop_front();
-            let right = parse_exp(tokens, prec + 1)?;
-            left = Expr::Binary(operator, Box::from(left), Box::from(right));
+            if operator == BinOp::Assignment {
+                tokens.pop_front();
+                let right = parse_exp(tokens, prec)?;
+                left = Expr::Assignment(Box::from(left), Box::from(right));
+            } else {
+                tokens.pop_front();
+                let right = parse_exp(tokens, prec + 1)?;
+                left = Expr::Binary(operator, Box::from(left), Box::from(right));
+            }
         } else {
             break;
         }
@@ -200,6 +228,7 @@ fn parse_binop(next_token: &Option<&SpannedToken>) -> Option<BinOp> {
             Token::NotEqual => Some(BinOp::NotEqual),
             Token::LogicalAnd => Some(BinOp::And),
             Token::LogicalOr => Some(BinOp::Or),
+            Token::Assignment => Some(BinOp::Assignment),
             _ => None,
         },
         _ => None,
@@ -227,10 +256,44 @@ fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<Identifier, S
 }
 
 fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxError> {
-    expect(&Token::ReturnKeyword, tokens)?;
-    let exp = parse_exp(tokens, 0)?;
-    expect(&Token::Semicolon, tokens)?;
-    Ok(Stmt::Return(exp))
+    let Some(next_token) = tokens.front().cloned() else {
+        unreachable!("parse_statement called with no token")
+    };
+    match next_token.token {
+        Token::ReturnKeyword => {
+            tokens.pop_front();
+            let exp = parse_exp(tokens, 0)?;
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Stmt::Return(exp))
+        }
+        Token::Semicolon => {
+            tokens.pop_front();
+            Ok(Stmt::Null)
+        }
+        _ => {
+            let expr = parse_exp(tokens, 0)?;
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Stmt::Expression(expr))
+        }
+    }
+}
+
+fn parse_block_item(tokens: &mut VecDeque<SpannedToken>) -> Result<BlockItem, SyntaxError> {
+    if tokens.front().expect("parse").token == Token::IntKeyword {
+        // decoration
+        let mut init = None;
+        tokens.pop_front();
+        let name = parse_identifier(tokens)?;
+        if tokens.front().expect("parse").token == Token::Assignment {
+            tokens.pop_front();
+            init = Some(parse_exp(tokens, 0)?);
+        }
+        expect(&Token::Semicolon, tokens)?;
+        Ok(BlockItem::Declaration(Declaration { name, init }))
+    } else {
+        let stmt = parse_statement(tokens)?;
+        Ok(BlockItem::Statement(stmt))
+    }
 }
 
 fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<Function, SyntaxError> {
@@ -240,11 +303,17 @@ fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<Func
     expect(&Token::VoidKeyword, tokens)?;
     expect(&Token::CloseParen, tokens)?;
     expect(&Token::OpenBrace, tokens)?;
-
-    let body = parse_statement(tokens)?;
+    let mut function_body = Vec::new();
+    while tokens.front().is_some() && tokens.front().unwrap().token != Token::CloseBrace {
+        let next_block = parse_block_item(tokens)?;
+        function_body.push(next_block);
+    }
     expect(&Token::CloseBrace, tokens)?;
 
-    Ok(Function { name, body })
+    Ok(Function {
+        name,
+        body: function_body,
+    })
 }
 
 pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, SyntaxError> {
@@ -269,10 +338,12 @@ impl ItfDisplay for Expr {
     fn itf_node(&self) -> Node {
         match self {
             Expr::Constant(c) => Node::leaf(yellow(format!("Constant({c})"))),
+            Expr::Var(id) => id.itf_node(),
             Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({op:?})")), vec![e.itf_node()]),
             Expr::Binary(op, e1, e2) => {
                 Node::branch(cyan(format!("Binary ({op:?})")), vec![e1.itf_node(), e2.itf_node()])
             }
+            Expr::Assignment(lhs, rhs) => Node::branch(cyan("Assignment"), vec![lhs.itf_node(), rhs.itf_node()]),
         }
     }
 }
@@ -280,6 +351,28 @@ impl ItfDisplay for Stmt {
     fn itf_node(&self) -> Node {
         match self {
             Stmt::Return(expr) => Node::branch(cyan("Return"), vec![expr.itf_node()]),
+            Stmt::Expression(expr) => Node::branch(cyan("Expression"), vec![expr.itf_node()]),
+            Stmt::Null => Node::leaf(cyan("Null")),
+        }
+    }
+}
+impl ItfDisplay for Declaration {
+    fn itf_node(&self) -> Node {
+        let name_node = Node::leaf(format!("name: {}", self.name.itf_node().text));
+        match &self.init {
+            Some(init_expr) => {
+                let init_node = Node::branch("init:", vec![init_expr.itf_node()]);
+                Node::branch(cyan("Declaration"), vec![name_node, init_node])
+            }
+            None => Node::branch(cyan("Declaration"), vec![name_node]),
+        }
+    }
+}
+impl ItfDisplay for BlockItem {
+    fn itf_node(&self) -> Node {
+        match self {
+            BlockItem::Statement(stmt) => stmt.itf_node(),
+            BlockItem::Declaration(decl) => decl.itf_node(),
         }
     }
 }
@@ -301,6 +394,7 @@ impl ItfDisplay for Program {
 mod tests {
     use super::*;
     use crate::lexer::tokenizer;
+    use crate::parser::Stmt::Return;
 
     #[test]
     fn basic_return() {
@@ -311,7 +405,7 @@ mod tests {
         let expected = Program {
             function: Function {
                 name: Identifier("main".to_string()),
-                body: Stmt::Return(Expr::Constant(100)),
+                body: vec![BlockItem::Statement(Return(Expr::Constant(100)))],
             },
         };
         assert_eq!(ast, expected);

@@ -1,7 +1,7 @@
 use crate::parser;
-use crate::parser::{Identifier, UnaryOp};
+use crate::parser::{BlockItem, Declaration, Expr, Identifier, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
-use std::collections::HashMap;
+use crate::validate::NameGenerator;
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -74,22 +74,6 @@ pub struct FunctionDefinition {
 #[derive(Debug)]
 pub struct Program {
     pub function: FunctionDefinition,
-}
-
-pub struct NameGenerator {
-    counts: HashMap<String, usize>,
-}
-
-impl NameGenerator {
-    pub fn new() -> NameGenerator {
-        NameGenerator { counts: HashMap::new() }
-    }
-
-    pub fn next(&mut self, base: &str) -> String {
-        let count = self.counts.entry(base.to_string()).or_insert(0);
-        *count += 1;
-        format!("{base}.{count}")
-    }
 }
 
 fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) -> Val {
@@ -176,6 +160,18 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             });
             dst
         }
+        Expr::Var(Identifier(name)) => Val::Var(name.clone()),
+        Expr::Assignment(lhs, rhs) => match lhs.as_ref() {
+            Expr::Var(Identifier(name)) => {
+                let res = tackify_expr(rhs, instructions, name_generator);
+                instructions.push(Instruction::Copy {
+                    src: res.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                Val::Var(name.clone())
+            }
+            _ => unreachable!("Assignment to non-lvalue"),
+        },
     }
 }
 
@@ -185,14 +181,30 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             let val = tackify_expr(expr, instructions, name_generator);
             instructions.push(Instruction::Return(val));
         }
+        parser::Stmt::Expression(e) => {
+            tackify_expr(e, instructions, name_generator);
+        }
+        parser::Stmt::Null => (),
     }
 }
 
 fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let parser::Identifier(name) = &func.name;
+    for item in &func.body {
+        match item {
+            BlockItem::Statement(stmt) => tackify_stmt(stmt, &mut instructions, name_generator),
+            BlockItem::Declaration(Declaration { name, init: Some(e) }) => {
+                let ass = Expr::Assignment(Box::new(Expr::Var(name.clone())), Box::new(e.clone()));
+                tackify_expr(&ass, &mut instructions, name_generator);
+            }
+            BlockItem::Declaration(parser::Declaration { init: None, .. }) => (),
+        }
+    }
 
-    tackify_stmt(&func.body, &mut instructions, name_generator);
+    // Return 0 if the function has no return statement
+    // will not be reached if the function has a return statement
+    instructions.push(Instruction::Return(Val::Constant(0)));
 
     FunctionDefinition {
         name: name.clone(),
@@ -200,10 +212,8 @@ fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator)
     }
 }
 
-pub fn tackify_program(program: &parser::Program) -> Program {
-    let mut name_generator = NameGenerator::new();
-
-    let function = tackify_function(&program.function, &mut name_generator);
+pub fn tackify_program(program: &parser::Program, name_generator: &mut NameGenerator) -> Program {
+    let function = tackify_function(&program.function, name_generator);
 
     Program { function }
 }

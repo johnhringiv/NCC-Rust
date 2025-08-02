@@ -100,3 +100,10 @@ impl ItfDisplay for i64 {
         Node::leaf(magenta(self))
     }
 }
+
+impl<T: ItfDisplay> ItfDisplay for Vec<T> {
+    fn itf_node(&self) -> Node {
+        let children: Vec<Node> = self.iter().map(|item| item.itf_node()).collect();
+        Node::branch(cyan(format!("[{}]", self.len())), children)
+    }
+}
