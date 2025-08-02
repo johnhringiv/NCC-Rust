@@ -1,9 +1,7 @@
 /*
    We allow undefined behavior that is valid c like int foo = foo + 1;
-
-   todo: If we had a token mapping, we could provide better error messages
 */
-use crate::parser::{BlockItem, Declaration, Expr, Function, Identifier, Program, Stmt};
+use crate::parser::{BlockItem, Declaration, Expr, Identifier, Program, Stmt};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -33,62 +31,54 @@ impl NameGenerator {
     }
 }
 
-// todo just mut init
-fn resolve_exp(exp: &Expr, variable_map: &HashMap<String, String>) -> Result<Expr, SemanticError> {
+fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, String>) -> Result<(), SemanticError> {
     match exp {
         Expr::Assignment(e1, e2) => match &**e1 {
             Expr::Var(_) => {
-                let resolved_e1 = resolve_exp(e1, variable_map)?;
-                let resolved_e2 = resolve_exp(e2, variable_map)?;
-                Ok(Expr::Assignment(Box::new(resolved_e1), Box::new(resolved_e2)))
+                resolve_exp(e1, variable_map)?;
+                resolve_exp(e2, variable_map)?;
+                Ok(())
             }
             _ => Err(SemanticError {
                 message: "Left-hand side of assignment must be a variable".to_string(),
             }),
         },
         Expr::Var(Identifier(name)) => match variable_map.get(name) {
-            Some(resolved_name) => Ok(Expr::Var(Identifier(resolved_name.clone()))),
+            Some(resolved_name) => {
+                *name = resolved_name.clone();
+                Ok(())
+            }
             None => Err(SemanticError {
                 message: format!("Variable \"{name}\" not defined"),
             }),
         },
-        Expr::Unary(op, e) => {
-            let resolved_e = resolve_exp(e, variable_map)?;
-            Ok(Expr::Unary(op.clone(), Box::new(resolved_e)))
+        Expr::Unary(_, e) => {
+            resolve_exp(e, variable_map)
         }
-        Expr::Binary(op, left, right) => {
-            let resolved_left = resolve_exp(left, variable_map)?;
-            let resolved_right = resolve_exp(right, variable_map)?;
-            Ok(Expr::Binary(
-                op.clone(),
-                Box::new(resolved_left),
-                Box::new(resolved_right),
-            ))
+        Expr::Binary(_, left, right) => {
+            resolve_exp(left, variable_map)?;
+            resolve_exp(right, variable_map)
         }
-        Expr::Constant(n) => Ok(Expr::Constant(*n)),
+        Expr::Constant(_) => Ok(()),
     }
 }
 
 fn resolve_decoration(
-    dec: &Declaration,
+    dec: &mut Declaration,
     variable_map: &mut HashMap<String, String>,
     name_gen: &mut NameGenerator,
-) -> Result<Declaration, SemanticError> {
-    let Declaration {
-        name: Identifier(name),
-        init,
-    } = dec;
+) -> Result<(), SemanticError> {
+    let Identifier(name) = &dec.name;
     if let std::collections::hash_map::Entry::Vacant(e) = variable_map.entry(name.clone()) {
         let unique_name = name_gen.next(name);
         e.insert(unique_name.clone());
-        let new_init = match init {
-            Some(e) => Some(resolve_exp(e, variable_map)?),
-            None => None,
-        };
-        Ok(Declaration {
-            name: Identifier(unique_name),
-            init: new_init,
-        })
+        dec.name = Identifier(unique_name);
+        
+        // Resolve the initializer if present
+        if let Some(init_expr) = &mut dec.init {
+            resolve_exp(init_expr, variable_map)?;
+        }
+        Ok(())
     } else {
         Err(SemanticError {
             message: format!("Variable \"{name}\" already defined"),
@@ -96,37 +86,28 @@ fn resolve_decoration(
     }
 }
 
-fn resolve_statement(statement: &Stmt, variable_map: &HashMap<String, String>) -> Result<Stmt, SemanticError> {
+fn resolve_statement(statement: &mut Stmt, variable_map: &HashMap<String, String>) -> Result<(), SemanticError> {
     match statement {
-        Stmt::Return(e) => Ok(Stmt::Return(resolve_exp(e, variable_map)?)),
-        Stmt::Expression(e) => Ok(Stmt::Expression(resolve_exp(e, variable_map)?)),
-        Stmt::Null => Ok(Stmt::Null),
+        Stmt::Return(e) => resolve_exp(e, variable_map),
+        Stmt::Expression(e) => resolve_exp(e, variable_map),
+        Stmt::Null => Ok(()),
     }
 }
 
-pub fn resolve_program(program: &Program) -> Result<(Program, NameGenerator), SemanticError> {
-    let Program {
-        function: Function { name, body },
-    } = program;
-    let mut new_body = Vec::with_capacity(body.len());
+pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticError> {
     let mut variable_map = HashMap::new();
     let mut name_gen = NameGenerator::new();
-    for bi in body {
-        let new_item = match bi {
-            BlockItem::Statement(s) => BlockItem::Statement(resolve_statement(s, &variable_map)?),
-            BlockItem::Declaration(d) => {
-                BlockItem::Declaration(resolve_decoration(d, &mut variable_map, &mut name_gen)?)
+    
+    for bi in &mut program.function.body {
+        match bi {
+            BlockItem::Statement(s) => {
+                resolve_statement(s, &variable_map)?;
             }
-        };
-        new_body.push(new_item);
+            BlockItem::Declaration(d) => {
+                resolve_decoration(d, &mut variable_map, &mut name_gen)?;
+            }
+        }
     }
-    Ok((
-        Program {
-            function: Function {
-                name: name.clone(),
-                body: new_body,
-            },
-        },
-        name_gen,
-    ))
+    
+    Ok(name_gen)
 }
