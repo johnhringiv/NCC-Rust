@@ -1,18 +1,39 @@
 /*
    We allow undefined behavior that is valid c like int foo = foo + 1;
 */
-use crate::parser::{BlockItem, Declaration, Expr, Identifier, Program, Stmt};
+use crate::parser::{BlockItem, Declaration, Expr, Identifier, Program, Stmt, Span};
 use std::collections::HashMap;
 use std::fmt;
 
 pub struct SemanticError {
     message: String,
+    span: Option<Span>,
+}
+
+impl SemanticError {
+    fn new(message: String) -> Self {
+        SemanticError { message, span: None }
+    }
+    
+    fn with_span(message: String, span: Span) -> Self {
+        SemanticError { message, span: Some(span) }
+    }
 }
 
 impl fmt::Debug for SemanticError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SemanticError: {}", self.message)
+        match self.span {
+            Some(span) => write!(f, "SemanticError at line {}, column {}: {}", 
+                               span.line, span.column, self.message),
+            None => write!(f, "SemanticError: {}", self.message),
+        }
     }
+}
+
+// Stores information about a declared variable
+struct VarInfo {
+    renamed: String,
+    span: Span,
 }
 
 pub struct NameGenerator {
@@ -31,26 +52,28 @@ impl NameGenerator {
     }
 }
 
-fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, String>) -> Result<(), SemanticError> {
+fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Result<(), SemanticError> {
     match exp {
-        Expr::Assignment(e1, e2) => match &**e1 {
-            Expr::Var(_) => {
+        Expr::Assignment(e1, e2, span) => match &**e1 {
+            Expr::Var(_, _) => {
                 resolve_exp(e1, variable_map)?;
                 resolve_exp(e2, variable_map)?;
                 Ok(())
             }
-            _ => Err(SemanticError {
-                message: "Left-hand side of assignment must be a variable".to_string(),
-            }),
+            _ => Err(SemanticError::with_span(
+                "Left-hand side of assignment must be a variable".to_string(),
+                *span
+            )),
         },
-        Expr::Var(Identifier(name)) => match variable_map.get(name) {
-            Some(resolved_name) => {
-                *name = resolved_name.clone();
+        Expr::Var(Identifier(name), span) => match variable_map.get(name) {
+            Some(var_info) => {
+                *name = var_info.renamed.clone();
                 Ok(())
             }
-            None => Err(SemanticError {
-                message: format!("Variable \"{name}\" not defined"),
-            }),
+            None => Err(SemanticError::with_span(
+                format!("Variable \"{name}\" not defined"),
+                *span
+            )),
         },
         Expr::Unary(_, e) => {
             resolve_exp(e, variable_map)
@@ -65,13 +88,17 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, String>) -> Result
 
 fn resolve_decoration(
     dec: &mut Declaration,
-    variable_map: &mut HashMap<String, String>,
+    variable_map: &mut HashMap<String, VarInfo>,
     name_gen: &mut NameGenerator,
 ) -> Result<(), SemanticError> {
     let Identifier(name) = &dec.name;
+    
     if let std::collections::hash_map::Entry::Vacant(e) = variable_map.entry(name.clone()) {
         let unique_name = name_gen.next(name);
-        e.insert(unique_name.clone());
+        e.insert(VarInfo {
+            renamed: unique_name.clone(),
+            span: dec.span,
+        });
         dec.name = Identifier(unique_name);
         
         // Resolve the initializer if present
@@ -80,13 +107,16 @@ fn resolve_decoration(
         }
         Ok(())
     } else {
-        Err(SemanticError {
-            message: format!("Variable \"{name}\" already defined"),
-        })
+        let original_def = variable_map.get(name).unwrap();
+        Err(SemanticError::with_span(
+            format!("Variable \"{name}\" already defined at line {}, column {}", 
+                    original_def.span.line, original_def.span.column),
+            dec.span
+        ))
     }
 }
 
-fn resolve_statement(statement: &mut Stmt, variable_map: &HashMap<String, String>) -> Result<(), SemanticError> {
+fn resolve_statement(statement: &mut Stmt, variable_map: &HashMap<String, VarInfo>) -> Result<(), SemanticError> {
     match statement {
         Stmt::Return(e) => resolve_exp(e, variable_map),
         Stmt::Expression(e) => resolve_exp(e, variable_map),

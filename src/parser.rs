@@ -13,6 +13,12 @@ impl fmt::Display for Identifier {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Copy)]
+pub struct Span {
+    pub line: usize,
+    pub column: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum UnaryOp {
     BitwiseComplement,
@@ -23,10 +29,10 @@ pub enum UnaryOp {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Constant(i64),
-    Var(Identifier),
+    Var(Identifier, Span),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    Assignment(Box<Expr>, Box<Expr>),
+    Assignment(Box<Expr>, Box<Expr>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,6 +88,7 @@ pub enum Stmt {
 pub struct Declaration {
     pub name: Identifier,
     pub init: Option<Expr>,
+    pub span: Span,
 }
 
 #[derive(Debug, PartialEq)]
@@ -177,8 +184,9 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 Ok(inner_exp)
             }
             Token::Identifier(name) => {
+                let span = Span { line: spanned.line, column: spanned.column };
                 tokens.pop_front();
-                Ok(Expr::Var(Identifier(name.clone())))
+                Ok(Expr::Var(Identifier(name.clone()), span))
             }
             _ => Err(SyntaxError::expression(next_token)),
         },
@@ -192,9 +200,10 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
         let prec = operator.precedence();
         if prec >= min_prec {
             if operator == BinOp::Assignment {
-                tokens.pop_front();
+                let op_token = tokens.pop_front().unwrap();
+                let span = Span { line: op_token.line, column: op_token.column };
                 let right = parse_exp(tokens, prec)?;
-                left = Expr::Assignment(Box::from(left), Box::from(right));
+                left = Expr::Assignment(Box::from(left), Box::from(right), span);
             } else {
                 tokens.pop_front();
                 let right = parse_exp(tokens, prec + 1)?;
@@ -245,12 +254,13 @@ fn parse_unop(tokens: &mut VecDeque<SpannedToken>) -> Result<UnaryOp, SyntaxErro
     }
 }
 
-fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<Identifier, SyntaxError> {
+fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<(Identifier, Span), SyntaxError> {
     match tokens.pop_front() {
         Some(SpannedToken {
             token: Token::Identifier(value),
-            ..
-        }) => Ok(Identifier(value)),
+            line,
+            column,
+        }) => Ok((Identifier(value), Span { line, column })),
         x => Err(SyntaxError::new(Some(Token::Identifier("whatever".to_string())), x)),
     }
 }
@@ -283,13 +293,13 @@ fn parse_block_item(tokens: &mut VecDeque<SpannedToken>) -> Result<BlockItem, Sy
         // decoration
         let mut init = None;
         tokens.pop_front();
-        let name = parse_identifier(tokens)?;
+        let (name, span) = parse_identifier(tokens)?;
         if tokens.front().expect("parse").token == Token::Assignment {
             tokens.pop_front();
             init = Some(parse_exp(tokens, 0)?);
         }
         expect(&Token::Semicolon, tokens)?;
-        Ok(BlockItem::Declaration(Declaration { name, init }))
+        Ok(BlockItem::Declaration(Declaration { name, init, span }))
     } else {
         let stmt = parse_statement(tokens)?;
         Ok(BlockItem::Statement(stmt))
@@ -298,7 +308,7 @@ fn parse_block_item(tokens: &mut VecDeque<SpannedToken>) -> Result<BlockItem, Sy
 
 fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<Function, SyntaxError> {
     expect(&Token::IntKeyword, tokens)?;
-    let name = parse_identifier(tokens)?;
+    let (name, _span) = parse_identifier(tokens)?;
     expect(&Token::OpenParen, tokens)?;
     expect(&Token::VoidKeyword, tokens)?;
     expect(&Token::CloseParen, tokens)?;
@@ -338,12 +348,12 @@ impl ItfDisplay for Expr {
     fn itf_node(&self) -> Node {
         match self {
             Expr::Constant(c) => Node::leaf(yellow(format!("Constant({c})"))),
-            Expr::Var(id) => id.itf_node(),
+            Expr::Var(id, _span) => id.itf_node(),
             Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({op:?})")), vec![e.itf_node()]),
             Expr::Binary(op, e1, e2) => {
                 Node::branch(cyan(format!("Binary ({op:?})")), vec![e1.itf_node(), e2.itf_node()])
             }
-            Expr::Assignment(lhs, rhs) => Node::branch(cyan("Assignment"), vec![lhs.itf_node(), rhs.itf_node()]),
+            Expr::Assignment(lhs, rhs, _span) => Node::branch(cyan("Assignment"), vec![lhs.itf_node(), rhs.itf_node()]),
         }
     }
 }
