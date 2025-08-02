@@ -5,6 +5,7 @@ mod lexer;
 mod parser;
 mod pretty;
 mod tacky;
+mod validate;
 
 use crate::pretty::ItfDisplay;
 use clap::{ArgGroup, Parser};
@@ -19,7 +20,7 @@ use std::path::Path;
 #[command(group(
     ArgGroup::new("mode")
         .required(false)
-        .args(&["lex", "parse", "codegen", "s", "tacky", "run"])
+        .args(&["lex", "parse", "validate", "codegen", "s", "tacky", "run"])
 ))]
 struct Args {
     /// Run lexer
@@ -29,6 +30,10 @@ struct Args {
     /// Run lexer and parser
     #[arg(long)]
     parse: bool,
+
+    /// Stop after semantic analysis
+    #[arg(long)]
+    validate: bool,
 
     /// Run lexer, parser, tacky, and code generator
     #[arg(long, name = "codegen")]
@@ -123,7 +128,18 @@ fn main() {
         std::process::exit(0);
     }
 
-    let tacky_ast = tacky::tackify_program(&ast.unwrap());
+    let validated_program = validate::resolve_program(&ast.unwrap());
+    if validated_program.is_err() {
+        println!("{:?}", validated_program.err().unwrap());
+        std::process::exit(1);
+    }
+    let (valid_ast, mut name_gen) = validated_program.unwrap();
+    if args.validate {
+        println!("Program Valid");
+        std::process::exit(0);
+    }
+
+    let tacky_ast = tacky::tackify_program(&valid_ast, &mut name_gen);
 
     if args.tacky {
         println!("{tacky_ast:?}");

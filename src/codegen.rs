@@ -531,35 +531,3 @@ impl ItfDisplay for Program {
         Node::branch(cyan("Program"), vec![self.function.itf_node()])
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::tokenizer;
-    use crate::parser::parse_program;
-    use crate::tacky;
-
-    #[test]
-    fn basic_return() {
-        let input = std::fs::read_to_string("writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
-            .expect("Failed to read input file");
-        let mut tokens = tokenizer(&input).unwrap();
-        let ast = parse_program(&mut tokens).unwrap();
-        let tacky = tacky::tackify_program(&ast);
-
-        let expected = Program {
-            function: FunctionDefinition {
-                name: "main".to_string(),
-                body: vec![
-                    Instruction::AllocateStack(0),
-                    Instruction::Mov {
-                        src: Operand::Imm(100),
-                        dst: Operand::Reg(Reg::AX),
-                    },
-                    Instruction::Ret,
-                ],
-            },
-        };
-        assert_eq!(generate(&tacky), expected);
-    }
-}

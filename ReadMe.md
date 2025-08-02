@@ -3,7 +3,7 @@
 This project is a simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
-So far chapter 4 (inc. bitwise extra credit) is implemented, which includes a lexer, parser, and code generator for very basic C code.
+So far chapter 5 (inc. bitwise extra credit) is implemented, which includes a lexer, parser, and code generator for very basic C code.
 This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on linux).
 All provided tests pass.
 
@@ -22,7 +22,7 @@ cargo build --release
 
 ### Running Tests
 ```sh
- ./writing-a-c-compiler-tests/test_compiler target/release/ncc --chapter 4 --bitwise
+ ./writing-a-c-compiler-tests/test_compiler target/release/ncc --chapter 5 --bitwise
 ```
 
 ## Usage
@@ -37,6 +37,7 @@ Usage: ncc [OPTIONS] `FILENAME`
 |---------------------------|---------------------------------------|
 | `--lex`                   | Run lexer                             |
 | `--parse`                 | Run lexer and parser                  |
+| `--validate`              | Run lexer, parser, and validator      |
 | `--codegen`               | Run lexer, parser, and code generator |
 | `--tacky`                 | Emit TACKY IR                         |
 | `--run`                   | Run Compiled Program and print result |
@@ -47,7 +48,7 @@ Usage: ncc [OPTIONS] `FILENAME`
 | `-V`, `--version`         | Print version                         |
 
 
-Note: `--lex`, `--parse`, `--codegen`, `--tacky`, `--run` are mutually exclusive options.
+Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `--run` are mutually exclusive options.
 
 ## Contributing
 As a reminder to myself.

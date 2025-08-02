@@ -36,6 +36,7 @@ pub enum Token {
     GreaterThan,        // >
     LessThanOrEqual,    // <=
     GreaterThanOrEqual, // >=
+    Assignment,         // =
 }
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -163,6 +164,10 @@ static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::ne
         TokenDef {
             regex: Regex::new(r"^>").unwrap(),
             variant: Token::GreaterThan,
+        },
+        TokenDef {
+            regex: Regex::new(r"^=").unwrap(),
+            variant: Token::Assignment,
         },
     ]
 });
