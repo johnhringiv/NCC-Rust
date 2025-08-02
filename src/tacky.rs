@@ -1,5 +1,5 @@
 use crate::parser;
-use crate::parser::{BlockItem, Declaration, Expr, Identifier, UnaryOp};
+use crate::parser::{BlockItem, Declaration, Expr, Identifier, UnaryOp, Span};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::validate::NameGenerator;
 
@@ -160,9 +160,9 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             });
             dst
         }
-        Expr::Var(Identifier(name)) => Val::Var(name.clone()),
-        Expr::Assignment(lhs, rhs) => match lhs.as_ref() {
-            Expr::Var(Identifier(name)) => {
+        Expr::Var(Identifier(name), _span) => Val::Var(name.clone()),
+        Expr::Assignment(lhs, rhs, _span) => match lhs.as_ref() {
+            Expr::Var(Identifier(name), _) => {
                 let res = tackify_expr(rhs, instructions, name_generator);
                 instructions.push(Instruction::Copy {
                     src: res.clone(),
@@ -194,8 +194,14 @@ fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator)
     for item in &func.body {
         match item {
             BlockItem::Statement(stmt) => tackify_stmt(stmt, &mut instructions, name_generator),
-            BlockItem::Declaration(Declaration { name, init: Some(e) }) => {
-                let ass = Expr::Assignment(Box::new(Expr::Var(name.clone())), Box::new(e.clone()));
+            BlockItem::Declaration(Declaration { name, init: Some(e), span: _ }) => {
+                // Create a dummy span for this synthetic assignment
+                let dummy_span = Span { line: 0, column: 0 };
+                let ass = Expr::Assignment(
+                    Box::new(Expr::Var(name.clone(), dummy_span)), 
+                    Box::new(e.clone()),
+                    dummy_span
+                );
                 tackify_expr(&ass, &mut instructions, name_generator);
             }
             BlockItem::Declaration(parser::Declaration { init: None, .. }) => (),
