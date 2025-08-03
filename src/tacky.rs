@@ -1,5 +1,5 @@
 use crate::parser;
-use crate::parser::{BlockItem, Declaration, Expr, Identifier, Span, UnaryOp};
+use crate::parser::{BlockItem, Declaration, Expr, Identifier, IncDec, Span, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::validate::NameGenerator;
 
@@ -53,6 +53,15 @@ impl From<&parser::BinOp> for BinOp {
     }
 }
 
+impl From<&IncDec> for BinOp {
+    fn from(inc_dec: &IncDec) -> Self {
+        match inc_dec {
+            IncDec::Increment => BinOp::Add,
+            IncDec::Decrement => BinOp::Subtract,
+        }
+    }
+}
+
 impl From<&parser::AssignOp> for BinOp {
     fn from(op: &parser::AssignOp) -> Self {
         match op {
@@ -93,6 +102,19 @@ pub struct Program {
     pub function: FunctionDefinition,
 }
 
+/// Converts AST expressions into TACKY IR instructions.
+///
+/// Returns the `Val` containing the expression's result. For most expressions,
+/// this is a temporary variable. For assignments and increment/decrement operators,
+/// the return value follows C semantics.
+///
+/// # Implementation Notes
+///
+/// - Logical operators (`&&`, `||`) use short-circuit evaluation with jumps
+/// - Assignment operators return the assigned value (supporting `a = b = c`)
+/// - Postfix operators return the original value before modification
+/// - Prefix operators return the new value after modification
+/// - Lvalue expressions are currently limited to simple variables
 fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) -> Val {
     match e {
         parser::Expr::Constant(c) => Val::Constant(*c),
@@ -210,6 +232,47 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
                 dst
             }
             _ => unreachable!("Compound assignment to non-lvalue"),
+        },
+        Expr::PostFixOp(op, e, _) => match e.as_ref() {
+            Expr::Var(Identifier(name), _) => {
+                let current_val = Val::Var(name.clone()); // get the original value
+                let org_tmp = Val::Var(name_generator.next("postfix_org"));
+                let new_val = Val::Var(name_generator.next("postfix_new"));
+                instructions.push(Instruction::Copy {
+                    src: current_val.clone(),
+                    dst: org_tmp.clone(),
+                });
+                instructions.push(Instruction::Binary {
+                    op: op.into(),
+                    src1: current_val.clone(),
+                    src2: Val::Constant(1),
+                    dst: new_val.clone(),
+                });
+                instructions.push(Instruction::Copy {
+                    src: new_val.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                org_tmp
+            }
+            _ => unreachable!("Postfix on non-lvalue"),
+        },
+        Expr::PreFixOp(op, e, _) => match e.as_ref() {
+            Expr::Var(Identifier(name), _) => {
+                let current_val = Val::Var(name.clone()); // get the original value
+                let new_val = Val::Var(name_generator.next("prefix_new"));
+                instructions.push(Instruction::Binary {
+                    op: op.into(),
+                    src1: current_val.clone(),
+                    src2: Val::Constant(1),
+                    dst: new_val.clone(),
+                });
+                instructions.push(Instruction::Copy {
+                    src: new_val.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                new_val
+            }
+            _ => unreachable!("Postfix on non-lvalue"),
         },
     }
 }

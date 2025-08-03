@@ -1,3 +1,16 @@
+//! Parser for a subset of C using recursive descent with operator precedence climbing.
+//!
+//! The parser combines recursive descent for statement and declaration parsing with
+//! precedence climbing for expression parsing. This hybrid approach provides good
+//! performance while keeping the implementation straightforward.
+//!
+//! # Architecture
+//!
+//! - [`parse_factor`] handles primary expressions and unary operators
+//! - [`parse_exp`] handles binary operators using precedence climbing
+//! - Assignment operators are treated as binary operators for parsing simplicity
+//!   but generate distinct AST nodes
+//!
 use crate::lexer::{SpannedToken, Token};
 use crate::pretty::{ItfDisplay, Node, cyan, green, simple_node, yellow};
 use std::collections::VecDeque;
@@ -69,6 +82,14 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Assignment(Box<Expr>, Box<Expr>, Span),
     CompoundAssignment(AssignOp, Box<Expr>, Box<Expr>, Span),
+    PostFixOp(IncDec, Box<Expr>, Span),
+    PreFixOp(IncDec, Box<Expr>, Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum IncDec {
+    Increment,
+    Decrement,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -201,9 +222,23 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<(), S
     }
 }
 
+/// Parses primary expressions and operators with precedence higher than any binary operator.
+///
+/// Handles:
+/// - Constants and identifiers
+/// - Prefix unary operators (`-`, `~`, `!`, `++`, `--`)
+/// - Parenthesized expressions
+/// - Postfix operators (`++`, `--`)
+///
+/// # Implementation Notes
+///
+/// Postfix operators are parsed in a loop after the primary expression to handle
+/// cases like `x++++` (though this would fail validation). The loop structure
+/// also makes it easy to extend with other postfix operators like array subscripts
+/// or function calls in the future.
 fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
     let next_token = tokens.front().cloned();
-    match next_token {
+    let mut expr = match next_token {
         Some(ref spanned) => match &spanned.token {
             Token::ConstantInt(value) => {
                 tokens.pop_front();
@@ -213,6 +248,20 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 let operator = parse_unop(tokens)?;
                 let inner_exp = parse_factor(tokens)?;
                 Ok(Expr::Unary(operator, Box::from(inner_exp)))
+            }
+            Token::Increment | Token::Decrement => {
+                tokens.pop_front();
+                let inner_exp = parse_factor(tokens)?;
+                let span = Span {
+                    line: spanned.line,
+                    column: spanned.column,
+                };
+                let op = if spanned.token == Token::Increment {
+                    IncDec::Increment
+                } else {
+                    IncDec::Decrement
+                };
+                Ok(Expr::PreFixOp(op, Box::from(inner_exp), span))
             }
             Token::OpenParen => {
                 tokens.pop_front();
@@ -231,36 +280,78 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             _ => Err(SyntaxError::expression(next_token)),
         },
         _ => Err(SyntaxError::expression(next_token)),
+    }?;
+    // update the expression with any postfix increment/decrement operators
+    while let Some(spanned) = tokens.front().cloned() {
+        match &spanned.token {
+            Token::Increment | Token::Decrement => {
+                let op = if spanned.token == Token::Increment {
+                    IncDec::Increment
+                } else {
+                    IncDec::Decrement
+                };
+                tokens.pop_front();
+                let span = Span {
+                    line: spanned.line,
+                    column: spanned.column,
+                };
+                expr = Expr::PostFixOp(op, Box::new(expr), span);
+            }
+            _ => break,
+        }
     }
+    Ok(expr)
 }
 
+/// Parses binary expressions using operator precedence climbing.
+///
+/// The `min_prec` parameter controls which operators can be parsed at this level,
+/// implementing the precedence climbing algorithm. Only operators with precedence
+/// >= `min_prec` are consumed.
+///
+/// # Algorithm
+///
+/// 1. Parse left operand using [`parse_factor`]
+/// 2. While next token is a binary operator with precedence >= `min_prec`:
+///    - For left-associative operators: recurse with `prec + 1`
+///    - For right-associative operators: recurse with `prec`
+///
+/// # Implementation Notes
+///
+/// - Assignment operators receive special handling to generate `Assignment` and
+///   `CompoundAssignment` AST nodes instead of `Binary` nodes. This distinction
+///   is important for validation and code generation.
+/// - The function assumes [`parse_factor`] handles all unary prefix operators,
+///   so any identifier or constant at this level is a valid left operand.
 fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr, SyntaxError> {
     let mut left = parse_factor(tokens)?;
     while let Some(operator) = parse_binop(&tokens.front()) {
         let prec = operator.precedence();
         if prec >= min_prec {
-            // todo consolidate that the operator is not Assignment or CompoundAssignment
-            if operator == BinOp::Assignment {
-                let op_token = tokens.pop_front().unwrap();
-                let span = Span {
-                    line: op_token.line,
-                    column: op_token.column,
-                };
-                let right = parse_exp(tokens, prec)?;
-                left = Expr::Assignment(Box::from(left), Box::from(right), span);
-            } else if operator == BinOp::CompoundAssignment {
-                let op_token = tokens.pop_front().unwrap();
-                let span = Span {
-                    line: op_token.line,
-                    column: op_token.column,
-                };
-                let right = parse_exp(tokens, prec)?;
-                left =
-                    Expr::CompoundAssignment(AssignOp::from(&op_token.token), Box::from(left), Box::from(right), span);
-            } else {
-                tokens.pop_front();
-                let right = parse_exp(tokens, prec + 1)?;
-                left = Expr::Binary(operator, Box::from(left), Box::from(right));
+            match operator {
+                BinOp::Assignment | BinOp::CompoundAssignment => {
+                    let op_token = tokens.pop_front().unwrap();
+                    let span = Span {
+                        line: op_token.line,
+                        column: op_token.column,
+                    };
+                    let right = parse_exp(tokens, prec)?;
+                    left = match operator {
+                        BinOp::Assignment => Expr::Assignment(Box::from(left), Box::from(right), span),
+                        BinOp::CompoundAssignment => Expr::CompoundAssignment(
+                            AssignOp::from(&op_token.token),
+                            Box::from(left),
+                            Box::from(right),
+                            span,
+                        ),
+                        _ => unreachable!("Already matched on operator"),
+                    }
+                }
+                _ => {
+                    tokens.pop_front();
+                    let right = parse_exp(tokens, prec + 1)?;
+                    left = Expr::Binary(operator, Box::from(left), Box::from(right));
+                }
             }
         } else {
             break;
@@ -402,6 +493,7 @@ pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, Syn
 simple_node!(UnaryOp);
 simple_node!(BinOp);
 simple_node!(AssignOp);
+simple_node!(IncDec);
 
 impl ItfDisplay for Identifier {
     fn itf_node(&self) -> Node {
@@ -422,6 +514,8 @@ impl ItfDisplay for Expr {
                 cyan(format!("CompoundAssignment ({op:?})")),
                 vec![lhs.itf_node(), rhs.itf_node()],
             ),
+            Expr::PostFixOp(op, e, _span) => Node::branch(cyan(format!("PostFix ({op:?})")), vec![e.itf_node()]),
+            Expr::PreFixOp(op, e, _span) => Node::branch(cyan(format!("PreFix ({op:?})")), vec![e.itf_node()]),
         }
     }
 }

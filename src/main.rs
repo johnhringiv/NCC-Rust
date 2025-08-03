@@ -110,7 +110,10 @@ fn main() {
 
     if args.lex {
         // stop here if only lexing
-        println!("Processed tokens: {:?}", tokens.unwrap().iter().map(|t| t.token.clone()).collect::<Vec<_>>());
+        println!(
+            "Processed tokens: {:?}",
+            tokens.unwrap().iter().map(|t| t.token.clone()).collect::<Vec<_>>()
+        );
         std::process::exit(0);
     }
 

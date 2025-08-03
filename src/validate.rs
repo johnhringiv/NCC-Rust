@@ -83,6 +83,16 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
             resolve_exp(right, variable_map)
         }
         Expr::Constant(_) => Ok(()),
+        Expr::PostFixOp(_op, e, span) | Expr::PreFixOp(_op, e, span) => match &**e {
+            Expr::Var(_, _) => {
+                resolve_exp(e, variable_map)?;
+                Ok(())
+            }
+            _ => Err(SemanticError::with_span(
+                "Prefix or Postfix operator applied to non lvalue".to_string(),
+                *span,
+            )),
+        },
     }
 }
 

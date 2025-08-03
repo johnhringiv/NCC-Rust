@@ -17,7 +17,6 @@ pub enum Token {
     Semicolon,
     BitwiseComplement,       // ~
     Negation,                // -
-    Decrement,               // --
     Plus,                    // +
     Asterisk,                // *
     Division,                // /
@@ -47,29 +46,27 @@ pub enum Token {
     BitwiseXOrAssign,        // ^=
     BitwiseLeftShiftAssign,  // <<=
     BitwiseRightShiftAssign, // >>=
+    Decrement,               // --
+    Increment,               // ++
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
     // Special handling tokens (handled differently in next_token)
     (r"^[a-zA-Z_]\w*\b", Token::Identifier(String::new())),
     (r"^[0-9]+\b", Token::ConstantInt(0)),
-    
     // Keywords
     (r"^int\b", Token::IntKeyword),
     (r"^void\b", Token::VoidKeyword),
     (r"^return\b", Token::ReturnKeyword),
-    
     // Delimiters
     (r"^\(", Token::OpenParen),
     (r"^\)", Token::CloseParen),
     (r"^\{", Token::OpenBrace),
     (r"^}", Token::CloseBrace),
     (r"^;", Token::Semicolon),
-    
     // Single-character operators
     (r"^~", Token::BitwiseComplement),
     (r"^-", Token::Negation),
-    (r"^--", Token::Decrement),
     (r"^\+", Token::Plus),
     (r"^\*", Token::Asterisk),
     (r"^/", Token::Division),
@@ -77,16 +74,13 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^&", Token::BitwiseAnd),
     (r"^\|", Token::BitwiseOr),
     (r"^\^", Token::BitwiseXOr),
-    
     // Shift operators
     (r"^<<", Token::BitwiseLeftShift),
     (r"^>>", Token::BitwiseRightShift),
-    
     // Logical operators
     (r"^!", Token::LogicalNot),
     (r"^&&", Token::LogicalAnd),
     (r"^\|\|", Token::LogicalOr),
-    
     // Comparison operators
     (r"^==", Token::Equal),
     (r"^!=", Token::NotEqual),
@@ -94,7 +88,6 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^>", Token::GreaterThan),
     (r"^<=", Token::LessThanOrEqual),
     (r"^>=", Token::GreaterThanOrEqual),
-    
     // Assignment operators
     (r"^=", Token::Assignment),
     (r"^\+=", Token::PlusAssign),
@@ -107,6 +100,9 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^\^=", Token::BitwiseXOrAssign),
     (r"^<<=", Token::BitwiseLeftShiftAssign),
     (r"^>>=", Token::BitwiseRightShiftAssign),
+    // P*fix operators
+    (r"^--", Token::Decrement),
+    (r"^\+\+", Token::Increment),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
