@@ -157,15 +157,15 @@ impl SyntaxError {
             .unwrap_or("".to_string());
         let found_str = found
             .as_ref()
-            .map(|t| t.token.variant_str())
+            .map(|t| t.token.to_string())
             .unwrap_or("None".to_string());
         (found_str, loc_str)
     }
     pub fn new(expected: Option<Token>, found: Option<SpannedToken>) -> Self {
-        let expected = expected.as_ref().map(|t| t.variant_str()).unwrap_or("None".to_string());
+        let expected = expected.as_ref().map(|t| t.to_string()).unwrap_or("None".to_string());
         let (found_str, loc_str) = Self::get_found_strs(found);
         SyntaxError {
-            message: format!(r#"expected: {expected:?}, found: {found_str:?}{loc_str}"#),
+            message: format!(r#"expected: {expected}, found: {found_str:?}{loc_str}"#),
         }
     }
 
