@@ -1,5 +1,5 @@
 use crate::parser;
-use crate::parser::{BlockItem, Declaration, Expr, Identifier, UnaryOp, Span};
+use crate::parser::{BlockItem, Declaration, Expr, Identifier, Span, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::validate::NameGenerator;
 
@@ -49,6 +49,23 @@ impl From<&parser::BinOp> for BinOp {
             parser::BinOp::GreaterThan => BinOp::GreaterThan,
             parser::BinOp::GreaterOrEqual => BinOp::GreaterOrEqual,
             _ => unreachable!("Unsupported binary operator {:#?} in tacky conversion", op),
+        }
+    }
+}
+
+impl From<&parser::AssignOp> for BinOp {
+    fn from(op: &parser::AssignOp) -> Self {
+        match op {
+            parser::AssignOp::Add => BinOp::Add,
+            parser::AssignOp::Subtract => BinOp::Subtract,
+            parser::AssignOp::Multiply => BinOp::Multiply,
+            parser::AssignOp::Divide => BinOp::Divide,
+            parser::AssignOp::Remainder => BinOp::Remainder,
+            parser::AssignOp::BitwiseAnd => BinOp::BitwiseAnd,
+            parser::AssignOp::BitwiseOr => BinOp::BitwiseOr,
+            parser::AssignOp::BitwiseXOr => BinOp::BitwiseXOr,
+            parser::AssignOp::BitwiseLeftShift => BinOp::BitwiseLeftShift,
+            parser::AssignOp::BitwiseRightShift => BinOp::BitwiseRightShift,
         }
     }
 }
@@ -172,6 +189,28 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             }
             _ => unreachable!("Assignment to non-lvalue"),
         },
+        Expr::CompoundAssignment(op, lhs, rhs, _span) => match lhs.as_ref() {
+            Expr::Var(Identifier(name), _) => {
+                let current_val = Val::Var(name.clone()); // get the original value
+                let rhs_val = tackify_expr(rhs, instructions, name_generator);
+                let dst = Val::Var(name_generator.next("compound_temp"));
+                // do the operation and store the result in a temporary variable
+                instructions.push(Instruction::Binary {
+                    op: op.into(),
+                    src1: current_val.clone(),
+                    src2: rhs_val.clone(),
+                    dst: dst.clone(),
+                });
+
+                // copy the result back to the original variable
+                instructions.push(Instruction::Copy {
+                    src: dst.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                dst
+            }
+            _ => unreachable!("Compound assignment to non-lvalue"),
+        },
     }
 }
 
@@ -194,13 +233,17 @@ fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator)
     for item in &func.body {
         match item {
             BlockItem::Statement(stmt) => tackify_stmt(stmt, &mut instructions, name_generator),
-            BlockItem::Declaration(Declaration { name, init: Some(e), span: _ }) => {
+            BlockItem::Declaration(Declaration {
+                name,
+                init: Some(e),
+                span: _,
+            }) => {
                 // Create a dummy span for this synthetic assignment
                 let dummy_span = Span { line: 0, column: 0 };
                 let ass = Expr::Assignment(
-                    Box::new(Expr::Var(name.clone(), dummy_span)), 
+                    Box::new(Expr::Var(name.clone(), dummy_span)),
                     Box::new(e.clone()),
-                    dummy_span
+                    dummy_span,
                 );
                 tackify_expr(&ass, &mut instructions, name_generator);
             }

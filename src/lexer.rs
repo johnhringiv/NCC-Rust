@@ -15,28 +15,38 @@ pub enum Token {
     OpenBrace,
     CloseBrace,
     Semicolon,
-    BitwiseComplement,  // ~
-    Negation,           // -
-    Decrement,          // --
-    Plus,               // +
-    Asterisk,           // *
-    Division,           // /
-    Modulus,            // %
-    BitwiseAnd,         // &
-    BitwiseOr,          // |
-    BitwiseXOr,         // ^
-    BitwiseLeftShift,   // <<
-    BitwiseRightShift,  // >>
-    LogicalNot,         // !
-    LogicalAnd,         // &&
-    LogicalOr,          // ||
-    Equal,              // ==
-    NotEqual,           // !=
-    LessThan,           // <
-    GreaterThan,        // >
-    LessThanOrEqual,    // <=
-    GreaterThanOrEqual, // >=
-    Assignment,         // =
+    BitwiseComplement,       // ~
+    Negation,                // -
+    Decrement,               // --
+    Plus,                    // +
+    Asterisk,                // *
+    Division,                // /
+    Modulus,                 // %
+    BitwiseAnd,              // &
+    BitwiseOr,               // |
+    BitwiseXOr,              // ^
+    BitwiseLeftShift,        // <<
+    BitwiseRightShift,       // >>
+    LogicalNot,              // !
+    LogicalAnd,              // &&
+    LogicalOr,               // ||
+    Equal,                   // ==
+    NotEqual,                // !=
+    LessThan,                // <
+    GreaterThan,             // >
+    LessThanOrEqual,         // <=
+    GreaterThanOrEqual,      // >=
+    Assignment,              // =
+    PlusAssign,              // +=
+    MinusAssign,             // -=
+    AsteriskAssign,          // *=
+    DivisionAssign,          // /=
+    ModulusAssign,           // %=
+    BitwiseAndAssign,        // &=
+    BitwiseOrAssign,         // |=
+    BitwiseXOrAssign,        // ^=
+    BitwiseLeftShiftAssign,  // <<=
+    BitwiseRightShiftAssign, // >>=
 }
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -168,6 +178,46 @@ static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::ne
         TokenDef {
             regex: Regex::new(r"^=").unwrap(),
             variant: Token::Assignment,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\+=").unwrap(),
+            variant: Token::PlusAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^-=").unwrap(),
+            variant: Token::MinusAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\*=").unwrap(),
+            variant: Token::AsteriskAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^%=").unwrap(),
+            variant: Token::ModulusAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^/=").unwrap(),
+            variant: Token::DivisionAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^&=").unwrap(),
+            variant: Token::BitwiseAndAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\|=").unwrap(),
+            variant: Token::BitwiseOrAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^\^=").unwrap(),
+            variant: Token::BitwiseXOrAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^<<=").unwrap(),
+            variant: Token::BitwiseLeftShiftAssign,
+        },
+        TokenDef {
+            regex: Regex::new(r"^>>=").unwrap(),
+            variant: Token::BitwiseRightShiftAssign,
         },
     ]
 });

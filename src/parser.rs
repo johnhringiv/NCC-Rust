@@ -27,12 +27,48 @@ pub enum UnaryOp {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum AssignOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXOr,
+    BitwiseLeftShift,
+    BitwiseRightShift,
+}
+
+impl From<&Token> for AssignOp {
+    fn from(token: &Token) -> Self {
+        match token {
+            Token::PlusAssign => AssignOp::Add,
+            Token::MinusAssign => AssignOp::Subtract,
+            Token::AsteriskAssign => AssignOp::Multiply,
+            Token::DivisionAssign => AssignOp::Divide,
+            Token::ModulusAssign => AssignOp::Remainder,
+            Token::BitwiseAndAssign => AssignOp::BitwiseAnd,
+            Token::BitwiseOrAssign => AssignOp::BitwiseOr,
+            Token::BitwiseXOrAssign => AssignOp::BitwiseXOr,
+            Token::BitwiseLeftShiftAssign => AssignOp::BitwiseLeftShift,
+            Token::BitwiseRightShiftAssign => AssignOp::BitwiseRightShift,
+            _ => unreachable!(
+                "AssignOp::from_token called with non-assign operator token: {:?}",
+                token
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Constant(i64),
     Var(Identifier, Span),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Assignment(Box<Expr>, Box<Expr>, Span),
+    CompoundAssignment(AssignOp, Box<Expr>, Box<Expr>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +91,8 @@ pub enum BinOp {
     LessOrEqual,
     GreaterThan,
     GreaterOrEqual,
-    Assignment, // not a binop but we include it for parsing convenience
+    Assignment,         // not a binop but we include it for parsing convenience
+    CompoundAssignment, // also not a binop, but used for compound assignments like +=, -=, etc.
 }
 
 impl BinOp {
@@ -72,7 +109,7 @@ impl BinOp {
             BinOp::BitwiseOr => 27,
             BinOp::And => 10,
             BinOp::Or => 5,
-            BinOp::Assignment => 1,
+            BinOp::Assignment | BinOp::CompoundAssignment => 1,
         }
     }
 }
@@ -184,7 +221,10 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 Ok(inner_exp)
             }
             Token::Identifier(name) => {
-                let span = Span { line: spanned.line, column: spanned.column };
+                let span = Span {
+                    line: spanned.line,
+                    column: spanned.column,
+                };
                 tokens.pop_front();
                 Ok(Expr::Var(Identifier(name.clone()), span))
             }
@@ -199,11 +239,24 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
     while let Some(operator) = parse_binop(&tokens.front()) {
         let prec = operator.precedence();
         if prec >= min_prec {
+            // todo consolidate that the operator is not Assignment or CompoundAssignment
             if operator == BinOp::Assignment {
                 let op_token = tokens.pop_front().unwrap();
-                let span = Span { line: op_token.line, column: op_token.column };
+                let span = Span {
+                    line: op_token.line,
+                    column: op_token.column,
+                };
                 let right = parse_exp(tokens, prec)?;
                 left = Expr::Assignment(Box::from(left), Box::from(right), span);
+            } else if operator == BinOp::CompoundAssignment {
+                let op_token = tokens.pop_front().unwrap();
+                let span = Span {
+                    line: op_token.line,
+                    column: op_token.column,
+                };
+                let right = parse_exp(tokens, prec)?;
+                left =
+                    Expr::CompoundAssignment(AssignOp::from(&op_token.token), Box::from(left), Box::from(right), span);
             } else {
                 tokens.pop_front();
                 let right = parse_exp(tokens, prec + 1)?;
@@ -238,6 +291,16 @@ fn parse_binop(next_token: &Option<&SpannedToken>) -> Option<BinOp> {
             Token::LogicalAnd => Some(BinOp::And),
             Token::LogicalOr => Some(BinOp::Or),
             Token::Assignment => Some(BinOp::Assignment),
+            Token::PlusAssign
+            | Token::MinusAssign
+            | Token::AsteriskAssign
+            | Token::DivisionAssign
+            | Token::ModulusAssign
+            | Token::BitwiseAndAssign
+            | Token::BitwiseOrAssign
+            | Token::BitwiseXOrAssign
+            | Token::BitwiseLeftShiftAssign
+            | Token::BitwiseRightShiftAssign => Some(BinOp::CompoundAssignment),
             _ => None,
         },
         _ => None,
@@ -338,6 +401,7 @@ pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, Syn
 // AST pretty printing
 simple_node!(UnaryOp);
 simple_node!(BinOp);
+simple_node!(AssignOp);
 
 impl ItfDisplay for Identifier {
     fn itf_node(&self) -> Node {
@@ -354,6 +418,10 @@ impl ItfDisplay for Expr {
                 Node::branch(cyan(format!("Binary ({op:?})")), vec![e1.itf_node(), e2.itf_node()])
             }
             Expr::Assignment(lhs, rhs, _span) => Node::branch(cyan("Assignment"), vec![lhs.itf_node(), rhs.itf_node()]),
+            Expr::CompoundAssignment(op, lhs, rhs, _span) => Node::branch(
+                cyan(format!("CompoundAssignment ({op:?})")),
+                vec![lhs.itf_node(), rhs.itf_node()],
+            ),
         }
     }
 }
