@@ -5,6 +5,7 @@ mod lexer;
 mod parser;
 mod pretty;
 mod tacky;
+mod validate;
 
 use crate::pretty::ItfDisplay;
 use clap::{ArgGroup, Parser};
@@ -19,7 +20,7 @@ use std::path::Path;
 #[command(group(
     ArgGroup::new("mode")
         .required(false)
-        .args(&["lex", "parse", "codegen", "s", "tacky", "run"])
+        .args(&["lex", "parse", "validate", "codegen", "s", "tacky", "run"])
 ))]
 struct Args {
     /// Run lexer
@@ -29,6 +30,10 @@ struct Args {
     /// Run lexer and parser
     #[arg(long)]
     parse: bool,
+
+    /// Stop after semantic analysis
+    #[arg(long)]
+    validate: bool,
 
     /// Run lexer, parser, tacky, and code generator
     #[arg(long, name = "codegen")]
@@ -91,12 +96,15 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
 
 fn main() {
     let mut args = Args::parse();
-    let input = fs::read_to_string(&args.filename).expect("Failed to read input file");
-    let tokens = lexer::tokenizer(&input);
-    if tokens.is_err() {
-        println!("Failed to tokenize: {:?}", tokens.err().unwrap());
+    let Ok(input) = fs::read_to_string(&args.filename) else {
+        println!("Failed to read file: {}", args.filename);
+        std::process::exit(1);
+    };
+
+    let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
+        println!("Failed to tokenize: {e:?}");
         std::process::exit(1)
-    }
+    });
 
     if cfg!(target_os = "macos") & !args.gcc {
         println!("Using GCC as libwild does not support MacOS");
@@ -105,25 +113,39 @@ fn main() {
 
     if args.lex {
         // stop here if only lexing
-        println!("Processed tokens: {:?}", tokens.unwrap());
+        println!(
+            "Processed tokens: {:?}",
+            tokens.iter().map(|t| t.token.clone()).collect::<Vec<_>>()
+        );
         std::process::exit(0);
     }
 
-    let mut tokens = tokens.unwrap();
-    let ast = parser::parse_program(&mut tokens);
-    if ast.is_err() {
-        println!("Failed to parse: {:?}", ast.err().unwrap());
-        std::process::exit(1);
-    }
+    let mut tokens = tokens;
+    let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
+        println!("Failed to parse: {e:?}");
+        std::process::exit(1)
+    });
 
     if args.parse {
-        let ast_val = ast.unwrap();
+        let ast_val = ast;
         println!("{ast_val:?}");
         println!("{}", ast_val.itf_string());
         std::process::exit(0);
     }
 
-    let tacky_ast = tacky::tackify_program(&ast.unwrap());
+    let mut ast = ast;
+    let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+        println!("{e:?}");
+        std::process::exit(1);
+    });
+
+    let mut name_gen = validated_result;
+    if args.validate {
+        println!("Program Valid");
+        std::process::exit(0);
+    }
+
+    let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
 
     if args.tacky {
         println!("{tacky_ast:?}");

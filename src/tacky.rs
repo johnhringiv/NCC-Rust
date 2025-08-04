@@ -1,7 +1,7 @@
 use crate::parser;
-use crate::parser::{Identifier, UnaryOp};
+use crate::parser::{BlockItem, Declaration, Expr, Identifier, IncDec, Span, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
-use std::collections::HashMap;
+use crate::validate::NameGenerator;
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -53,6 +53,32 @@ impl From<&parser::BinOp> for BinOp {
     }
 }
 
+impl From<&IncDec> for BinOp {
+    fn from(inc_dec: &IncDec) -> Self {
+        match inc_dec {
+            IncDec::Increment => BinOp::Add,
+            IncDec::Decrement => BinOp::Subtract,
+        }
+    }
+}
+
+impl From<&parser::AssignOp> for BinOp {
+    fn from(op: &parser::AssignOp) -> Self {
+        match op {
+            parser::AssignOp::Add => BinOp::Add,
+            parser::AssignOp::Subtract => BinOp::Subtract,
+            parser::AssignOp::Multiply => BinOp::Multiply,
+            parser::AssignOp::Divide => BinOp::Divide,
+            parser::AssignOp::Remainder => BinOp::Remainder,
+            parser::AssignOp::BitwiseAnd => BinOp::BitwiseAnd,
+            parser::AssignOp::BitwiseOr => BinOp::BitwiseOr,
+            parser::AssignOp::BitwiseXOr => BinOp::BitwiseXOr,
+            parser::AssignOp::BitwiseLeftShift => BinOp::BitwiseLeftShift,
+            parser::AssignOp::BitwiseRightShift => BinOp::BitwiseRightShift,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Instruction {
     Return(Val),
@@ -76,22 +102,19 @@ pub struct Program {
     pub function: FunctionDefinition,
 }
 
-pub struct NameGenerator {
-    counts: HashMap<String, usize>,
-}
-
-impl NameGenerator {
-    pub fn new() -> NameGenerator {
-        NameGenerator { counts: HashMap::new() }
-    }
-
-    pub fn next(&mut self, base: &str) -> String {
-        let count = self.counts.entry(base.to_string()).or_insert(0);
-        *count += 1;
-        format!("{base}.{count}")
-    }
-}
-
+/// Converts AST expressions into TACKY IR instructions.
+///
+/// Returns the `Val` containing the expression's result. For most expressions,
+/// this is a temporary variable. For assignments and increment/decrement operators,
+/// the return value follows C semantics.
+///
+/// # Implementation Notes
+///
+/// - Logical operators (`&&`, `||`) use short-circuit evaluation with jumps
+/// - Assignment operators return the assigned value (supporting `a = b = c`)
+/// - Postfix operators return the original value before modification
+/// - Prefix operators return the new value after modification
+/// - Lvalue expressions are currently limited to simple variables
 fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) -> Val {
     match e {
         parser::Expr::Constant(c) => Val::Constant(*c),
@@ -176,6 +199,81 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             });
             dst
         }
+        Expr::Var(Identifier(name), _span) => Val::Var(name.clone()),
+        Expr::Assignment(lhs, rhs, _span) => match lhs.as_ref() {
+            Expr::Var(Identifier(name), _) => {
+                let res = tackify_expr(rhs, instructions, name_generator);
+                instructions.push(Instruction::Copy {
+                    src: res.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                Val::Var(name.clone())
+            }
+            _ => unreachable!("Assignment to non-lvalue"),
+        },
+        Expr::CompoundAssignment(op, lhs, rhs, _span) => match lhs.as_ref() {
+            Expr::Var(Identifier(name), _) => {
+                let current_val = Val::Var(name.clone()); // get the original value
+                let rhs_val = tackify_expr(rhs, instructions, name_generator);
+                let dst = Val::Var(name_generator.next("compound_temp"));
+                // do the operation and store the result in a temporary variable
+                instructions.push(Instruction::Binary {
+                    op: op.into(),
+                    src1: current_val.clone(),
+                    src2: rhs_val.clone(),
+                    dst: dst.clone(),
+                });
+
+                // copy the result back to the original variable
+                instructions.push(Instruction::Copy {
+                    src: dst.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                dst
+            }
+            _ => unreachable!("Compound assignment to non-lvalue"),
+        },
+        Expr::PostFixOp(op, e, _) => match e.as_ref() {
+            Expr::Var(Identifier(name), _) => {
+                let current_val = Val::Var(name.clone()); // get the original value
+                let org_tmp = Val::Var(name_generator.next("postfix_org"));
+                let new_val = Val::Var(name_generator.next("postfix_new"));
+                instructions.push(Instruction::Copy {
+                    src: current_val.clone(),
+                    dst: org_tmp.clone(),
+                });
+                instructions.push(Instruction::Binary {
+                    op: op.into(),
+                    src1: current_val.clone(),
+                    src2: Val::Constant(1),
+                    dst: new_val.clone(),
+                });
+                instructions.push(Instruction::Copy {
+                    src: new_val.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                org_tmp
+            }
+            _ => unreachable!("Postfix on non-lvalue"),
+        },
+        Expr::PreFixOp(op, e, _) => match e.as_ref() {
+            Expr::Var(Identifier(name), _) => {
+                let current_val = Val::Var(name.clone()); // get the original value
+                let new_val = Val::Var(name_generator.next("prefix_new"));
+                instructions.push(Instruction::Binary {
+                    op: op.into(),
+                    src1: current_val.clone(),
+                    src2: Val::Constant(1),
+                    dst: new_val.clone(),
+                });
+                instructions.push(Instruction::Copy {
+                    src: new_val.clone(),
+                    dst: Val::Var(name.clone()),
+                });
+                new_val
+            }
+            _ => unreachable!("Prefix on non-lvalue"),
+        },
     }
 }
 
@@ -185,14 +283,40 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             let val = tackify_expr(expr, instructions, name_generator);
             instructions.push(Instruction::Return(val));
         }
+        parser::Stmt::Expression(e) => {
+            tackify_expr(e, instructions, name_generator);
+        }
+        parser::Stmt::Null => (),
     }
 }
 
 fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let parser::Identifier(name) = &func.name;
+    for item in &func.body {
+        match item {
+            BlockItem::Statement(stmt) => tackify_stmt(stmt, &mut instructions, name_generator),
+            BlockItem::Declaration(Declaration {
+                name,
+                init: Some(e),
+                span: _,
+            }) => {
+                // Create a dummy span for this synthetic assignment
+                let dummy_span = Span { line: 0, column: 0 };
+                let ass = Expr::Assignment(
+                    Box::new(Expr::Var(name.clone(), dummy_span)),
+                    Box::new(e.clone()),
+                    dummy_span,
+                );
+                tackify_expr(&ass, &mut instructions, name_generator);
+            }
+            BlockItem::Declaration(parser::Declaration { init: None, .. }) => (),
+        }
+    }
 
-    tackify_stmt(&func.body, &mut instructions, name_generator);
+    // Return 0 if the function has no return statement
+    // will not be reached if the function has a return statement
+    instructions.push(Instruction::Return(Val::Constant(0)));
 
     FunctionDefinition {
         name: name.clone(),
@@ -200,10 +324,8 @@ fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator)
     }
 }
 
-pub fn tackify_program(program: &parser::Program) -> Program {
-    let mut name_generator = NameGenerator::new();
-
-    let function = tackify_function(&program.function, &mut name_generator);
+pub fn tackify_program(program: &parser::Program, name_generator: &mut NameGenerator) -> Program {
+    let function = tackify_function(&program.function, name_generator);
 
     Program { function }
 }

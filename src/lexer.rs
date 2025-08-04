@@ -15,164 +15,113 @@ pub enum Token {
     OpenBrace,
     CloseBrace,
     Semicolon,
-    BitwiseComplement,  // ~
-    Negation,           // -
-    Decrement,          // --
-    Plus,               // +
-    Asterisk,           // *
-    Division,           // /
-    Modulus,            // %
-    BitwiseAnd,         // &
-    BitwiseOr,          // |
-    BitwiseXOr,         // ^
-    BitwiseLeftShift,   // <<
-    BitwiseRightShift,  // >>
-    LogicalNot,         // !
-    LogicalAnd,         // &&
-    LogicalOr,          // ||
-    Equal,              // ==
-    NotEqual,           // !=
-    LessThan,           // <
-    GreaterThan,        // >
-    LessThanOrEqual,    // <=
-    GreaterThanOrEqual, // >=
+    BitwiseComplement,       // ~
+    Negation,                // -
+    Plus,                    // +
+    Asterisk,                // *
+    Division,                // /
+    Modulus,                 // %
+    BitwiseAnd,              // &
+    BitwiseOr,               // |
+    BitwiseXOr,              // ^
+    BitwiseLeftShift,        // <<
+    BitwiseRightShift,       // >>
+    LogicalNot,              // !
+    LogicalAnd,              // &&
+    LogicalOr,               // ||
+    Equal,                   // ==
+    NotEqual,                // !=
+    LessThan,                // <
+    GreaterThan,             // >
+    LessThanOrEqual,         // <=
+    GreaterThanOrEqual,      // >=
+    Assignment,              // =
+    PlusAssign,              // +=
+    MinusAssign,             // -=
+    AsteriskAssign,          // *=
+    DivisionAssign,          // /=
+    ModulusAssign,           // %=
+    BitwiseAndAssign,        // &=
+    BitwiseOrAssign,         // |=
+    BitwiseXOrAssign,        // ^=
+    BitwiseLeftShiftAssign,  // <<=
+    BitwiseRightShiftAssign, // >>=
+    Decrement,               // --
+    Increment,               // ++
 }
 
+const TOKEN_PATTERNS: &[(&str, Token)] = &[
+    // Special handling tokens (handled differently in next_token)
+    (r"^[a-zA-Z_]\w*\b", Token::Identifier(String::new())),
+    (r"^[0-9]+\b", Token::ConstantInt(0)),
+    // Keywords
+    (r"^int\b", Token::IntKeyword),
+    (r"^void\b", Token::VoidKeyword),
+    (r"^return\b", Token::ReturnKeyword),
+    // Delimiters
+    (r"^\(", Token::OpenParen),
+    (r"^\)", Token::CloseParen),
+    (r"^\{", Token::OpenBrace),
+    (r"^}", Token::CloseBrace),
+    (r"^;", Token::Semicolon),
+    // Single-character operators
+    (r"^~", Token::BitwiseComplement),
+    (r"^-", Token::Negation),
+    (r"^\+", Token::Plus),
+    (r"^\*", Token::Asterisk),
+    (r"^/", Token::Division),
+    (r"^%", Token::Modulus),
+    (r"^&", Token::BitwiseAnd),
+    (r"^\|", Token::BitwiseOr),
+    (r"^\^", Token::BitwiseXOr),
+    // Shift operators
+    (r"^<<", Token::BitwiseLeftShift),
+    (r"^>>", Token::BitwiseRightShift),
+    // Logical operators
+    (r"^!", Token::LogicalNot),
+    (r"^&&", Token::LogicalAnd),
+    (r"^\|\|", Token::LogicalOr),
+    // Comparison operators
+    (r"^==", Token::Equal),
+    (r"^!=", Token::NotEqual),
+    (r"^<", Token::LessThan),
+    (r"^>", Token::GreaterThan),
+    (r"^<=", Token::LessThanOrEqual),
+    (r"^>=", Token::GreaterThanOrEqual),
+    // Assignment operators
+    (r"^=", Token::Assignment),
+    (r"^\+=", Token::PlusAssign),
+    (r"^-=", Token::MinusAssign),
+    (r"^\*=", Token::AsteriskAssign),
+    (r"^/=", Token::DivisionAssign),
+    (r"^%=", Token::ModulusAssign),
+    (r"^&=", Token::BitwiseAndAssign),
+    (r"^\|=", Token::BitwiseOrAssign),
+    (r"^\^=", Token::BitwiseXOrAssign),
+    (r"^<<=", Token::BitwiseLeftShiftAssign),
+    (r"^>>=", Token::BitwiseRightShiftAssign),
+    // P*fix operators
+    (r"^--", Token::Decrement),
+    (r"^\+\+", Token::Increment),
+];
+
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
-    vec![
-        TokenDef {
-            regex: Regex::new(r"^[a-zA-Z_]\w*\b").unwrap(),
-            variant: Token::Identifier(String::new()),
-        },
-        TokenDef {
-            regex: Regex::new(r"^[0-9]+\b").unwrap(),
-            variant: Token::ConstantInt(0),
-        },
-        TokenDef {
-            regex: Regex::new(r"^int\b").unwrap(),
-            variant: Token::IntKeyword,
-        },
-        TokenDef {
-            regex: Regex::new(r"^void\b").unwrap(),
-            variant: Token::VoidKeyword,
-        },
-        TokenDef {
-            regex: Regex::new(r"^return\b").unwrap(),
-            variant: Token::ReturnKeyword,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\(").unwrap(),
-            variant: Token::OpenParen,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\)").unwrap(),
-            variant: Token::CloseParen,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\{").unwrap(),
-            variant: Token::OpenBrace,
-        },
-        TokenDef {
-            regex: Regex::new(r"^}").unwrap(),
-            variant: Token::CloseBrace,
-        },
-        TokenDef {
-            regex: Regex::new(r"^;").unwrap(),
-            variant: Token::Semicolon,
-        },
-        TokenDef {
-            regex: Regex::new(r"^~").unwrap(),
-            variant: Token::BitwiseComplement,
-        },
-        TokenDef {
-            regex: Regex::new(r"^--").unwrap(),
-            variant: Token::Decrement,
-        },
-        TokenDef {
-            regex: Regex::new(r"^-").unwrap(),
-            variant: Token::Negation,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\+").unwrap(),
-            variant: Token::Plus,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\*").unwrap(),
-            variant: Token::Asterisk,
-        },
-        TokenDef {
-            regex: Regex::new(r"^/").unwrap(),
-            variant: Token::Division,
-        },
-        TokenDef {
-            regex: Regex::new(r"^%").unwrap(),
-            variant: Token::Modulus,
-        },
-        TokenDef {
-            regex: Regex::new(r"^&").unwrap(),
-            variant: Token::BitwiseAnd,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\|").unwrap(),
-            variant: Token::BitwiseOr,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\^").unwrap(),
-            variant: Token::BitwiseXOr,
-        },
-        TokenDef {
-            regex: Regex::new(r"^<<").unwrap(),
-            variant: Token::BitwiseLeftShift,
-        },
-        TokenDef {
-            regex: Regex::new(r"^>>").unwrap(),
-            variant: Token::BitwiseRightShift,
-        },
-        TokenDef {
-            regex: Regex::new(r"^!").unwrap(),
-            variant: Token::LogicalNot,
-        },
-        TokenDef {
-            regex: Regex::new(r"^&&").unwrap(),
-            variant: Token::LogicalAnd,
-        },
-        TokenDef {
-            regex: Regex::new(r"^\|\|").unwrap(),
-            variant: Token::LogicalOr,
-        },
-        TokenDef {
-            regex: Regex::new(r"^==").unwrap(),
-            variant: Token::Equal,
-        },
-        TokenDef {
-            regex: Regex::new(r"^!=").unwrap(),
-            variant: Token::NotEqual,
-        },
-        TokenDef {
-            regex: Regex::new(r"^<=").unwrap(),
-            variant: Token::LessThanOrEqual,
-        },
-        TokenDef {
-            regex: Regex::new(r"^>=").unwrap(),
-            variant: Token::GreaterThanOrEqual,
-        },
-        TokenDef {
-            regex: Regex::new(r"^<").unwrap(),
-            variant: Token::LessThan,
-        },
-        TokenDef {
-            regex: Regex::new(r"^>").unwrap(),
-            variant: Token::GreaterThan,
-        },
-    ]
+    let mut defs = Vec::with_capacity(TOKEN_PATTERNS.len());
+    for (pattern, token) in TOKEN_PATTERNS {
+        defs.push(TokenDef {
+            regex: Regex::new(pattern).unwrap(),
+            variant: token.clone(),
+        });
+    }
+    defs
 });
 
-impl Token {
-    pub fn variant_str(&self) -> String {
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Token::Identifier(_) => "Identifier".to_string(),
-            Token::ConstantInt(_) => "ConstantInt".to_string(),
-            other => format!("{other:?}"),
+            Token::Identifier(_) => write!(f, "Identifier"),
+            Token::ConstantInt(_) => write!(f, "ConstantInt"),
+            other => write!(f, "{other:?}"),
         }
     }
 }
@@ -188,7 +137,7 @@ struct TokenDef {
     variant: Token,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SpannedToken {
     pub token: Token,
     pub line: usize,
@@ -233,7 +182,6 @@ impl fmt::Debug for LexerError {
     }
 }
 
-//todo report line number of the error
 pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, LexerError> {
     let mut tokens = VecDeque::new();
     let mut line = 1;
