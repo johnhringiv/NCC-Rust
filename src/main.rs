@@ -96,12 +96,15 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
 
 fn main() {
     let mut args = Args::parse();
-    let input = fs::read_to_string(&args.filename).expect("Failed to read input file");
-    let tokens = lexer::tokenizer(&input);
-    if tokens.is_err() {
-        println!("Failed to tokenize: {:?}", tokens.err().unwrap());
+    let Ok(input) = fs::read_to_string(&args.filename) else {
+        println!("Failed to read file: {}", args.filename);
+        std::process::exit(1);
+    };
+
+    let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
+        println!("Failed to tokenize: {e:?}");
         std::process::exit(1)
-    }
+    });
 
     if cfg!(target_os = "macos") & !args.gcc {
         println!("Using GCC as libwild does not support MacOS");
@@ -112,32 +115,31 @@ fn main() {
         // stop here if only lexing
         println!(
             "Processed tokens: {:?}",
-            tokens.unwrap().iter().map(|t| t.token.clone()).collect::<Vec<_>>()
+            tokens.iter().map(|t| t.token.clone()).collect::<Vec<_>>()
         );
         std::process::exit(0);
     }
 
-    let mut tokens = tokens.unwrap();
-    let ast = parser::parse_program(&mut tokens);
-    if ast.is_err() {
-        println!("Failed to parse: {:?}", ast.err().unwrap());
-        std::process::exit(1);
-    }
+    let mut tokens = tokens;
+    let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
+        println!("Failed to parse: {e:?}");
+        std::process::exit(1)
+    });
 
     if args.parse {
-        let ast_val = ast.unwrap();
+        let ast_val = ast;
         println!("{ast_val:?}");
         println!("{}", ast_val.itf_string());
         std::process::exit(0);
     }
 
-    let mut ast = ast.unwrap();
-    let validated_result = validate::resolve_program(&mut ast);
-    if validated_result.is_err() {
-        println!("{:?}", validated_result.err().unwrap());
+    let mut ast = ast;
+    let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+        println!("{e:?}");
         std::process::exit(1);
-    }
-    let mut name_gen = validated_result.unwrap();
+    });
+
+    let mut name_gen = validated_result;
     if args.validate {
         println!("Program Valid");
         std::process::exit(0);

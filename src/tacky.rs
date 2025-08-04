@@ -272,7 +272,7 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
                 });
                 new_val
             }
-            _ => unreachable!("Postfix on non-lvalue"),
+            _ => unreachable!("Prefix on non-lvalue"),
         },
     }
 }

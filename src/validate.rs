@@ -1,5 +1,6 @@
 /*
    We allow undefined behavior that is valid c like int foo = foo + 1;
+   We can add a warning for this in the future.
 */
 use crate::parser::{BlockItem, Declaration, Expr, Identifier, Program, Span, Stmt};
 use std::collections::HashMap;
@@ -32,7 +33,6 @@ impl fmt::Debug for SemanticError {
     }
 }
 
-// Stores information about a declared variable
 struct VarInfo {
     renamed: String,
     span: Span,
