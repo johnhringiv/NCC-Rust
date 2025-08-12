@@ -136,25 +136,33 @@ fn resolve_decoration(
     }
 }
 
-fn resolve_statement(statement: &mut Stmt, variable_map: &HashMap<String, VarInfo>, mut labels: &mut HashSet<String>, mut jumps: &mut HashSet<String>) -> Result<(), SemanticError> {
+fn resolve_statement(
+    statement: &mut Stmt,
+    variable_map: &HashMap<String, VarInfo>,
+    labels: &mut HashSet<String>,
+    jumps: &mut HashSet<String>,
+) -> Result<(), SemanticError> {
     match statement {
         Stmt::Return(e) => resolve_exp(e, variable_map),
         Stmt::Expression(e) => resolve_exp(e, variable_map),
         Stmt::Null => Ok(()),
         Stmt::If(e, then_stmt, else_stmt) => {
             resolve_exp(e, variable_map)?;
-            resolve_statement(then_stmt, variable_map, &mut labels, &mut jumps)?;
+            resolve_statement(then_stmt, variable_map, labels, jumps)?;
             match &mut **else_stmt {
-                Some(else_stmt) => resolve_statement(else_stmt, variable_map, &mut labels, &mut jumps),
+                Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps),
                 None => Ok(()),
             }
         }
         Stmt::Labeled(label_name, stmt) => {
             if !labels.insert(label_name.to_string()) {
-                return Err(SemanticError{ message: format!("Label {label_name:} already defined"), span: None })
+                return Err(SemanticError {
+                    message: format!("Label {label_name:} already defined"),
+                    span: None,
+                });
             }
-            resolve_statement(stmt, variable_map, &mut labels, &mut jumps)
-        },
+            resolve_statement(stmt, variable_map, labels, jumps)
+        }
         Stmt::Goto(label_name) => {
             jumps.insert(label_name.to_string());
             Ok(())
@@ -183,13 +191,16 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
     if diff.is_empty() {
         Ok(name_gen)
     } else {
-        Err(SemanticError{ message: format!("Jumps to nonexisting labels: {diff:#?}"), span: None })
+        Err(SemanticError {
+            message: format!("Jumps to nonexisting labels: {diff:#?}"),
+            span: None,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{get_sandler_dirs, run_tests, Stage};
+    use crate::test_utils::{Stage, get_sandler_dirs, run_tests};
 
     #[test]
     fn test_conditional_valid() {

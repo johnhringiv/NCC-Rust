@@ -255,7 +255,7 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::test_utils::{get_sandler_dirs, run_tests, Stage};
+    use crate::test_utils::{Stage, get_sandler_dirs, run_tests};
 
     #[test]
     fn sandler_tests_valid() {

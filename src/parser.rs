@@ -599,9 +599,7 @@ impl ItfDisplay for Stmt {
             }
             Stmt::Null => Node::leaf(cyan("Null")),
             Stmt::Goto(label) => Node::branch(cyan("Goto"), vec![label.itf_node()]),
-            Stmt::Labeled(label, stmt) => {
-                Node::branch(cyan("Labeled"), vec![label.itf_node(), stmt.itf_node()])
-            }
+            Stmt::Labeled(label, stmt) => Node::branch(cyan("Labeled"), vec![label.itf_node(), stmt.itf_node()]),
         }
     }
 }
@@ -641,7 +639,7 @@ impl ItfDisplay for Program {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{get_sandler_dirs, run_tests, Stage};
+    use crate::test_utils::{Stage, get_sandler_dirs, run_tests};
 
     #[test]
     fn test_conditional_valid() {

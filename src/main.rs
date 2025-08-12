@@ -246,11 +246,11 @@ fn main() {
 // Available for both unit tests and integration tests
 #[cfg(test)]
 pub mod test_utils {
-    use std::fs;
-    use std::path::Path;
     use crate::lexer::tokenizer;
     use crate::parser::parse_program;
     use crate::validate::resolve_program;
+    use std::fs;
+    use std::path::Path;
 
     static CHAPTER_COMPLETED: i32 = 6;
     static EXTRA_COMPLETED: i32 = 6;
@@ -276,14 +276,22 @@ pub mod test_utils {
             if valid {
                 dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/valid/"));
             } else {
-                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/", stage.dir()));
+                dirs.push(format!(
+                    "../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/",
+                    stage.dir()
+                ));
             }
         }
         for chapter in 1..=EXTRA_COMPLETED {
             if valid {
-                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/valid/extra_credit/"));
+                dirs.push(format!(
+                    "../writing-a-c-compiler-tests/tests/chapter_{chapter}/valid/extra_credit/"
+                ));
             } else {
-                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/extra_credit/", stage.dir()));
+                dirs.push(format!(
+                    "../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/extra_credit/",
+                    stage.dir()
+                ));
             }
         }
         dirs
@@ -302,9 +310,7 @@ pub mod test_utils {
                     if path.is_file() && path.extension() == Some("c".as_ref()) {
                         let input = fs::read_to_string(&path).unwrap();
                         let test_result = match stage {
-                            Stage::Lex => {
-                                tokenizer(&input).is_err()
-                            }
+                            Stage::Lex => tokenizer(&input).is_err(),
                             Stage::Parse => {
                                 let mut tokens = tokenizer(&input).unwrap();
                                 parse_program(&mut tokens).is_err()
@@ -316,13 +322,7 @@ pub mod test_utils {
                             }
                         };
 
-
-
-                        let test_passed = if should_pass {
-                            !test_result
-                        } else {
-                            test_result
-                        };
+                        let test_passed = if should_pass { !test_result } else { test_result };
 
                         if test_passed {
                             passed += 1;

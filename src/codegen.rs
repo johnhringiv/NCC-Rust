@@ -484,11 +484,11 @@ pub fn coalesce_labels(program: &mut Program) {
     let Program {
         function: FunctionDefinition { name: _, body },
     } = program;
-    
+
     let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut new_ins = Vec::new();
     let mut current_label: Option<String> = None;
-    
+
     // First pass: build label mapping
     for ins in body.iter() {
         match ins {
@@ -510,7 +510,7 @@ pub fn coalesce_labels(program: &mut Program) {
             }
         }
     }
-    
+
     // Second pass: update jump targets
     for ins in new_ins.iter_mut() {
         match ins {
@@ -519,7 +519,10 @@ pub fn coalesce_labels(program: &mut Program) {
                     *label = new_label.clone();
                 }
             }
-            Instruction::JmpCC { label: Identifier(label), .. } => {
+            Instruction::JmpCC {
+                label: Identifier(label),
+                ..
+            } => {
                 if let Some(new_label) = label_map.get(label) {
                     *label = new_label.clone();
                 }
@@ -527,7 +530,7 @@ pub fn coalesce_labels(program: &mut Program) {
             _ => {}
         }
     }
-    
+
     *body = new_ins;
 }
 
