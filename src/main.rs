@@ -103,7 +103,7 @@ fn main() {
 
     let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
         println!("Failed to tokenize: {e:?}");
-        std::process::exit(1)
+        std::process::exit(10)
     });
 
     if cfg!(target_os = "macos") & !args.gcc {
@@ -123,7 +123,7 @@ fn main() {
     let mut tokens = tokens;
     let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
         println!("Failed to parse: {e:?}");
-        std::process::exit(1)
+        std::process::exit(20)
     });
 
     if args.parse {
@@ -136,7 +136,7 @@ fn main() {
     let mut ast = ast;
     let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
         println!("{e:?}");
-        std::process::exit(1);
+        std::process::exit(30);
     });
 
     let mut name_gen = validated_result;
@@ -240,5 +240,100 @@ fn main() {
             .status()
             .expect("Failed to execute compiled binary");
         println!("Result: {}", run_status.code().unwrap());
+    }
+}
+
+// Available for both unit tests and integration tests
+#[cfg(test)]
+pub mod test_utils {
+    use std::fs;
+    use std::path::Path;
+    use crate::lexer::tokenizer;
+    use crate::parser::parse_program;
+    use crate::validate::resolve_program;
+
+    static CHAPTER_COMPLETED: i32 = 6;
+    static EXTRA_COMPLETED: i32 = 6;
+    pub enum Stage {
+        Lex,
+        Parse,
+        Validate,
+    }
+
+    impl Stage {
+        pub fn dir(&self) -> &'static str {
+            match self {
+                Stage::Lex => "lex",
+                Stage::Parse => "parse",
+                Stage::Validate => "semantics",
+            }
+        }
+    }
+
+    pub fn get_sandler_dirs(valid: bool, stage: &Stage) -> Vec<String> {
+        let mut dirs = vec![];
+        for chapter in 1..=CHAPTER_COMPLETED {
+            if valid {
+                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/valid/"));
+            } else {
+                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/", stage.dir()));
+            }
+        }
+        for chapter in 1..=EXTRA_COMPLETED {
+            if valid {
+                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/valid/extra_credit/"));
+            } else {
+                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/extra_credit/", stage.dir()));
+            }
+        }
+        dirs
+    }
+
+    pub fn run_tests(dir_paths: &Vec<String>, should_pass: bool, stage: &Stage) -> (usize, Vec<String>) {
+        let mut passed = 0;
+        let mut failed = vec![];
+        for dir_path in dir_paths {
+            let test_dir = Path::new(dir_path);
+
+            if test_dir.exists() {
+                for entry in fs::read_dir(test_dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_file() && path.extension() == Some("c".as_ref()) {
+                        let input = fs::read_to_string(&path).unwrap();
+                        let test_result = match stage {
+                            Stage::Lex => {
+                                tokenizer(&input).is_err()
+                            }
+                            Stage::Parse => {
+                                let mut tokens = tokenizer(&input).unwrap();
+                                parse_program(&mut tokens).is_err()
+                            }
+                            Stage::Validate => {
+                                let mut tokens = tokenizer(&input).unwrap();
+                                let mut program = parse_program(&mut tokens).unwrap();
+                                resolve_program(&mut program).is_err()
+                            }
+                        };
+
+
+
+                        let test_passed = if should_pass {
+                            !test_result
+                        } else {
+                            test_result
+                        };
+
+                        if test_passed {
+                            passed += 1;
+                        } else {
+                            failed.push(path.file_name().unwrap().to_str().unwrap().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        (passed, failed)
     }
 }

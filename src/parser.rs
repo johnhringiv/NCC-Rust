@@ -84,6 +84,7 @@ pub enum Expr {
     CompoundAssignment(AssignOp, Box<Expr>, Box<Expr>, Span),
     PostFixOp(IncDec, Box<Expr>, Span),
     PreFixOp(IncDec, Box<Expr>, Span),
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +115,7 @@ pub enum BinOp {
     GreaterOrEqual,
     Assignment,         // not a binop but we include it for parsing convenience
     CompoundAssignment, // also not a binop, but used for compound assignments like +=, -=, etc.
+    Conditional,
 }
 
 impl BinOp {
@@ -130,6 +132,7 @@ impl BinOp {
             BinOp::BitwiseOr => 27,
             BinOp::And => 10,
             BinOp::Or => 5,
+            BinOp::Conditional => 3,
             BinOp::Assignment | BinOp::CompoundAssignment => 1,
         }
     }
@@ -139,6 +142,9 @@ impl BinOp {
 pub enum Stmt {
     Return(Expr),
     Expression(Expr),
+    If(Expr, Box<Stmt>, Box<Option<Stmt>>), // if (controlling expression, then, else)
+    Goto(Identifier),
+    Labeled(Identifier, Box<Stmt>),
     Null,
 }
 
@@ -347,6 +353,12 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
                         _ => unreachable!("Already matched on operator"),
                     }
                 }
+                BinOp::Conditional => {
+                    tokens.pop_front().unwrap();
+                    let middle = parse_conditional_middle(tokens)?;
+                    let right = parse_exp(tokens, prec)?;
+                    left = Expr::Conditional(Box::from(left), Box::from(middle), Box::from(right))
+                }
                 _ => {
                     tokens.pop_front();
                     let right = parse_exp(tokens, prec + 1)?;
@@ -358,6 +370,12 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
         }
     }
     Ok(left)
+}
+
+fn parse_conditional_middle(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
+    let e = parse_exp(tokens, 0)?;
+    expect(&Token::Colon, tokens)?;
+    Ok(e)
 }
 
 fn parse_binop(next_token: &Option<&SpannedToken>) -> Option<BinOp> {
@@ -392,6 +410,7 @@ fn parse_binop(next_token: &Option<&SpannedToken>) -> Option<BinOp> {
             | Token::BitwiseXOrAssign
             | Token::BitwiseLeftShiftAssign
             | Token::BitwiseRightShiftAssign => Some(BinOp::CompoundAssignment),
+            Token::QuestionMark => Some(BinOp::Conditional),
             _ => None,
         },
         _ => None,
@@ -433,6 +452,42 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
         Token::Semicolon => {
             tokens.pop_front();
             Ok(Stmt::Null)
+        }
+        Token::IfKeyword => {
+            tokens.pop_front();
+            expect(&Token::OpenParen, tokens)?;
+            let condition = parse_exp(tokens, 0)?;
+            expect(&Token::CloseParen, tokens)?;
+            let then_stmt = parse_statement(tokens)?;
+            // check for else
+            let else_stmt = if tokens.front().map(|t| &t.token) == Some(&Token::ElseKeyword) {
+                tokens.pop_front();
+                Some(parse_statement(tokens)?)
+            } else {
+                None
+            };
+            Ok(Stmt::If(condition, Box::new(then_stmt), Box::new(else_stmt)))
+        }
+        Token::GotoKeyword => {
+            tokens.pop_front();
+            let (target, _span) = parse_identifier(tokens)?;
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Stmt::Goto(target))
+        }
+        Token::Identifier(label_name) => {
+            // Check if it's a label (identifier followed by colon)
+            if tokens.get(1).map(|t| &t.token) == Some(&Token::Colon) {
+                let label = Identifier(label_name);
+                tokens.pop_front(); // consume identifier
+                tokens.pop_front(); // consume colon
+                let stmt = parse_statement(tokens)?;
+                Ok(Stmt::Labeled(label, Box::new(stmt)))
+            } else {
+                // It's an expression statement
+                let expr = parse_exp(tokens, 0)?;
+                expect(&Token::Semicolon, tokens)?;
+                Ok(Stmt::Expression(expr))
+            }
         }
         _ => {
             let expr = parse_exp(tokens, 0)?;
@@ -516,6 +571,14 @@ impl ItfDisplay for Expr {
             ),
             Expr::PostFixOp(op, e, _span) => Node::branch(cyan(format!("PostFix ({op:?})")), vec![e.itf_node()]),
             Expr::PreFixOp(op, e, _span) => Node::branch(cyan(format!("PreFix ({op:?})")), vec![e.itf_node()]),
+            Expr::Conditional(condition, then_expr, else_expr) => Node::branch(
+                cyan("Conditional"),
+                vec![
+                    Node::branch("condition:", vec![condition.itf_node()]),
+                    Node::branch("then:", vec![then_expr.itf_node()]),
+                    Node::branch("else:", vec![else_expr.itf_node()]),
+                ],
+            ),
         }
     }
 }
@@ -524,7 +587,21 @@ impl ItfDisplay for Stmt {
         match self {
             Stmt::Return(expr) => Node::branch(cyan("Return"), vec![expr.itf_node()]),
             Stmt::Expression(expr) => Node::branch(cyan("Expression"), vec![expr.itf_node()]),
+            Stmt::If(condition, then_stmt, else_stmt) => {
+                let mut children = vec![
+                    Node::branch("condition:", vec![condition.itf_node()]),
+                    Node::branch("then:", vec![then_stmt.itf_node()]),
+                ];
+                if let Some(else_s) = else_stmt.as_ref() {
+                    children.push(Node::branch("else:", vec![else_s.itf_node()]));
+                }
+                Node::branch(cyan("If"), children)
+            }
             Stmt::Null => Node::leaf(cyan("Null")),
+            Stmt::Goto(label) => Node::branch(cyan("Goto"), vec![label.itf_node()]),
+            Stmt::Labeled(label, stmt) => {
+                Node::branch(cyan("Labeled"), vec![label.itf_node(), stmt.itf_node()])
+            }
         }
     }
 }
@@ -564,89 +641,37 @@ impl ItfDisplay for Program {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::lexer::tokenizer;
-    use crate::parser::Stmt::Return;
+    use crate::test_utils::{get_sandler_dirs, run_tests, Stage};
 
     #[test]
-    fn basic_return() {
-        let input = std::fs::read_to_string("writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c")
-            .expect("Failed to read input file");
-        let mut tokens = tokenizer(&input).unwrap();
-        let ast = parse_program(&mut tokens).unwrap();
-        let expected = Program {
-            function: Function {
-                name: Identifier("main".to_string()),
-                body: vec![BlockItem::Statement(Return(Expr::Constant(100)))],
-            },
-        };
-        assert_eq!(ast, expected);
-    }
-
-    fn run_parser_test_invalid(file: &str) {
-        let input = std::fs::read_to_string(file).expect("Failed to read input file");
-        let mut tokens = tokenizer(&input).unwrap();
-        let result = parse_program(&mut tokens);
-        assert!(result.is_err());
+    fn test_conditional_valid() {
+        let dirs = vec!["c_programs/conditional/valid/".to_string()];
+        let (passed, failed) = run_tests(&dirs, true, &Stage::Parse);
+        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
+        println!("Passed: {passed}");
     }
 
     #[test]
-    fn end_before_expr() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/end_before_expr.c")
+    fn test_conditional_invalid() {
+        let dirs = vec!["c_programs/conditional/invalid_parse/".to_string()];
+        let (passed, failed) = run_tests(&dirs, false, &Stage::Parse);
+        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
+        println!("Passed: {passed}");
     }
 
     #[test]
-    fn test_extra_junk() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/extra_junk.c");
+    fn sandler_tests_valid() {
+        let dirs = get_sandler_dirs(true, &Stage::Parse);
+        let (passed, failed) = run_tests(&dirs, true, &Stage::Parse);
+        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
+        println!("Passed: {passed}");
     }
 
     #[test]
-    fn test_invalid_function_name() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/invalid_function_name.c");
-    }
-
-    #[test]
-    fn test_keyword_wrong_case() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/keyword_wrong_case.c");
-    }
-
-    #[test]
-    fn test_missing_type() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/missing_type.c");
-    }
-
-    #[test]
-    fn test_misspelled_keyword() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/misspelled_keyword.c");
-    }
-
-    #[test]
-    fn test_no_semicolon() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/no_semicolon.c");
-    }
-
-    #[test]
-    fn test_not_expression() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/not_expression.c");
-    }
-
-    #[test]
-    fn test_space_in_keyword() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/space_in_keyword.c");
-    }
-
-    #[test]
-    fn test_switched_parens() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/switched_parens.c");
-    }
-
-    #[test]
-    fn test_unclosed_brace() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_brace.c");
-    }
-
-    #[test]
-    fn test_unclosed_paren() {
-        run_parser_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_parse/unclosed_paren.c");
+    fn sandler_tests_invalid() {
+        let dirs = get_sandler_dirs(false, &Stage::Parse);
+        let (passed, failed) = run_tests(&dirs, false, &Stage::Parse);
+        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
+        println!("Passed: {passed}");
     }
 }

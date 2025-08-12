@@ -1,0 +1,32 @@
+{
+  "conditional/valid/assignment.c": {
+    "return_code": 100
+  },
+  "conditional/valid/chained.c": {
+    "return_code": 2
+  },
+  "conditional/valid/complex.c": {
+    "return_code": 20
+  },
+  "conditional/valid/with_vars.c": {
+    "return_code": 20
+  },
+  "evaluation_order/left_first.c": {
+    "return_code": 5
+  },
+  "evaluation_order/arithmetic_side_effects.c": {
+    "return_code": 16
+  },
+  "evaluation_order/test_left.c": {
+    "return_code": 10
+  },
+  "evaluation_order/test_middle.c": {
+    "return_code": 11
+  },
+  "evaluation_order/test_order.c": {
+    "return_code": 16
+  },
+  "evaluation_order/test_postinc.c": {
+    "return_code": 5
+  }
+}

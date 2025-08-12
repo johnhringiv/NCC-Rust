@@ -187,8 +187,18 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             result
         }
         parser::Expr::Binary(op, e1, e2) => {
-            // C doesn't mandate order of src1 and src2 eval leading to undefined behavior
-            let src1 = tackify_expr(e1, instructions, name_generator);
+            // Evaluate left-to-right and capture values immediately to avoid undefined behavior
+            let mut src1 = tackify_expr(e1, instructions, name_generator);
+            // If src1 is a variable, copy it to a temp to capture its current value
+            // before evaluating src2 (which might modify it)
+            if let Val::Var(_) = &src1 {
+                let temp = Val::Var(name_generator.next("binary_left"));
+                instructions.push(Instruction::Copy {
+                    src: src1.clone(),
+                    dst: temp.clone(),
+                });
+                src1 = temp;
+            }
             let src2 = tackify_expr(e2, instructions, name_generator);
             let dst = Val::Var(name_generator.next("temp"));
             instructions.push(Instruction::Binary {
@@ -274,11 +284,35 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             }
             _ => unreachable!("Prefix on non-lvalue"),
         },
+        Expr::Conditional(cond, e1, e2) => {
+            let c = tackify_expr(cond, instructions, name_generator);
+            let result = Val::Var(name_generator.next("temp"));
+            let cond_false = Identifier(name_generator.next("cond_false"));
+            let cond_end = Identifier(name_generator.next("cond_end"));
+            instructions.push(Instruction::JumpIfZero {
+                condition: c,
+                target: cond_false.clone()
+            });
+            let left = tackify_expr(e1, instructions, name_generator);
+            instructions.push(Instruction::Copy {
+                src: left,
+                dst: result.clone(),
+            });
+            instructions.push(Instruction::Jump {target: cond_end.clone()});
+            instructions.push(Instruction::Label(cond_false.clone()));
+            let right = tackify_expr(e2, instructions, name_generator);
+            instructions.push(Instruction::Copy {
+                src: right,
+                dst: result.clone(),
+            });
+            instructions.push(Instruction::Label(cond_end.clone()));
+            result
+        }
     }
 }
 
 fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
-    match stmt {
+    match &stmt {
         parser::Stmt::Return(expr) => {
             let val = tackify_expr(expr, instructions, name_generator);
             instructions.push(Instruction::Return(val));
@@ -287,6 +321,38 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             tackify_expr(e, instructions, name_generator);
         }
         parser::Stmt::Null => (),
+        &parser::Stmt::If(cond, then_stmt, else_stmt) => {
+            let c = tackify_expr(cond, instructions, name_generator);
+            let end_label = Identifier(name_generator.next("fi"));
+
+            if let Some(e) = &**else_stmt { // if with else
+                let else_label = Identifier(name_generator.next("if_else"));
+                instructions.push(Instruction::JumpIfZero {
+                    condition: c,
+                    target: else_label.clone(),
+                });
+                tackify_stmt(then_stmt, instructions, name_generator);
+                instructions.push(Instruction::Jump {
+                    target: end_label.clone(),
+                });
+                instructions.push(Instruction::Label(else_label));
+                tackify_stmt(e, instructions, name_generator);
+            } else { // no else
+                instructions.push(Instruction::JumpIfZero {
+                    condition: c,
+                    target: end_label.clone(),
+                });
+                tackify_stmt(then_stmt, instructions, name_generator);
+            }
+            instructions.push(Instruction::Label(end_label.clone()));
+        }
+        &parser::Stmt::Labeled(label_name, stmt) => {
+            instructions.push(Instruction::Label(Identifier(label_name.to_string())));
+            tackify_stmt(stmt, instructions, name_generator)
+        }
+        &parser::Stmt::Goto(label_name) => {
+            instructions.push(Instruction::Jump {target: Identifier(label_name.to_string())})
+        }
     }
 }
 

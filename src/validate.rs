@@ -1,9 +1,11 @@
 /*
    We allow undefined behavior that is valid c like int foo = foo + 1;
    We can add a warning for this in the future.
+
+   We also don't do scope validation another case that deserves a warning
 */
 use crate::parser::{BlockItem, Declaration, Expr, Identifier, Program, Span, Stmt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 pub struct SemanticError {
@@ -93,6 +95,12 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
                 *span,
             )),
         },
+        Expr::Conditional(e, then_exp, else_exp) => {
+            resolve_exp(e, variable_map)?;
+            resolve_exp(then_exp, variable_map)?;
+            resolve_exp(else_exp, variable_map)?;
+            Ok(())
+        }
     }
 }
 
@@ -128,22 +136,42 @@ fn resolve_decoration(
     }
 }
 
-fn resolve_statement(statement: &mut Stmt, variable_map: &HashMap<String, VarInfo>) -> Result<(), SemanticError> {
+fn resolve_statement(statement: &mut Stmt, variable_map: &HashMap<String, VarInfo>, mut labels: &mut HashSet<String>, mut jumps: &mut HashSet<String>) -> Result<(), SemanticError> {
     match statement {
         Stmt::Return(e) => resolve_exp(e, variable_map),
         Stmt::Expression(e) => resolve_exp(e, variable_map),
         Stmt::Null => Ok(()),
+        Stmt::If(e, then_stmt, else_stmt) => {
+            resolve_exp(e, variable_map)?;
+            resolve_statement(then_stmt, variable_map, &mut labels, &mut jumps)?;
+            match &mut **else_stmt {
+                Some(else_stmt) => resolve_statement(else_stmt, variable_map, &mut labels, &mut jumps),
+                None => Ok(()),
+            }
+        }
+        Stmt::Labeled(label_name, stmt) => {
+            if !labels.insert(label_name.to_string()) {
+                return Err(SemanticError{ message: format!("Label {label_name:} already defined"), span: None })
+            }
+            resolve_statement(stmt, variable_map, &mut labels, &mut jumps)
+        },
+        Stmt::Goto(label_name) => {
+            jumps.insert(label_name.to_string());
+            Ok(())
+        }
     }
 }
 
 pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticError> {
     let mut variable_map = HashMap::new();
+    let mut labels = HashSet::new();
+    let mut jumps = HashSet::new();
     let mut name_gen = NameGenerator::new();
 
     for bi in &mut program.function.body {
         match bi {
             BlockItem::Statement(s) => {
-                resolve_statement(s, &variable_map)?;
+                resolve_statement(s, &variable_map, &mut labels, &mut jumps)?;
             }
             BlockItem::Declaration(d) => {
                 resolve_decoration(d, &mut variable_map, &mut name_gen)?;
@@ -151,5 +179,39 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
         }
     }
 
-    Ok(name_gen)
+    let diff: Vec<_> = jumps.difference(&labels).collect();
+    if diff.is_empty() {
+        Ok(name_gen)
+    } else {
+        Err(SemanticError{ message: format!("Jumps to nonexisting labels: {diff:#?}"), span: None })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::{get_sandler_dirs, run_tests, Stage};
+
+    #[test]
+    fn test_conditional_valid() {
+        let dirs = vec!["c_programs/conditional/valid/".to_string()];
+        let (passed, failed) = run_tests(&dirs, true, &Stage::Validate);
+        assert_eq!(failed.len(), 0, "Failed to validate valid files: {failed:?}");
+        println!("Passed: {passed}");
+    }
+
+    #[test]
+    fn sandler_tests_valid() {
+        let dirs = get_sandler_dirs(true, &Stage::Validate);
+        let (passed, failed) = run_tests(&dirs, true, &Stage::Validate);
+        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
+        println!("Passed: {passed}");
+    }
+
+    #[test]
+    fn sandler_tests_invalid() {
+        let dirs = get_sandler_dirs(false, &Stage::Validate);
+        let (passed, failed) = run_tests(&dirs, false, &Stage::Validate);
+        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
+        println!("Passed: {passed}");
+    }
 }
