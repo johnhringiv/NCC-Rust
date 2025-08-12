@@ -1,5 +1,9 @@
 # NCC - Not Completely C
 
+[![Tests](https://github.com/johnhringiv/ncc/actions/workflows/tests.yml/badge.svg)](https://github.com/johnhringiv/ncc/actions/workflows/tests.yml)
+[![Lint](https://github.com/johnhringiv/ncc/actions/workflows/lint.yml/badge.svg)](https://github.com/johnhringiv/ncc/actions/workflows/lint.yml)
+[![Coverage](https://codecov.io/gh/johnhringiv/ncc/branch/main/graph/badge.svg)](https://codecov.io/gh/johnhringiv/ncc)
+
 A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
