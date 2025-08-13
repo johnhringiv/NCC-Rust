@@ -124,13 +124,11 @@ fn get_ncc_binary_path() -> PathBuf {
 
     for path_str in &possible_paths {
         let path = PathBuf::from(path_str);
-        if let Ok(metadata) = fs::metadata(&path) {
-            if let Ok(modified) = metadata.modified() {
-                if modified > best_time {
-                    best_time = modified;
-                    best_path = path;
-                }
-            }
+        if let Ok(modified) = fs::metadata(&path).and_then(|m| m.modified())
+            && modified > best_time
+        {
+            best_time = modified;
+            best_path = path;
         }
     }
 
