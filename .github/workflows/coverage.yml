@@ -18,6 +18,14 @@ jobs:
       with:
         submodules: recursive
     
+    - name: Verify submodule checkout
+      run: |
+        if [ ! -d "writing-a-c-compiler-tests/tests" ]; then
+          echo "Submodule not properly initialized, attempting to fix..."
+          git submodule update --init --recursive
+        fi
+        ls -la writing-a-c-compiler-tests/
+    
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
