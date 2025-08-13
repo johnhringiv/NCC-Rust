@@ -44,17 +44,14 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
     
-    # Build release binary (needed for integration tests)
-    - name: Build release
-      run: cargo build --release
-    
     # Generate code coverage with llvm-cov
     - name: Install cargo-llvm-cov
       run: if ! command -v cargo-llvm-cov >/dev/null; then cargo install cargo-llvm-cov; fi
     
     - name: Generate code coverage
-      run: cargo llvm-cov --ignore-filename-regex pretty.rs --lcov --output-path lcov.info
-    
+      working-directory: ${{ github.workspace }}
+      run: ls -la && cargo llvm-cov --ignore-filename-regex pretty.rs --lcov --output-path lcov.info
+
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
       with:

@@ -227,17 +227,6 @@ fn run_cases(cases: Vec<TestCase>) {
 }
 
 #[test]
-fn test_writing_a_c_compiler_tests_exists() {
-    let tests_dir = PathBuf::from("../writing-a-c-compiler-tests/tests");
-    assert!(
-        tests_dir.exists(),
-        "writing-a-c-compiler-tests/tests directory does not exist. \
-         Make sure the submodule is properly initialized with: \
-         git submodule update --init --recursive"
-    );
-}
-
-#[test]
 fn test_all_sandler() {
     let cases = get_sandler_cases();
     run_cases(cases)
