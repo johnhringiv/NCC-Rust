@@ -46,5 +46,5 @@ jobs:
       run: cargo build --release
     
     - name: Run tests
-o      working-directory: ${{ github.workspace }}
+      working-directory: ${{ github.workspace }}
       run: cargo test --workspace --all-features --no-fail-fast
