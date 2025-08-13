@@ -22,10 +22,10 @@ struct TestCase {
 fn get_sandler_cases() -> Vec<TestCase> {
     // Load expected results for valid tests
     let expected_results =
-        load_expected("../writing-a-c-compiler-tests/expected_results.json").unwrap_or_else(|_| HashMap::new());
+        load_expected("writing-a-c-compiler-tests/expected_results.json").unwrap_or_else(|_| HashMap::new());
     let mut cases = vec![];
 
-    for entry in glob("../writing-a-c-compiler-tests/tests/**/*.c")
+    for entry in glob("writing-a-c-compiler-tests/tests/**/*.c")
         .expect("glob err")
         .flatten()
     {
@@ -49,7 +49,7 @@ fn get_sandler_cases() -> Vec<TestCase> {
         } else {
             // Valid test - get expected return code from map
             let relative_path = path_str
-                .strip_prefix("../writing-a-c-compiler-tests/tests/")
+                .strip_prefix("writing-a-c-compiler-tests/tests/")
                 .unwrap_or(path_str);
             let expected_value = *expected_results.get(relative_path).unwrap_or(&0);
             ProgramOutput::Result(expected_value)
@@ -223,7 +223,8 @@ fn run_cases(cases: Vec<TestCase>) {
     if total_failed > 0 {
         println!("{total_failed} tests failed")
     }
-    assert_eq!(total_failed, 0)
+    assert_eq!(total_failed, 0);
+    assert!(total_passed > 0)
 }
 
 #[test]

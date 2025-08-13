@@ -1,4 +1,4 @@
-name: Coverage
+name: Tests & Coverage
 
 on:
   push:
@@ -17,14 +17,6 @@ jobs:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
-    
-    - name: Verify submodule checkout
-      run: |
-        if [ ! -d "writing-a-c-compiler-tests/tests" ]; then
-          echo "Submodule not properly initialized, attempting to fix..."
-          git submodule update --init --recursive
-        fi
-        ls -la writing-a-c-compiler-tests/
     
     - uses: actions-rs/toolchain@v1
       with:
@@ -48,9 +40,9 @@ jobs:
     - name: Install cargo-llvm-cov
       run: if ! command -v cargo-llvm-cov >/dev/null; then cargo install cargo-llvm-cov; fi
     
-    - name: Generate code coverage
+    - name: Run tests with coverage
       working-directory: ${{ github.workspace }}
-      run: ls -la && cargo llvm-cov --ignore-filename-regex pretty.rs --lcov --output-path lcov.info
+      run: cargo llvm-cov --ignore-filename-regex pretty.rs --lcov --output-path lcov.info --workspace --all-features --no-fail-fast
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
