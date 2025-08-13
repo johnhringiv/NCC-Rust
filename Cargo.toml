@@ -10,3 +10,7 @@ iced-x86 = { version = "1.21", default-features = false, features = ["std", "cod
 libwild = "0.5.0"
 object = { version = "0.37.1", features = ["write"] }
 regex = "1.11.1"
+
+[dev-dependencies]
+glob = "0.3.2"
+serde_json = "1.0"

@@ -48,6 +48,11 @@ pub enum Token {
     BitwiseRightShiftAssign, // >>=
     Decrement,               // --
     Increment,               // ++
+    IfKeyword,               // if
+    ElseKeyword,             // else
+    GotoKeyword,             // goto
+    QuestionMark,            // ?
+    Colon,                   // :
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
@@ -103,6 +108,11 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     // P*fix operators
     (r"^--", Token::Decrement),
     (r"^\+\+", Token::Increment),
+    (r"^if\b", Token::IfKeyword),
+    (r"^else\b", Token::ElseKeyword),
+    (r"^goto\b", Token::GotoKeyword),
+    (r"^\?", Token::QuestionMark),
+    (r"^:", Token::Colon),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -245,116 +255,21 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
+    use crate::test_utils::{Stage, get_sandler_dirs, run_tests};
 
-    pub(crate) fn basic_return(ret: i64) -> Vec<Token> {
-        vec![
-            Token::IntKeyword,
-            Token::Identifier("main".to_string()),
-            Token::OpenParen,
-            Token::VoidKeyword,
-            Token::CloseParen,
-            Token::OpenBrace,
-            Token::ReturnKeyword,
-            Token::ConstantInt(ret),
-            Token::Semicolon,
-            Token::CloseBrace,
-        ]
-    }
-
-    fn run_lexer_test_valid(file: &str, expected: Vec<Token>) {
-        let input = std::fs::read_to_string(file).expect("Failed to read input file");
-        let tokens = tokenizer(&input)
-            .expect("Lexer failed")
-            .iter()
-            .map(|t| t.token.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(tokens, expected);
-    }
-
-    fn run_lexer_test_invalid(file: &str) {
-        let input = std::fs::read_to_string(file).expect("Failed to read input file");
-        assert!(tokenizer(&input).is_err());
+    #[test]
+    fn sandler_tests_valid() {
+        let dirs = get_sandler_dirs(true, &Stage::Lex);
+        let (passed, failed) = run_tests(&dirs, true, &Stage::Lex);
+        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
+        println!("Passed: {passed}");
     }
 
     #[test]
-    fn test_lexer_multi_digit() {
-        run_lexer_test_valid(
-            "writing-a-c-compiler-tests/tests/chapter_1/valid/multi_digit.c",
-            basic_return(100),
-        );
-    }
-
-    #[test]
-    fn test_lexer_newlines() {
-        run_lexer_test_valid(
-            "writing-a-c-compiler-tests/tests/chapter_1/valid/newlines.c",
-            basic_return(0),
-        )
-    }
-
-    #[test]
-    fn test_lexer_no_newlines() {
-        run_lexer_test_valid(
-            "writing-a-c-compiler-tests/tests/chapter_1/valid/no_newlines.c",
-            basic_return(0),
-        )
-    }
-
-    #[test]
-    fn test_lexer_return_0() {
-        run_lexer_test_valid(
-            "writing-a-c-compiler-tests/tests/chapter_1/valid/return_0.c",
-            basic_return(0),
-        )
-    }
-
-    #[test]
-    fn test_lexer_return_2() {
-        run_lexer_test_valid(
-            "writing-a-c-compiler-tests/tests/chapter_1/valid/return_2.c",
-            basic_return(2),
-        )
-    }
-
-    #[test]
-    fn test_lexer_spaces() {
-        run_lexer_test_valid(
-            "writing-a-c-compiler-tests/tests/chapter_1/valid/spaces.c",
-            basic_return(0),
-        )
-    }
-
-    #[test]
-    fn test_lexer_tabs() {
-        run_lexer_test_valid(
-            "writing-a-c-compiler-tests/tests/chapter_1/valid/tabs.c",
-            basic_return(0),
-        )
-    }
-
-    #[test]
-    fn test_lexer_at_sign() {
-        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/at_sign.c")
-    }
-
-    #[test]
-    fn test_lexer_backslash() {
-        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backslash.c")
-    }
-
-    #[test]
-    fn test_lexer_backtick() {
-        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/backtick.c")
-    }
-
-    #[test]
-    fn test_lexer_invalid_identifier() {
-        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier.c")
-    }
-
-    #[test]
-    fn test_lexer_invalid_identifier2() {
-        run_lexer_test_invalid("writing-a-c-compiler-tests/tests/chapter_1/invalid_lex/invalid_identifier_2.c")
+    fn sandler_tests_invalid() {
+        let dirs = get_sandler_dirs(false, &Stage::Lex);
+        let (passed, failed) = run_tests(&dirs, false, &Stage::Lex);
+        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
+        println!("Passed: {passed}");
     }
 }

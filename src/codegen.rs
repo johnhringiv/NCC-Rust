@@ -300,6 +300,7 @@ pub fn generate(ast: &tacky::Program) -> Program {
     };
     let stack_offset = replace_pseudo_registers(&mut p);
     fix_invalid(&mut p, stack_offset);
+    coalesce_labels(&mut p);
     p
 }
 
@@ -475,6 +476,61 @@ pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
             _ => new_ins.push(ins.clone()),
         }
     }
+    *body = new_ins;
+}
+
+/// Coalesces consecutive labels by mapping subsequent labels to the first one
+pub fn coalesce_labels(program: &mut Program) {
+    let Program {
+        function: FunctionDefinition { name: _, body },
+    } = program;
+
+    let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut new_ins = Vec::new();
+    let mut current_label: Option<String> = None;
+
+    // First pass: build label mapping
+    for ins in body.iter() {
+        match ins {
+            Instruction::Label(Identifier(label)) => {
+                if let Some(first_label) = &current_label {
+                    // Map this label to the first label in the sequence
+                    // Do not push to new_ins
+                    label_map.insert(label.clone(), first_label.clone());
+                } else {
+                    // This is the first label in a potential sequence
+                    current_label = Some(label.clone());
+                    new_ins.push(ins.clone());
+                }
+            }
+            _ => {
+                // Non-label instruction, reset the sequence
+                current_label = None;
+                new_ins.push(ins.clone());
+            }
+        }
+    }
+
+    // Second pass: update jump targets
+    for ins in new_ins.iter_mut() {
+        match ins {
+            Instruction::Jmp(Identifier(label)) => {
+                if let Some(new_label) = label_map.get(label) {
+                    *label = new_label.clone();
+                }
+            }
+            Instruction::JmpCC {
+                label: Identifier(label),
+                ..
+            } => {
+                if let Some(new_label) = label_map.get(label) {
+                    *label = new_label.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+
     *body = new_ins;
 }
 

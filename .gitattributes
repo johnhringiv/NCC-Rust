@@ -1,1 +1,2 @@
 * text eol=lf
+tests/c_programs/**/*.c linguist-documentation
