@@ -16,12 +16,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
-        components: rustfmt, clippy
-    
     - name: Cache cargo
       uses: actions/cache@v4
       with:
@@ -33,20 +27,24 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
     
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    
+    - name: Install cargo-sort
+      run: if ! command -v cargo-sort >/dev/null; then cargo install cargo-sort --locked --version ^1; fi
+    
+    - name: Install cargo-machete
+      run: if ! command -v cargo-machete >/dev/null; then cargo install cargo-machete --locked; fi
+    
     - name: Check formatting
       run: cargo fmt --all -- --check
     
     - name: Run clippy
       run: cargo clippy --workspace --all-targets --all-features -- -D warnings
     
-    - name: Install cargo-sort
-      run: if ! command -v cargo-sort >/dev/null; then cargo install cargo-sort --locked --version ^1; fi
-    
     - name: Check dependency ordering
       run: cargo sort --workspace --check
-    
-    - name: Install cargo-machete
-      run: if ! command -v cargo-machete >/dev/null; then cargo install cargo-machete --locked; fi
     
     - name: Check for unused dependencies
       run: cargo machete --with-metadata
