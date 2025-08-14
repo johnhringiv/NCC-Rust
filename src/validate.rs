@@ -4,7 +4,7 @@
 
    We also don't do scope validation another case that deserves a warning
 */
-use crate::parser::{BlockItem, Declaration, Expr, Identifier, Program, Span, Stmt};
+use crate::parser::{Block, BlockItem, Declaration, Expr, Identifier, Program, Span, Stmt};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -35,6 +35,7 @@ impl fmt::Debug for SemanticError {
     }
 }
 
+#[derive(Clone)]
 struct VarInfo {
     renamed: String,
     span: Span,
@@ -108,15 +109,20 @@ fn resolve_decoration(
     dec: &mut Declaration,
     variable_map: &mut HashMap<String, VarInfo>,
     name_gen: &mut NameGenerator,
+    block_vars: &mut HashSet<String>
 ) -> Result<(), SemanticError> {
     let Identifier(name) = &dec.name;
 
-    if let std::collections::hash_map::Entry::Vacant(e) = variable_map.entry(name.clone()) {
+    // if the value doesn't exist in block_vars we want to insert or update
+    if block_vars.insert(name.clone()) {
         let unique_name = name_gen.next(name);
-        e.insert(VarInfo {
+        let shadow = variable_map.insert(name.clone(), VarInfo {
             renamed: unique_name.clone(),
             span: dec.span,
         });
+        if let Some(shadow) = shadow {
+            eprintln!("Warning: Variable {name} at {} shadows {name} declared at {}. [WShadow]", dec.span, shadow.span);
+        }
         dec.name = Identifier(unique_name);
 
         // Resolve the initializer if present
@@ -138,9 +144,10 @@ fn resolve_decoration(
 
 fn resolve_statement(
     statement: &mut Stmt,
-    variable_map: &HashMap<String, VarInfo>,
+    variable_map: &mut HashMap<String, VarInfo>,
     labels: &mut HashSet<String>,
     jumps: &mut HashSet<String>,
+    name_gen: &mut NameGenerator
 ) -> Result<(), SemanticError> {
     match statement {
         Stmt::Return(e) => resolve_exp(e, variable_map),
@@ -148,9 +155,9 @@ fn resolve_statement(
         Stmt::Null => Ok(()),
         Stmt::If(e, then_stmt, else_stmt) => {
             resolve_exp(e, variable_map)?;
-            resolve_statement(then_stmt, variable_map, labels, jumps)?;
+            resolve_statement(then_stmt, variable_map, labels, jumps, name_gen)?;
             match &mut **else_stmt {
-                Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps),
+                Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps, name_gen),
                 None => Ok(()),
             }
         }
@@ -161,13 +168,37 @@ fn resolve_statement(
                     span: None,
                 });
             }
-            resolve_statement(stmt, variable_map, labels, jumps)
+            resolve_statement(stmt, variable_map, labels, jumps, name_gen)
         }
         Stmt::Goto(label_name) => {
             jumps.insert(label_name.to_string());
             Ok(())
         }
+        Stmt::Compound(block) => {
+            let mut shadow_map = variable_map.clone();
+            resolve_block(block, &mut shadow_map, labels, jumps, name_gen)?;
+            Ok(())
+        }
     }
+}
+
+fn resolve_block(block: &mut Block,
+                 mut variable_map: &mut HashMap<String, VarInfo>,
+                 mut labels: &mut HashSet<String>,
+                 mut jumps: &mut HashSet<String>,
+                 mut name_gen: &mut NameGenerator) -> Result<(), SemanticError> {
+    let mut block_vars = HashSet::new();
+    for bi in block.iter_mut() {
+        match bi {
+            BlockItem::Statement(s) => {
+                resolve_statement(s, variable_map, &mut labels, &mut jumps, name_gen)?;
+            }
+            BlockItem::Declaration(d) => {
+                resolve_decoration(d, &mut variable_map, &mut name_gen, &mut block_vars)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticError> {
@@ -176,16 +207,7 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
     let mut jumps = HashSet::new();
     let mut name_gen = NameGenerator::new();
 
-    for bi in &mut program.function.body {
-        match bi {
-            BlockItem::Statement(s) => {
-                resolve_statement(s, &variable_map, &mut labels, &mut jumps)?;
-            }
-            BlockItem::Declaration(d) => {
-                resolve_decoration(d, &mut variable_map, &mut name_gen)?;
-            }
-        }
-    }
+    resolve_block(&mut program.function.body, &mut variable_map, &mut labels, &mut jumps, &mut name_gen)?;
 
     let diff: Vec<_> = jumps.difference(&labels).collect();
     if diff.is_empty() {

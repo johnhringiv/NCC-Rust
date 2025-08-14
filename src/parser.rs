@@ -32,6 +32,12 @@ pub struct Span {
     pub column: usize,
 }
 
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.line, self.column)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum UnaryOp {
     BitwiseComplement,
@@ -145,15 +151,29 @@ pub enum Stmt {
     If(Expr, Box<Stmt>, Box<Option<Stmt>>), // if (controlling expression, then, else)
     Goto(Identifier),
     Labeled(Identifier, Box<Stmt>),
+    Compound(Block),
     Null,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub struct Declaration {
     pub name: Identifier,
     pub init: Option<Expr>,
     pub span: Span,
 }
+
+impl fmt::Debug for Declaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("Declaration");
+        debug_struct.field("name", &self.name);
+        if let Some(ref init) = self.init {
+            debug_struct.field("init", init);
+        }
+        debug_struct.finish()
+    }
+}
+
+pub type Block = Vec<BlockItem>;
 
 #[derive(Debug, PartialEq)]
 pub enum BlockItem {
@@ -164,7 +184,7 @@ pub enum BlockItem {
 #[derive(Debug, PartialEq)]
 pub struct Function {
     pub name: Identifier,
-    pub body: Vec<BlockItem>,
+    pub body: Block,
 }
 
 #[derive(Debug, PartialEq)]
@@ -489,6 +509,15 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
                 Ok(Stmt::Expression(expr))
             }
         }
+        Token::OpenBrace => {
+            tokens.pop_front();
+            let mut block = Vec::new();
+            while tokens.front().map(|t| &t.token) != Some(&Token::CloseBrace) {
+                block.push(parse_block_item(tokens)?);
+            }
+            expect(&Token::CloseBrace, tokens)?;
+            Ok(Stmt::Compound(block))
+        }
         _ => {
             let expr = parse_exp(tokens, 0)?;
             expect(&Token::Semicolon, tokens)?;
@@ -600,6 +629,10 @@ impl ItfDisplay for Stmt {
             Stmt::Null => Node::leaf(cyan("Null")),
             Stmt::Goto(label) => Node::branch(cyan("Goto"), vec![label.itf_node()]),
             Stmt::Labeled(label, stmt) => Node::branch(cyan("Labeled"), vec![label.itf_node(), stmt.itf_node()]),
+            Stmt::Compound(block) => {
+                let children: Vec<Node> = block.iter().map(|item| item.itf_node()).collect();
+                Node::branch(cyan("Compound"), children)
+            }
         }
     }
 }

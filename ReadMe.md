@@ -5,7 +5,7 @@
 A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
-So far chapter 6 (inc. bitwise, compound, increment, and goto extra credit) is implemented, which includes a lexer, parser, semantic analysis, and code generator for very basic C code.
+So far chapter 7 (inc. all extra credit) is implemented, which includes a lexer, parser, semantic analysis, and code generator for basic C code with local variables and compound statements.
 This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on linux).
 All provided tests pass.
 
@@ -15,15 +15,17 @@ The compiler currently implements a subset of C with the following grammar:
 
 ```ebnf
 <program> ::= <function>
-<function> ::= "int" <identifier> "(" "void" ")" "{" { <block-item> } "}"
+<function> ::= "int" <identifier> "(" "void" ")" <block>
+<block> ::= "{" { <block-item> } "}"
 <block-item> ::= <statement> | <declaration>
 <declaration> ::= "int" <identifier> [ "=" <exp> ] ";"
 <statement> ::= "return" <exp> ";"
             | <exp> ";"
-            | ";"
             | "if" "(" <exp> ")" <statement> [ "else" <statement> ]
             | "goto" <identifier> ";"
             | <identifier> ":" <statement>
+            | <block>
+            | ";"
 <exp> ::= <factor> | <exp> <binop> <exp> | <exp> <assign-op> <exp> 
        | <exp> "?" <exp> ":" <exp> | <exp> "++" | <exp> "--"
 <factor> ::= <int> | <identifier> | <unop> <factor> | "++" <factor> | "--" <factor> | "(" <exp> ")"
@@ -40,6 +42,8 @@ The compiler currently implements a subset of C with the following grammar:
 The compiler supports:
 - **Single function programs** with `int main(void)` signature
 - **Local variable declarations** with optional initialization
+- **Compound statements (blocks)**: `{ ... }` with proper scoping
+- **Variable scoping**: Block-local variables with shadowing support
 - **Integer arithmetic**: addition, subtraction, multiplication, division, modulo
 - **Bitwise operations**: AND (`&`), OR (`|`), XOR (`^`), complement (`~`), left/right shift (`<<`, `>>`)
 - **Logical operations**: AND (`&&`), OR (`||`), NOT (`!`) with short-circuit evaluation
@@ -49,12 +53,14 @@ The compiler supports:
 - **Conditional (ternary) operator**: `condition ? true_expr : false_expr`
 - **Control flow**:
   - `if`/`else` statements
+  - Compound statements/blocks
   - `goto` and labeled statements
   - `return` statements
 - **Expression statements** and **null statements**
 
 ### Safer C
-We enforce left to right evaluation of binary operations to avoid undefined behavior.
+- We enforce left to right evaluation of binary operations to avoid undefined behavior.
+- The compiler emits warnings for variable shadowing to help catch potential bugs.
 
 ## Requirements
 
@@ -71,7 +77,11 @@ cargo build --release
 
 ### Running Tests
 ```sh
- ./writing-a-c-compiler-tests/test_compiler target/release/ncc --chapter 6 --extra-credit
+ ./writing-a-c-compiler-tests/test_compiler target/release/ncc --chapter 7 --extra-credit
+```
+or
+```sh
+cargo test
 ```
 
 ## Usage
