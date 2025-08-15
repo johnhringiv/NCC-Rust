@@ -1,3 +1,4 @@
+use colored::*;
 use regex::Regex;
 use std::collections::VecDeque;
 use std::fmt;
@@ -147,14 +148,30 @@ struct TokenDef {
     variant: Token,
 }
 
-#[derive(Clone, PartialEq)]
-pub struct SpannedToken {
-    pub token: Token,
+#[derive(Clone, Debug, PartialEq, Copy)]
+pub struct Span {
     pub line: usize,
     pub column: usize,
 }
 
-fn next_token(input: &str) -> Result<TokenMatch, LexerError> {
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let filename = std::env::args().nth(1);
+        if let Some(fname) = filename {
+            write!(f, "{}:{}:{}", fname, self.line, self.column)
+        } else {
+            write!(f, "{}:{}", self.line, self.column)
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
+}
+
+fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
     let mut matches = vec![];
     for TokenDef { regex, variant } in TOKEN_DEFS.iter() {
         if let Some(mat) = regex.find(input) {
@@ -172,23 +189,38 @@ fn next_token(input: &str) -> Result<TokenMatch, LexerError> {
     if let Some(best_match) = matches.iter().max_by_key(|m| m.length) {
         Ok(best_match.clone())
     } else {
-        Err(LexerError::new(format!("No token matched on: '{input}'")))
+        let preview = if input.len() > 20 {
+            format!("{}...", &input[..20])
+        } else {
+            input.to_string()
+        };
+        Err(LexerError::with_span(
+            format!("unexpected character sequence: {}", preview.bold()),
+            span,
+        ))
     }
 }
 
 pub struct LexerError {
     message: String,
+    span: Option<Span>,
 }
 
 impl LexerError {
-    fn new(message: String) -> Self {
-        LexerError { message }
+    fn with_span(message: String, span: Span) -> Self {
+        LexerError {
+            message,
+            span: Some(span),
+        }
     }
 }
 
 impl fmt::Debug for LexerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LexerError {{ message: \"{}\" }}", self.message)
+        match self.span {
+            Some(span) => write!(f, "{}: {}: {}", span, "LexerError".red(), self.message),
+            None => write!(f, "{}: {}", "LexerError".red(), self.message),
+        }
     }
 }
 
@@ -228,7 +260,10 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
                 }
                 input = &input[end_comment_index + 2..];
             } else {
-                return Err(LexerError::new("Unterminated comment".to_string()));
+                return Err(LexerError::with_span(
+                    "unterminated comment".to_string(),
+                    Span { line, column: col },
+                ));
             }
             continue;
         }
@@ -237,12 +272,11 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
             break;
         }
 
-        match next_token(input) {
+        match next_token(input, Span { line, column: col }) {
             Ok(TokenMatch { token, length }) => {
                 tokens.push_back(SpannedToken {
                     token,
-                    line,
-                    column: col,
+                    span: Span { line, column: col },
                 });
                 col += length; // no newline in tokens
                 input = &input[length..];

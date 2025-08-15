@@ -4,7 +4,9 @@
 
    We also don't do scope validation another case that deserves a warning
 */
-use crate::parser::{BlockItem, Declaration, Expr, Identifier, Program, Span, Stmt};
+use crate::lexer::Span;
+use crate::parser::{Block, BlockItem, Declaration, Expr, Identifier, Program, Stmt};
+use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -25,16 +27,13 @@ impl SemanticError {
 impl fmt::Debug for SemanticError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.span {
-            Some(span) => write!(
-                f,
-                "SemanticError at line {}, column {}: {}",
-                span.line, span.column, self.message
-            ),
-            None => write!(f, "SemanticError: {}", self.message),
+            Some(span) => write!(f, "{}: {}: {}", span, "SemanticError".red(), self.message),
+            None => write!(f, "{}: {}", "error".red(), self.message),
         }
     }
 }
 
+#[derive(Clone)]
 struct VarInfo {
     renamed: String,
     span: Span,
@@ -75,7 +74,7 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
                 Ok(())
             }
             None => Err(SemanticError::with_span(
-                format!("Variable \"{name}\" not defined"),
+                format!("Variable \'{}\' not defined", name.bold()),
                 *span,
             )),
         },
@@ -108,15 +107,35 @@ fn resolve_decoration(
     dec: &mut Declaration,
     variable_map: &mut HashMap<String, VarInfo>,
     name_gen: &mut NameGenerator,
+    block_vars: &mut HashSet<String>,
 ) -> Result<(), SemanticError> {
     let Identifier(name) = &dec.name;
 
-    if let std::collections::hash_map::Entry::Vacant(e) = variable_map.entry(name.clone()) {
+    // if the value doesn't exist in block_vars we want to insert or update
+    if block_vars.insert(name.clone()) {
         let unique_name = name_gen.next(name);
-        e.insert(VarInfo {
-            renamed: unique_name.clone(),
-            span: dec.span,
-        });
+        let shadow = variable_map.insert(
+            name.clone(),
+            VarInfo {
+                renamed: unique_name.clone(),
+                span: dec.span,
+            },
+        );
+        if let Some(shadow) = shadow {
+            eprintln!(
+                "{}: {}: variable {} shadows previous declaration {}",
+                dec.span,
+                "warning".purple(),
+                format!("'{}'", name).bold(),
+                "[-Wshadow]".purple()
+            );
+            eprintln!(
+                "{}: {}: previous declaration of {} was here",
+                shadow.span,
+                "note".cyan(),
+                format!("'{}'", name).bold()
+            );
+        }
         dec.name = Identifier(unique_name);
 
         // Resolve the initializer if present
@@ -128,8 +147,10 @@ fn resolve_decoration(
         let original_def = variable_map.get(name).unwrap();
         Err(SemanticError::with_span(
             format!(
-                "Variable \"{name}\" already defined at line {}, column {}",
-                original_def.span.line, original_def.span.column
+                "variable {} already declared\n{}: {}: previous decoration was here",
+                format!("'{}'", name).bold(),
+                original_def.span,
+                "note".to_string().cyan(),
             ),
             dec.span,
         ))
@@ -138,9 +159,10 @@ fn resolve_decoration(
 
 fn resolve_statement(
     statement: &mut Stmt,
-    variable_map: &HashMap<String, VarInfo>,
+    variable_map: &mut HashMap<String, VarInfo>,
     labels: &mut HashSet<String>,
-    jumps: &mut HashSet<String>,
+    jumps: &mut HashMap<String, Span>,
+    name_gen: &mut NameGenerator,
 ) -> Result<(), SemanticError> {
     match statement {
         Stmt::Return(e) => resolve_exp(e, variable_map),
@@ -148,53 +170,84 @@ fn resolve_statement(
         Stmt::Null => Ok(()),
         Stmt::If(e, then_stmt, else_stmt) => {
             resolve_exp(e, variable_map)?;
-            resolve_statement(then_stmt, variable_map, labels, jumps)?;
+            resolve_statement(then_stmt, variable_map, labels, jumps, name_gen)?;
             match &mut **else_stmt {
-                Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps),
+                Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps, name_gen),
                 None => Ok(()),
             }
         }
-        Stmt::Labeled(label_name, stmt) => {
+        Stmt::Labeled(label_name, stmt, span) => {
             if !labels.insert(label_name.to_string()) {
                 return Err(SemanticError {
-                    message: format!("Label {label_name:} already defined"),
+                    message: format!("Label {label_name:} already defined at {span}"),
                     span: None,
                 });
             }
-            resolve_statement(stmt, variable_map, labels, jumps)
+            resolve_statement(stmt, variable_map, labels, jumps, name_gen)
         }
-        Stmt::Goto(label_name) => {
-            jumps.insert(label_name.to_string());
+        Stmt::Goto(label_name, span) => {
+            jumps.insert(label_name.to_string(), *span);
+            Ok(())
+        }
+        Stmt::Compound(block) => {
+            let mut shadow_map = variable_map.clone();
+            resolve_block(block, &mut shadow_map, labels, jumps, name_gen)?;
             Ok(())
         }
     }
 }
 
-pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticError> {
-    let mut variable_map = HashMap::new();
-    let mut labels = HashSet::new();
-    let mut jumps = HashSet::new();
-    let mut name_gen = NameGenerator::new();
-
-    for bi in &mut program.function.body {
+fn resolve_block(
+    block: &mut Block,
+    variable_map: &mut HashMap<String, VarInfo>,
+    labels: &mut HashSet<String>,
+    jumps: &mut HashMap<String, Span>,
+    name_gen: &mut NameGenerator,
+) -> Result<(), SemanticError> {
+    let mut block_vars = HashSet::new();
+    for bi in block.iter_mut() {
         match bi {
             BlockItem::Statement(s) => {
-                resolve_statement(s, &variable_map, &mut labels, &mut jumps)?;
+                resolve_statement(s, variable_map, labels, jumps, name_gen)?;
             }
             BlockItem::Declaration(d) => {
-                resolve_decoration(d, &mut variable_map, &mut name_gen)?;
+                resolve_decoration(d, variable_map, name_gen, &mut block_vars)?;
             }
         }
     }
+    Ok(())
+}
 
-    let diff: Vec<_> = jumps.difference(&labels).collect();
-    if diff.is_empty() {
+pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticError> {
+    let mut variable_map = HashMap::new();
+    let mut labels = HashSet::new();
+    let mut jumps: HashMap<String, Span> = HashMap::new();
+    let mut name_gen = NameGenerator::new();
+
+    resolve_block(
+        &mut program.function.body,
+        &mut variable_map,
+        &mut labels,
+        &mut jumps,
+        &mut name_gen,
+    )?;
+
+    // Find jumps to non-existent labels and report with spans
+    let mut undefined_jumps = Vec::new();
+    for (label, span) in jumps.iter() {
+        if !labels.contains(label) {
+            undefined_jumps.push((label.clone(), *span));
+        }
+    }
+
+    if undefined_jumps.is_empty() {
         Ok(name_gen)
     } else {
-        Err(SemanticError {
-            message: format!("Jumps to nonexisting labels: {diff:#?}"),
-            span: None,
-        })
+        let (label, span) = &undefined_jumps[0];
+        Err(SemanticError::with_span(
+            format!("Jump to undefined label '{}'", label.bold()),
+            *span,
+        ))
     }
 }
 

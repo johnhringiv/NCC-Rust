@@ -1,5 +1,6 @@
+use crate::lexer::Span;
 use crate::parser;
-use crate::parser::{BlockItem, Declaration, Expr, Identifier, IncDec, Span, UnaryOp};
+use crate::parser::{Block, BlockItem, Declaration, Expr, Identifier, IncDec, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::validate::NameGenerator;
 
@@ -350,22 +351,21 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             }
             instructions.push(Instruction::Label(end_label.clone()));
         }
-        &parser::Stmt::Labeled(label_name, stmt) => {
+        &parser::Stmt::Labeled(label_name, stmt, _) => {
             instructions.push(Instruction::Label(Identifier(label_name.to_string())));
             tackify_stmt(stmt, instructions, name_generator)
         }
-        &parser::Stmt::Goto(label_name) => instructions.push(Instruction::Jump {
+        &parser::Stmt::Goto(label_name, _) => instructions.push(Instruction::Jump {
             target: Identifier(label_name.to_string()),
         }),
+        &parser::Stmt::Compound(block) => tackify_block(block, instructions, name_generator),
     }
 }
 
-fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
-    let mut instructions = Vec::new();
-    let parser::Identifier(name) = &func.name;
-    for item in &func.body {
+fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
+    for item in block {
         match item {
-            BlockItem::Statement(stmt) => tackify_stmt(stmt, &mut instructions, name_generator),
+            BlockItem::Statement(stmt) => tackify_stmt(stmt, instructions, name_generator),
             BlockItem::Declaration(Declaration {
                 name,
                 init: Some(e),
@@ -378,11 +378,17 @@ fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator)
                     Box::new(e.clone()),
                     dummy_span,
                 );
-                tackify_expr(&ass, &mut instructions, name_generator);
+                tackify_expr(&ass, instructions, name_generator);
             }
             BlockItem::Declaration(parser::Declaration { init: None, .. }) => (),
         }
     }
+}
+
+fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
+    let mut instructions = Vec::new();
+    let parser::Identifier(name) = &func.name;
+    tackify_block(&func.body, &mut instructions, name_generator);
 
     // Return 0 if the function has no return statement
     // will not be reached if the function has a return statement

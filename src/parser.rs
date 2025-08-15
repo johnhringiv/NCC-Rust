@@ -11,8 +11,9 @@
 //! - Assignment operators are treated as binary operators for parsing simplicity
 //!   but generate distinct AST nodes
 //!
-use crate::lexer::{SpannedToken, Token};
+use crate::lexer::{Span, SpannedToken, Token};
 use crate::pretty::{ItfDisplay, Node, cyan, green, simple_node, yellow};
+use colored::*;
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -24,12 +25,6 @@ impl fmt::Display for Identifier {
         let prefix = if cfg!(target_os = "macos") { "L" } else { ".L" };
         write!(f, "{}{}", prefix, self.0)
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Copy)]
-pub struct Span {
-    pub line: usize,
-    pub column: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,17 +138,31 @@ pub enum Stmt {
     Return(Expr),
     Expression(Expr),
     If(Expr, Box<Stmt>, Box<Option<Stmt>>), // if (controlling expression, then, else)
-    Goto(Identifier),
-    Labeled(Identifier, Box<Stmt>),
+    Goto(Identifier, Span),
+    Labeled(Identifier, Box<Stmt>, Span),
+    Compound(Block),
     Null,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub struct Declaration {
     pub name: Identifier,
     pub init: Option<Expr>,
     pub span: Span,
 }
+
+impl fmt::Debug for Declaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("Declaration");
+        debug_struct.field("name", &self.name);
+        if let Some(ref init) = self.init {
+            debug_struct.field("init", init);
+        }
+        debug_struct.finish()
+    }
+}
+
+pub type Block = Vec<BlockItem>;
 
 #[derive(Debug, PartialEq)]
 pub enum BlockItem {
@@ -164,7 +173,7 @@ pub enum BlockItem {
 #[derive(Debug, PartialEq)]
 pub struct Function {
     pub name: Identifier,
-    pub body: Vec<BlockItem>,
+    pub body: Block,
 }
 
 #[derive(Debug, PartialEq)]
@@ -174,39 +183,47 @@ pub struct Program {
 
 pub struct SyntaxError {
     message: String,
+    span: Option<Span>,
 }
 
 impl SyntaxError {
-    fn get_found_strs(found: Option<SpannedToken>) -> (String, String) {
-        let loc_str: String = found
+    pub fn new(expected: Option<Token>, found: Option<SpannedToken>) -> Self {
+        let expected_str = expected
             .as_ref()
-            .map(|t| format!(", at {}:{}", t.line, t.column))
-            .unwrap_or("".to_string());
+            .map(|t| format!("{}", t).bold().to_string())
+            .unwrap_or("end of file".to_string());
         let found_str = found
             .as_ref()
-            .map(|t| t.token.to_string())
-            .unwrap_or("None".to_string());
-        (found_str, loc_str)
-    }
-    pub fn new(expected: Option<Token>, found: Option<SpannedToken>) -> Self {
-        let expected = expected.as_ref().map(|t| t.to_string()).unwrap_or("None".to_string());
-        let (found_str, loc_str) = Self::get_found_strs(found);
+            .map(|t| format!("{}", t.token).bold().to_string())
+            .unwrap_or("end of file".bold().to_string());
+        let span = found.as_ref().map(|t| t.span);
+
         SyntaxError {
-            message: format!(r#"expected: {expected}, found: {found_str:?}{loc_str}"#),
+            message: format!("expected {}, found {}", expected_str, found_str),
+            span,
         }
     }
 
     pub fn expression(found: Option<SpannedToken>) -> Self {
-        let (found_str, loc_str) = Self::get_found_strs(found);
+        let found_str = found
+            .as_ref()
+            .map(|t| format!("{}", t.token).bold().to_string())
+            .unwrap_or("end of file".bold().to_string());
+        let span = found.as_ref().map(|t| t.span);
+
         SyntaxError {
-            message: format!(r#"expected an expression <int> | <unop> <exp> | (<exp>), found: {found_str:?}{loc_str}"#),
+            message: format!("expected an expression, found {}", found_str),
+            span,
         }
     }
 }
 
 impl fmt::Debug for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SyntaxError: {}", self.message)
+        match self.span {
+            Some(span) => write!(f, "{}: {}: {}", span, "SyntaxError".red(), self.message),
+            None => write!(f, "{}: {}", "SyntaxError".red(), self.message),
+        }
     }
 }
 
@@ -258,16 +275,12 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             Token::Increment | Token::Decrement => {
                 tokens.pop_front();
                 let inner_exp = parse_factor(tokens)?;
-                let span = Span {
-                    line: spanned.line,
-                    column: spanned.column,
-                };
                 let op = if spanned.token == Token::Increment {
                     IncDec::Increment
                 } else {
                     IncDec::Decrement
                 };
-                Ok(Expr::PreFixOp(op, Box::from(inner_exp), span))
+                Ok(Expr::PreFixOp(op, Box::from(inner_exp), spanned.span))
             }
             Token::OpenParen => {
                 tokens.pop_front();
@@ -276,12 +289,8 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 Ok(inner_exp)
             }
             Token::Identifier(name) => {
-                let span = Span {
-                    line: spanned.line,
-                    column: spanned.column,
-                };
                 tokens.pop_front();
-                Ok(Expr::Var(Identifier(name.clone()), span))
+                Ok(Expr::Var(Identifier(name.clone()), spanned.span))
             }
             _ => Err(SyntaxError::expression(next_token)),
         },
@@ -297,11 +306,7 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                     IncDec::Decrement
                 };
                 tokens.pop_front();
-                let span = Span {
-                    line: spanned.line,
-                    column: spanned.column,
-                };
-                expr = Expr::PostFixOp(op, Box::new(expr), span);
+                expr = Expr::PostFixOp(op, Box::new(expr), spanned.span);
             }
             _ => break,
         }
@@ -337,18 +342,14 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
             match operator {
                 BinOp::Assignment | BinOp::CompoundAssignment => {
                     let op_token = tokens.pop_front().unwrap();
-                    let span = Span {
-                        line: op_token.line,
-                        column: op_token.column,
-                    };
                     let right = parse_exp(tokens, prec)?;
                     left = match operator {
-                        BinOp::Assignment => Expr::Assignment(Box::from(left), Box::from(right), span),
+                        BinOp::Assignment => Expr::Assignment(Box::from(left), Box::from(right), op_token.span),
                         BinOp::CompoundAssignment => Expr::CompoundAssignment(
                             AssignOp::from(&op_token.token),
                             Box::from(left),
                             Box::from(right),
-                            span,
+                            op_token.span,
                         ),
                         _ => unreachable!("Already matched on operator"),
                     }
@@ -431,9 +432,8 @@ fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<(Identifier, 
     match tokens.pop_front() {
         Some(SpannedToken {
             token: Token::Identifier(value),
-            line,
-            column,
-        }) => Ok((Identifier(value), Span { line, column })),
+            span,
+        }) => Ok((Identifier(value), span)),
         x => Err(SyntaxError::new(Some(Token::Identifier("whatever".to_string())), x)),
     }
 }
@@ -469,25 +469,34 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
             Ok(Stmt::If(condition, Box::new(then_stmt), Box::new(else_stmt)))
         }
         Token::GotoKeyword => {
-            tokens.pop_front();
+            let goto_span = tokens.pop_front().unwrap().span;
             let (target, _span) = parse_identifier(tokens)?;
             expect(&Token::Semicolon, tokens)?;
-            Ok(Stmt::Goto(target))
+            Ok(Stmt::Goto(target, goto_span))
         }
         Token::Identifier(label_name) => {
             // Check if it's a label (identifier followed by colon)
             if tokens.get(1).map(|t| &t.token) == Some(&Token::Colon) {
                 let label = Identifier(label_name);
-                tokens.pop_front(); // consume identifier
+                let span = tokens.pop_front().unwrap().span; // consume identifier
                 tokens.pop_front(); // consume colon
                 let stmt = parse_statement(tokens)?;
-                Ok(Stmt::Labeled(label, Box::new(stmt)))
+                Ok(Stmt::Labeled(label, Box::new(stmt), span))
             } else {
                 // It's an expression statement
                 let expr = parse_exp(tokens, 0)?;
                 expect(&Token::Semicolon, tokens)?;
                 Ok(Stmt::Expression(expr))
             }
+        }
+        Token::OpenBrace => {
+            tokens.pop_front();
+            let mut block = Vec::new();
+            while tokens.front().map(|t| &t.token) != Some(&Token::CloseBrace) {
+                block.push(parse_block_item(tokens)?);
+            }
+            expect(&Token::CloseBrace, tokens)?;
+            Ok(Stmt::Compound(block))
         }
         _ => {
             let expr = parse_exp(tokens, 0)?;
@@ -598,8 +607,12 @@ impl ItfDisplay for Stmt {
                 Node::branch(cyan("If"), children)
             }
             Stmt::Null => Node::leaf(cyan("Null")),
-            Stmt::Goto(label) => Node::branch(cyan("Goto"), vec![label.itf_node()]),
-            Stmt::Labeled(label, stmt) => Node::branch(cyan("Labeled"), vec![label.itf_node(), stmt.itf_node()]),
+            Stmt::Goto(label, _) => Node::branch(cyan("Goto"), vec![label.itf_node()]),
+            Stmt::Labeled(label, stmt, _) => Node::branch(cyan("Labeled"), vec![label.itf_node(), stmt.itf_node()]),
+            Stmt::Compound(block) => {
+                let children: Vec<Node> = block.iter().map(|item| item.itf_node()).collect();
+                Node::branch(cyan("Compound"), children)
+            }
         }
     }
 }

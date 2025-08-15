@@ -97,12 +97,12 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
 fn main() {
     let mut args = Args::parse();
     let Ok(input) = fs::read_to_string(&args.filename) else {
-        println!("Failed to read file: {}", args.filename);
+        eprintln!("Failed to read file: {}", args.filename);
         std::process::exit(1);
     };
 
     let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
-        println!("Failed to tokenize: {e:?}");
+        eprintln!("{e:?}");
         std::process::exit(10)
     });
 
@@ -122,7 +122,7 @@ fn main() {
 
     let mut tokens = tokens;
     let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
-        println!("Failed to parse: {e:?}");
+        eprintln!("{e:?}");
         std::process::exit(20)
     });
 
@@ -135,7 +135,7 @@ fn main() {
 
     let mut ast = ast;
     let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
-        println!("{e:?}");
+        eprintln!("{e:?}");
         std::process::exit(30);
     });
 
@@ -181,7 +181,7 @@ fn main() {
             .expect("Failed to execute gcc");
 
         if !status.success() {
-            println!("Compilation failed with status: {status}");
+            eprintln!("Compilation failed with status: {status}");
             std::process::exit(1);
         }
 
@@ -252,8 +252,8 @@ pub mod test_utils {
     use std::fs;
     use std::path::Path;
 
-    static CHAPTER_COMPLETED: i32 = 6;
-    static EXTRA_COMPLETED: i32 = 6;
+    static CHAPTER_COMPLETED: i32 = 7;
+    static EXTRA_COMPLETED: i32 = 7;
     pub enum Stage {
         Lex,
         Parse,
