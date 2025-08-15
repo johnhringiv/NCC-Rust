@@ -156,7 +156,7 @@ fn run_test(
     total_passed: &mut usize,
     total_failed: &mut usize,
     failed_tests: &mut Vec<String>,
-    iced: bool,
+    extra_args: &[String],
 ) {
     let path = std::path::Path::new(&case.c_file);
     let binary_path = path.with_extension("");
@@ -166,8 +166,8 @@ fn run_test(
     let mut cmd = std::process::Command::new(&ncc_path);
     cmd.arg(case.c_file.clone()).arg("-o").arg(binary_path_str);
 
-    if !iced {
-        cmd.arg("--no-iced");
+    for arg in extra_args {
+        cmd.arg(arg);
     }
 
     let compile_output = cmd.output().unwrap();
@@ -199,15 +199,29 @@ fn run_cases(cases: Vec<TestCase>) {
     let mut total_failed = 0;
     let mut failed_tests = Vec::new();
 
-    for case in cases {
+    for case in &cases {
         match case.output {
-            ProgramOutput::Error(_) => run_test(&case, &mut total_passed, &mut total_failed, &mut failed_tests, true),
+            ProgramOutput::Error(_) => run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[]),
             ProgramOutput::Result(_) => {
-                run_test(&case, &mut total_passed, &mut total_failed, &mut failed_tests, true);
-                run_test(&case, &mut total_passed, &mut total_failed, &mut failed_tests, false);
+                run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[]);
+                run_test(
+                    case,
+                    &mut total_passed,
+                    &mut total_failed,
+                    &mut failed_tests,
+                    &["--no-iced".to_string()],
+                );
             }
         }
     }
+    // takes too long to do this for all cases
+    run_test(
+        cases.first().unwrap(),
+        &mut total_passed,
+        &mut total_failed,
+        &mut failed_tests,
+        &["--gcc".to_string()],
+    );
 
     println!("\n=== C Programs Test Results ===");
     println!("Passed: {total_passed}");
@@ -237,4 +251,141 @@ fn test_all_sandler() {
 fn test_custom_programs() {
     let cases = get_custom_cases();
     run_cases(cases)
+}
+
+#[test]
+fn test_label_printing_with_iced() {
+    // Test with a file that should generate labels
+    let test_file = "writing-a-c-compiler-tests/tests/chapter_6/valid/extra_credit/compound_if_expression.c";
+
+    // Get the path to the ncc binary
+    let ncc_path = get_ncc_binary_path();
+
+    // Run ncc with -S flag to get assembly output
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("-S")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    // Convert output to string
+    let asm_output = String::from_utf8_lossy(&output.stdout);
+
+    // Check that the output contains labels (labels are not indented and end with :)
+    let has_labels = asm_output
+        .lines()
+        .any(|line| !line.starts_with(char::is_whitespace) && line.ends_with(":"));
+
+    assert!(has_labels, "No label definitions found in assembly output");
+
+    // Check that jump instructions reference labels, not numeric addresses
+    let mut found_jump_with_label = false;
+    for line in asm_output.lines() {
+        let trimmed = line.trim();
+
+        // Check various jump instructions
+        if trimmed.starts_with("je ")
+            || trimmed.starts_with("jne ")
+            || trimmed.starts_with("jmp ")
+            || trimmed.starts_with("jg ")
+            || trimmed.starts_with("jl ")
+            || trimmed.starts_with("jge ")
+            || trimmed.starts_with("jle ")
+        {
+            // Get the jump target
+            if let Some(target) = trimmed.split_whitespace().nth(1) {
+                // Check if target is a label (contains .L or L prefix) and not just a number
+                if !target.chars().all(|c| c.is_numeric() || c == '-') {
+                    found_jump_with_label = true;
+                }
+
+                // Ensure it's not just a numeric address
+                assert!(
+                    !target.chars().all(|c| c.is_numeric() || c == '-' || c == 'x'),
+                    "Jump instruction '{}' uses numeric address instead of label",
+                    trimmed
+                );
+            }
+        }
+    }
+
+    assert!(
+        found_jump_with_label,
+        "No jump instructions with label references found in assembly output"
+    );
+
+    // Count the labels for informational purposes (labels are not indented and end with :)
+    let label_count = asm_output
+        .lines()
+        .filter(|line| !line.starts_with(char::is_whitespace) && line.ends_with(":"))
+        .count();
+
+    println!(
+        "✓ Label printing test passed: found {} labels in assembly output",
+        label_count
+    );
+}
+
+#[test]
+fn test_parser_printing() {
+    // Test with a file that should generate labels
+    let test_file = "writing-a-c-compiler-tests/tests/chapter_6/valid/extra_credit/compound_if_expression.c";
+
+    // Get the path to the ncc binary
+    let ncc_path = get_ncc_binary_path();
+
+    // Run ncc with -S flag to get assembly output
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--parse")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    // Convert output to string
+    let asm_output = String::from_utf8_lossy(&output.stdout);
+
+    let check = asm_output
+        .lines()
+        .any(|line| line.contains("CompoundAssignment (Add)"));
+
+    assert!(check);
+}
+
+#[test]
+fn test_wshadow_warning() {
+    // Test that WShadow warning is displayed for hidden_variable.c
+    let test_file = "writing-a-c-compiler-tests/tests/chapter_7/valid/hidden_variable.c";
+
+    // Get the path to the ncc binary
+    let ncc_path = get_ncc_binary_path();
+
+    // Run ncc to compile the file and capture stderr for warnings
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    // Convert stderr to string to check for warnings
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // Check that WShadow warning is present
+    assert!(
+        stderr_output.contains("Wshadow"),
+        "Expected WShadow warning for variable shadowing, but stderr was: {}",
+        stderr_output
+    );
+
+    // Check that it specifically mentions the variable being shadowed
+    assert!(
+        stderr_output.contains("variable 'a'"),
+        "Warning should mention the shadowed variable, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ WShadow warning test passed: variable shadowing warning detected");
 }

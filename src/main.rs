@@ -86,10 +86,11 @@ impl FormatterOutput for MyFormatterOutput {
 
 fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
     match kind {
-        FormatterTextKind::Directive | FormatterTextKind::Keyword => s.bright_yellow(),
-        FormatterTextKind::Prefix | FormatterTextKind::Mnemonic => s.bright_magenta(),
-        FormatterTextKind::Register => s.bright_blue(),
-        FormatterTextKind::Number => s.bright_cyan(),
+        FormatterTextKind::Directive | FormatterTextKind::Keyword => s.yellow(),
+        FormatterTextKind::Prefix | FormatterTextKind::Mnemonic => s.magenta(),
+        FormatterTextKind::Register => s.blue(),
+        FormatterTextKind::Number => s.cyan(),
+        FormatterTextKind::Label => s.green(),
         _ => s.white(),
     }
 }
@@ -128,7 +129,7 @@ fn main() {
 
     if args.parse {
         let ast_val = ast;
-        println!("{ast_val:?}");
+        // println!("{ast_val:?}");
         println!("{}", ast_val.itf_string());
         std::process::exit(0);
     }
@@ -190,16 +191,22 @@ fn main() {
         let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
 
         if args.s {
-            let mut formatter = iced_x86::GasFormatter::new();
+            let (asm, resolver, label_idx) = emit_iced::get_instructions(&code_ast).unwrap();
+
+            let mut formatter = iced_x86::GasFormatter::with_options(Some(Box::new(resolver)), None);
             let ops = formatter.options_mut();
             ops.set_number_base(iced_x86::NumberBase::Decimal);
             let mut output = MyFormatterOutput::new();
 
-            println!("Generated ASM");
-            let asm = emit_iced::get_instructions(&code_ast).unwrap();
-            for ins in asm {
+            println!("Generated ASM\n");
+            println!("{}:", "main".green());
+            for (idx, ins) in asm.iter().enumerate() {
+                if let Some(label) = label_idx.get(&idx) {
+                    println!("{}:", label.green())
+                }
+                print!("  ");
                 output.vec.clear();
-                formatter.format(&ins, &mut output);
+                formatter.format(ins, &mut output);
                 for (text, kind) in output.vec.iter() {
                     print!("{}", get_color(text.as_str(), *kind));
                 }
