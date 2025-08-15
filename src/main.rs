@@ -97,7 +97,7 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
 fn main() {
     let mut args = Args::parse();
     let Ok(input) = fs::read_to_string(&args.filename) else {
-        println!("Failed to read file: {}", args.filename);
+        eprintln!("Failed to read file: {}", args.filename);
         std::process::exit(1);
     };
 
