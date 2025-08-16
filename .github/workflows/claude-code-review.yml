@@ -21,9 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write  # Changed to write so Claude can comment
       issues: read
       id-token: write
+      actions: read  # Allows Claude to read CI results
     
     steps:
       - name: Checkout repository
@@ -48,8 +49,11 @@ jobs:
             - Performance considerations
             - Security concerns
             - Test coverage
+            - If the code is idiomatic
             
             Be constructive and helpful in your feedback.
+            In general we prefer clear, concise, idiomatic code.
+            Also check the CI results (linting and test coverage) if available and comment on any failures.
 
           # Optional: Use sticky comments to make Claude reuse the same comment on subsequent pushes to the same PR
           # use_sticky_comment: true

@@ -1,3 +1,4 @@
+// todo: we should stream tokens to parser in a future refactor
 use colored::*;
 use regex::Regex;
 use std::collections::VecDeque;
@@ -8,14 +9,14 @@ use std::sync::LazyLock;
 pub enum Token {
     Identifier(String),
     ConstantInt(i64),
-    IntKeyword,
-    VoidKeyword,
-    ReturnKeyword,
-    OpenParen,
-    CloseParen,
-    OpenBrace,
-    CloseBrace,
-    Semicolon,
+    IntKeyword,              // int
+    VoidKeyword,             // void
+    ReturnKeyword,           // return
+    OpenParen,               // (
+    CloseParen,              // )
+    OpenBrace,               // {
+    CloseBrace,              // }
+    Semicolon,               // ;
     BitwiseComplement,       // ~
     Negation,                // -
     Plus,                    // +
@@ -54,6 +55,11 @@ pub enum Token {
     GotoKeyword,             // goto
     QuestionMark,            // ?
     Colon,                   // :
+    DoKeyword,               // do
+    WhileKeyword,            // while
+    ForKeyword,              // for
+    BreakKeyword,            // break
+    ContinueKeyword,         // continue
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
@@ -114,6 +120,11 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^goto\b", Token::GotoKeyword),
     (r"^\?", Token::QuestionMark),
     (r"^:", Token::Colon),
+    (r"^do\b", Token::DoKeyword),
+    (r"^while\b", Token::WhileKeyword),
+    (r"^for\b", Token::ForKeyword),
+    (r"^break\b", Token::BreakKeyword),
+    (r"^continue\b", Token::ContinueKeyword),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {

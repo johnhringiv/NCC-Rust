@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-static CHAPTER_COMPLETED: i32 = 7;
+static CHAPTER_COMPLETED: i32 = 8;
 static EXTRA_COMPLETED: i32 = 7;
 
 #[derive(Debug, PartialEq)]

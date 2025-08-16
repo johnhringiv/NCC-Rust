@@ -1,7 +1,7 @@
-use crate::lexer::Span;
 use crate::parser;
-use crate::parser::{Block, BlockItem, Declaration, Expr, Identifier, IncDec, UnaryOp};
+use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
+use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
 use crate::validate::NameGenerator;
 
 #[derive(Clone, Debug)]
@@ -359,6 +359,59 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             target: Identifier(label_name.to_string()),
         }),
         &parser::Stmt::Compound(block) => tackify_block(block, instructions, name_generator),
+        parser::Stmt::Break(target, _) | parser::Stmt::Continue(target, _) => {
+            instructions.push(Instruction::Jump {target: target.clone()})
+        }
+        parser::Stmt::While(condition, body, label) => {
+            let continue_label = Identifier(format!("continue_loop.{label}"));
+            let break_label = Identifier(format!("break_loop.{label}"));
+
+            instructions.push(Instruction::Label(continue_label.clone()));
+            let c = tackify_expr(condition, instructions, name_generator);
+            instructions.push(Instruction::JumpIfZero { condition: c, target: break_label.clone() });
+            tackify_stmt(body, instructions, name_generator);
+            instructions.push(Instruction::Jump {target: continue_label});
+            instructions.push(Instruction::Label(break_label));
+        }
+        parser::Stmt::DoWhile(body, condition, label) => {
+            let start_label = Identifier(format!("start_loop.{label}"));
+            let continue_label = Identifier(format!("continue_loop.{label}"));
+            let break_label = Identifier(format!("break_loop.{label}"));
+
+            instructions.push(Instruction::Label(start_label.clone()));
+            tackify_stmt(body, instructions, name_generator);
+            instructions.push(Instruction::Label(continue_label));
+            let c = tackify_expr(condition, instructions, name_generator);
+            instructions.push(JumpIfNotZero {condition: c, target: start_label});
+            instructions.push(Instruction::Label(break_label));
+        }
+        parser::Stmt::For(init, condition, post, body, label) => {
+            match init {
+                ForInit::InitDecl(dec) => tackify_declaration(dec, instructions, name_generator),
+                ForInit::InitExp(exp) => {
+                    if let Some(e) = exp {
+                        tackify_expr(e, instructions, name_generator);
+                    }
+                }
+            }
+
+            let start_label = Identifier(format!("start_loop.{label}"));
+            let continue_label = Identifier(format!("continue_loop.{label}"));
+            let break_label = Identifier(format!("break_loop.{label}"));
+
+            instructions.push(Instruction::Label(start_label.clone()));
+            if let Some(condition) = condition {
+                let c = tackify_expr(condition, instructions, name_generator);
+                instructions.push(JumpIfZero {condition: c, target: break_label.clone()})
+            }
+            tackify_stmt(body, instructions, name_generator);
+            instructions.push(Instruction::Label(continue_label));
+            if let Some(post) = post {
+                tackify_expr(post, instructions, name_generator);
+            }
+            instructions.push(Instruction::Jump {target: start_label});
+            instructions.push(Instruction::Label(break_label));
+        }
     }
 }
 
@@ -366,22 +419,22 @@ fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_genera
     for item in block {
         match item {
             BlockItem::Statement(stmt) => tackify_stmt(stmt, instructions, name_generator),
-            BlockItem::Declaration(Declaration {
-                name,
-                init: Some(e),
-                span: _,
-            }) => {
-                // Create a dummy span for this synthetic assignment
-                let dummy_span = Span { line: 0, column: 0 };
-                let ass = Expr::Assignment(
-                    Box::new(Expr::Var(name.clone(), dummy_span)),
-                    Box::new(e.clone()),
-                    dummy_span,
-                );
-                tackify_expr(&ass, instructions, name_generator);
-            }
-            BlockItem::Declaration(parser::Declaration { init: None, .. }) => (),
+            BlockItem::Declaration(dec) => tackify_declaration(dec, instructions, name_generator),
         }
+    }
+}
+
+fn tackify_declaration(declaration: &Declaration, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
+    match declaration {
+        Declaration {name, init: Some(e), span} => {
+            let ass = Expr::Assignment(
+                Box::new(Expr::Var(name.clone(), *span)),
+                Box::new(e.clone()),
+                *span,
+            );
+            tackify_expr(&ass, instructions, name_generator);
+        }
+        Declaration {init: None, ..} => ()
     }
 }
 

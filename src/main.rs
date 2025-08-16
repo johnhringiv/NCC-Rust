@@ -259,7 +259,7 @@ pub mod test_utils {
     use std::fs;
     use std::path::Path;
 
-    static CHAPTER_COMPLETED: i32 = 7;
+    static CHAPTER_COMPLETED: i32 = 8;
     static EXTRA_COMPLETED: i32 = 7;
     pub enum Stage {
         Lex,
