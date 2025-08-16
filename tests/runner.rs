@@ -348,9 +348,7 @@ fn test_parser_printing() {
     // Convert output to string
     let asm_output = String::from_utf8_lossy(&output.stdout);
 
-    let check = asm_output
-        .lines()
-        .any(|line| line.contains("CompoundAssignment (Add)"));
+    let check = asm_output.lines().any(|line| line.contains("CompoundAssignment (Add)"));
 
     assert!(check);
 }

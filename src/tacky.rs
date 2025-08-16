@@ -360,7 +360,7 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
         }),
         &parser::Stmt::Compound(block) => tackify_block(block, instructions, name_generator),
         parser::Stmt::Break(target, _) | parser::Stmt::Continue(target, _) => {
-            instructions.push(Instruction::Jump {target: target.clone()})
+            instructions.push(Instruction::Jump { target: target.clone() })
         }
         parser::Stmt::While(condition, body, label) => {
             let continue_label = Identifier(format!("continue_loop.{label}"));
@@ -368,9 +368,12 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
 
             instructions.push(Instruction::Label(continue_label.clone()));
             let c = tackify_expr(condition, instructions, name_generator);
-            instructions.push(Instruction::JumpIfZero { condition: c, target: break_label.clone() });
+            instructions.push(Instruction::JumpIfZero {
+                condition: c,
+                target: break_label.clone(),
+            });
             tackify_stmt(body, instructions, name_generator);
-            instructions.push(Instruction::Jump {target: continue_label});
+            instructions.push(Instruction::Jump { target: continue_label });
             instructions.push(Instruction::Label(break_label));
         }
         parser::Stmt::DoWhile(body, condition, label) => {
@@ -382,7 +385,10 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             tackify_stmt(body, instructions, name_generator);
             instructions.push(Instruction::Label(continue_label));
             let c = tackify_expr(condition, instructions, name_generator);
-            instructions.push(JumpIfNotZero {condition: c, target: start_label});
+            instructions.push(JumpIfNotZero {
+                condition: c,
+                target: start_label,
+            });
             instructions.push(Instruction::Label(break_label));
         }
         parser::Stmt::For(init, condition, post, body, label) => {
@@ -402,14 +408,17 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             instructions.push(Instruction::Label(start_label.clone()));
             if let Some(condition) = condition {
                 let c = tackify_expr(condition, instructions, name_generator);
-                instructions.push(JumpIfZero {condition: c, target: break_label.clone()})
+                instructions.push(JumpIfZero {
+                    condition: c,
+                    target: break_label.clone(),
+                })
             }
             tackify_stmt(body, instructions, name_generator);
             instructions.push(Instruction::Label(continue_label));
             if let Some(post) = post {
                 tackify_expr(post, instructions, name_generator);
             }
-            instructions.push(Instruction::Jump {target: start_label});
+            instructions.push(Instruction::Jump { target: start_label });
             instructions.push(Instruction::Label(break_label));
         }
     }
@@ -424,17 +433,19 @@ fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_genera
     }
 }
 
-fn tackify_declaration(declaration: &Declaration, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
-    match declaration {
-        Declaration {name, init: Some(e), span} => {
-            let ass = Expr::Assignment(
-                Box::new(Expr::Var(name.clone(), *span)),
-                Box::new(e.clone()),
-                *span,
-            );
-            tackify_expr(&ass, instructions, name_generator);
-        }
-        Declaration {init: None, ..} => ()
+fn tackify_declaration(
+    declaration: &Declaration,
+    instructions: &mut Vec<Instruction>,
+    name_generator: &mut NameGenerator,
+) {
+    if let Declaration {
+        name,
+        init: Some(e),
+        span,
+    } = declaration
+    {
+        let ass = Expr::Assignment(Box::new(Expr::Var(name.clone(), *span)), Box::new(e.clone()), *span);
+        tackify_expr(&ass, instructions, name_generator);
     }
 }
 

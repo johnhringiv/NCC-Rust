@@ -209,7 +209,7 @@ fn resolve_statement(
                         resolve_exp(e, &shadow_map)?;
                     }
                 }
-                ForInit::InitDecl(dec) => resolve_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new())?
+                ForInit::InitDecl(dec) => resolve_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new())?,
             }
             if let Some(e1) = e1 {
                 resolve_exp(e1, &shadow_map)?;
@@ -219,9 +219,7 @@ fn resolve_statement(
             }
             resolve_statement(stmt, &mut shadow_map, labels, jumps, name_gen)
         }
-        Stmt::Break(..) | Stmt::Continue(..) => {
-            Ok(())
-        }
+        Stmt::Break(..) | Stmt::Continue(..) => Ok(()),
     }
 }
 
@@ -237,9 +235,7 @@ fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>) -> Result<(), S
                 Ok(())
             }
         }
-        Stmt::Labeled(_, stmt, _) => {
-            label_statement(stmt, cur_label)
-        }
+        Stmt::Labeled(_, stmt, _) => label_statement(stmt, cur_label),
         Stmt::Compound(block) => {
             for bi in block.iter_mut() {
                 match bi {
@@ -254,7 +250,10 @@ fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>) -> Result<(), S
                 *s = format!("break_loop.{label}");
                 Ok(())
             } else {
-                Err(SemanticError::with_span("Break statement outside loop".to_string(), *span))
+                Err(SemanticError::with_span(
+                    "Break statement outside loop".to_string(),
+                    *span,
+                ))
             }
         }
         Stmt::Continue(Identifier(s), span) => {
@@ -262,13 +261,16 @@ fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>) -> Result<(), S
                 *s = format!("continue_loop.{label}");
                 Ok(())
             } else {
-                Err(SemanticError::with_span("Continue statement outside loop".to_string(), *span))
+                Err(SemanticError::with_span(
+                    "Continue statement outside loop".to_string(),
+                    *span,
+                ))
             }
         }
         Stmt::While(_, body, loop_num) | Stmt::DoWhile(body, _, loop_num) | Stmt::For(_, _, _, body, loop_num) => {
             let new_label = match *cur_label {
                 None => 1,
-                Some(l) => l + 1
+                Some(l) => l + 1,
             };
             *cur_label = Some(new_label);
             *loop_num = new_label;
@@ -294,7 +296,7 @@ fn resolve_block(
     name_gen: &mut NameGenerator,
 ) -> Result<(), SemanticError> {
     let mut block_vars = HashSet::new();
-    
+
     for bi in block.iter_mut() {
         match bi {
             BlockItem::Statement(s) => {

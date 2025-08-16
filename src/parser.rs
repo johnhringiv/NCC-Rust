@@ -143,8 +143,8 @@ pub enum Stmt {
     Compound(Block),
     Break(Identifier, Span),
     Continue(Identifier, Span),
-    While(Expr, Box<Stmt>, u64), // while(condition, body, label)
-    DoWhile(Box<Stmt>, Expr, u64), // dowhile(body, condition, label)
+    While(Expr, Box<Stmt>, u64),                              // while(condition, body, label)
+    DoWhile(Box<Stmt>, Expr, u64),                            // dowhile(body, condition, label)
     For(ForInit, Option<Expr>, Option<Expr>, Box<Stmt>, u64), // for(init, condition, post, body, label)
     Null,
 }
@@ -152,7 +152,7 @@ pub enum Stmt {
 #[derive(Debug)]
 pub enum ForInit {
     InitDecl(Declaration),
-    InitExp(Option<Expr>)
+    InitExp(Option<Expr>),
 }
 
 #[derive(PartialEq)]
@@ -227,9 +227,7 @@ impl SyntaxError {
     }
 
     pub fn with_span(message: String, span: Option<Span>) -> Self {
-        SyntaxError {
-            message, span
-        }
+        SyntaxError { message, span }
     }
 }
 
@@ -576,7 +574,10 @@ fn parse_block_item(tokens: &mut VecDeque<SpannedToken>) -> Result<BlockItem, Sy
     }
 }
 
-fn parse_declaration(tokens: &mut VecDeque<SpannedToken>, err_span: &Option<Span>) -> Result<Option<Declaration>, SyntaxError> {
+fn parse_declaration(
+    tokens: &mut VecDeque<SpannedToken>,
+    err_span: &Option<Span>,
+) -> Result<Option<Declaration>, SyntaxError> {
     if let Some(front) = tokens.front() {
         if front.token == Token::IntKeyword {
             // decoration
@@ -589,7 +590,10 @@ fn parse_declaration(tokens: &mut VecDeque<SpannedToken>, err_span: &Option<Span
                     init = Some(parse_exp(tokens, 0)?);
                 }
             } else {
-                return Err(SyntaxError::with_span("EOF when parsing declaration".to_string(), Some(span)))
+                return Err(SyntaxError::with_span(
+                    "EOF when parsing declaration".to_string(),
+                    Some(span),
+                ));
             }
             expect(&Token::Semicolon, tokens)?;
             Ok(Some(Declaration { name, init, span }))
@@ -597,7 +601,10 @@ fn parse_declaration(tokens: &mut VecDeque<SpannedToken>, err_span: &Option<Span
             Ok(None)
         }
     } else {
-        Err(SyntaxError::with_span("EOF when parsing declaration".to_string(), *err_span))
+        Err(SyntaxError::with_span(
+            "EOF when parsing declaration".to_string(),
+            *err_span,
+        ))
     }
 }
 
@@ -640,12 +647,10 @@ impl ItfDisplay for ForInit {
     fn itf_node(&self) -> Node {
         match self {
             ForInit::InitDecl(decl) => decl.itf_node(),
-            ForInit::InitExp(opt_expr) => {
-                match opt_expr {
-                    Some(expr) => expr.itf_node(),
-                    None => Node::leaf(cyan("None")),
-                }
-            }
+            ForInit::InitExp(opt_expr) => match opt_expr {
+                Some(expr) => expr.itf_node(),
+                None => Node::leaf(cyan("None")),
+            },
         }
     }
 }
@@ -706,22 +711,22 @@ impl ItfDisplay for Stmt {
             }
             Stmt::Break(..) => Node::leaf(cyan("Break")),
             Stmt::Continue(..) => Node::leaf(cyan("Continue")),
-            Stmt::While(condition, body, _) => {
-                Node::branch(cyan("While"), vec![
+            Stmt::While(condition, body, _) => Node::branch(
+                cyan("While"),
+                vec![
                     Node::branch("condition:", vec![condition.itf_node()]),
                     Node::branch("body:", vec![body.itf_node()]),
-                ])
-            }
-            Stmt::DoWhile(body, condition, _) => {
-                Node::branch(cyan("DoWhile"), vec![
+                ],
+            ),
+            Stmt::DoWhile(body, condition, _) => Node::branch(
+                cyan("DoWhile"),
+                vec![
                     Node::branch("body:", vec![body.itf_node()]),
                     Node::branch("condition:", vec![condition.itf_node()]),
-                ])
-            }
+                ],
+            ),
             Stmt::For(init, condition, post, body, _) => {
-                let mut children = vec![
-                    Node::branch("init:", vec![init.itf_node()]),
-                ];
+                let mut children = vec![Node::branch("init:", vec![init.itf_node()])];
                 if let Some(cond) = condition {
                     children.push(Node::branch("condition:", vec![cond.itf_node()]));
                 }
