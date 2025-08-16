@@ -133,7 +133,7 @@ impl BinOp {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Stmt {
     Return(Expr),
     Expression(Expr),
@@ -141,7 +141,18 @@ pub enum Stmt {
     Goto(Identifier, Span),
     Labeled(Identifier, Box<Stmt>, Span),
     Compound(Block),
+    Break(Identifier, Span),
+    Continue(Identifier, Span),
+    While(Expr, Box<Stmt>, u64),                              // while(condition, body, label)
+    DoWhile(Box<Stmt>, Expr, u64),                            // dowhile(body, condition, label)
+    For(ForInit, Option<Expr>, Option<Expr>, Box<Stmt>, u64), // for(init, condition, post, body, label)
     Null,
+}
+
+#[derive(Debug)]
+pub enum ForInit {
+    InitDecl(Declaration),
+    InitExp(Option<Expr>),
 }
 
 #[derive(PartialEq)]
@@ -164,19 +175,17 @@ impl fmt::Debug for Declaration {
 
 pub type Block = Vec<BlockItem>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum BlockItem {
     Statement(Stmt),
     Declaration(Declaration),
 }
 
-#[derive(Debug, PartialEq)]
 pub struct Function {
     pub name: Identifier,
     pub body: Block,
 }
 
-#[derive(Debug, PartialEq)]
 pub struct Program {
     pub function: Function,
 }
@@ -216,6 +225,10 @@ impl SyntaxError {
             span,
         }
     }
+
+    pub fn with_span(message: String, span: Option<Span>) -> Self {
+        SyntaxError { message, span }
+    }
 }
 
 impl fmt::Debug for SyntaxError {
@@ -231,14 +244,14 @@ fn variant_eq<T>(a: &T, b: &T) -> bool {
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
-fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
+fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span, SyntaxError> {
     let next = tokens.pop_front();
     match next {
         Some(token) => {
             if !variant_eq(expected, &token.token) {
                 Err(SyntaxError::new(Some(expected.clone()), Some(token.clone())))
             } else {
-                Ok(())
+                Ok(token.span)
             }
         }
         None => Err(SyntaxError::new(Some(expected.clone()), None)),
@@ -455,9 +468,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
         }
         Token::IfKeyword => {
             tokens.pop_front();
-            expect(&Token::OpenParen, tokens)?;
-            let condition = parse_exp(tokens, 0)?;
-            expect(&Token::CloseParen, tokens)?;
+            let condition = get_condition(tokens)?;
             let then_stmt = parse_statement(tokens)?;
             // check for else
             let else_stmt = if tokens.front().map(|t| &t.token) == Some(&Token::ElseKeyword) {
@@ -498,6 +509,47 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
             expect(&Token::CloseBrace, tokens)?;
             Ok(Stmt::Compound(block))
         }
+        Token::BreakKeyword => {
+            let span = tokens.pop_front().unwrap().span;
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Stmt::Break(Identifier("_dummy".to_string()), span))
+        }
+        Token::ContinueKeyword => {
+            let span = tokens.pop_front().unwrap().span;
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Stmt::Continue(Identifier("_dummy".to_string()), span))
+        }
+        Token::WhileKeyword => {
+            tokens.pop_front();
+            let condition = get_condition(tokens)?;
+            let body = parse_statement(tokens)?;
+            Ok(Stmt::While(condition, Box::from(body), 0))
+        }
+        Token::DoKeyword => {
+            tokens.pop_front();
+            let body = parse_statement(tokens)?;
+            expect(&Token::WhileKeyword, tokens)?;
+            let condition = get_condition(tokens)?;
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Stmt::DoWhile(Box::from(body), condition, 0))
+        }
+        Token::ForKeyword => {
+            tokens.pop_front();
+            let err_span = expect(&Token::OpenParen, tokens)?;
+            let init = if let Some(dec) = parse_declaration(tokens, &Some(err_span))? {
+                ForInit::InitDecl(dec)
+            } else {
+                let init = parse_exp(tokens, 0).ok();
+                expect(&Token::Semicolon, tokens)?;
+                ForInit::InitExp(init)
+            };
+            let condition = parse_exp(tokens, 0).ok();
+            expect(&Token::Semicolon, tokens)?;
+            let post = parse_exp(tokens, 0).ok();
+            expect(&Token::CloseParen, tokens)?;
+            let body = parse_statement(tokens)?;
+            Ok(Stmt::For(init, condition, post, Box::from(body), 0))
+        }
         _ => {
             let expr = parse_exp(tokens, 0)?;
             expect(&Token::Semicolon, tokens)?;
@@ -506,21 +558,53 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
     }
 }
 
+fn get_condition(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
+    expect(&Token::OpenParen, tokens)?;
+    let condition = parse_exp(tokens, 0)?;
+    expect(&Token::CloseParen, tokens)?;
+    Ok(condition)
+}
+
 fn parse_block_item(tokens: &mut VecDeque<SpannedToken>) -> Result<BlockItem, SyntaxError> {
-    if tokens.front().expect("parse").token == Token::IntKeyword {
-        // decoration
-        let mut init = None;
-        tokens.pop_front();
-        let (name, span) = parse_identifier(tokens)?;
-        if tokens.front().expect("parse").token == Token::Assignment {
-            tokens.pop_front();
-            init = Some(parse_exp(tokens, 0)?);
-        }
-        expect(&Token::Semicolon, tokens)?;
-        Ok(BlockItem::Declaration(Declaration { name, init, span }))
+    if let Some(dec) = parse_declaration(tokens, &None)? {
+        Ok(BlockItem::Declaration(dec))
     } else {
         let stmt = parse_statement(tokens)?;
         Ok(BlockItem::Statement(stmt))
+    }
+}
+
+fn parse_declaration(
+    tokens: &mut VecDeque<SpannedToken>,
+    err_span: &Option<Span>,
+) -> Result<Option<Declaration>, SyntaxError> {
+    if let Some(front) = tokens.front() {
+        if front.token == Token::IntKeyword {
+            // decoration
+            let mut init = None;
+            tokens.pop_front();
+            let (name, span) = parse_identifier(tokens)?;
+            if let Some(front) = tokens.front() {
+                if front.token == Token::Assignment {
+                    tokens.pop_front();
+                    init = Some(parse_exp(tokens, 0)?);
+                }
+            } else {
+                return Err(SyntaxError::with_span(
+                    "EOF when parsing declaration".to_string(),
+                    Some(span),
+                ));
+            }
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Some(Declaration { name, init, span }))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Err(SyntaxError::with_span(
+            "EOF when parsing declaration".to_string(),
+            *err_span,
+        ))
     }
 }
 
@@ -558,6 +642,18 @@ simple_node!(UnaryOp);
 simple_node!(BinOp);
 simple_node!(AssignOp);
 simple_node!(IncDec);
+
+impl ItfDisplay for ForInit {
+    fn itf_node(&self) -> Node {
+        match self {
+            ForInit::InitDecl(decl) => decl.itf_node(),
+            ForInit::InitExp(opt_expr) => match opt_expr {
+                Some(expr) => expr.itf_node(),
+                None => Node::leaf(cyan("None")),
+            },
+        }
+    }
+}
 
 impl ItfDisplay for Identifier {
     fn itf_node(&self) -> Node {
@@ -612,6 +708,33 @@ impl ItfDisplay for Stmt {
             Stmt::Compound(block) => {
                 let children: Vec<Node> = block.iter().map(|item| item.itf_node()).collect();
                 Node::branch(cyan("Compound"), children)
+            }
+            Stmt::Break(..) => Node::leaf(cyan("Break")),
+            Stmt::Continue(..) => Node::leaf(cyan("Continue")),
+            Stmt::While(condition, body, _) => Node::branch(
+                cyan("While"),
+                vec![
+                    Node::branch("condition:", vec![condition.itf_node()]),
+                    Node::branch("body:", vec![body.itf_node()]),
+                ],
+            ),
+            Stmt::DoWhile(body, condition, _) => Node::branch(
+                cyan("DoWhile"),
+                vec![
+                    Node::branch("body:", vec![body.itf_node()]),
+                    Node::branch("condition:", vec![condition.itf_node()]),
+                ],
+            ),
+            Stmt::For(init, condition, post, body, _) => {
+                let mut children = vec![Node::branch("init:", vec![init.itf_node()])];
+                if let Some(cond) = condition {
+                    children.push(Node::branch("condition:", vec![cond.itf_node()]));
+                }
+                if let Some(post_expr) = post {
+                    children.push(Node::branch("post:", vec![post_expr.itf_node()]));
+                }
+                children.push(Node::branch("body:", vec![body.itf_node()]));
+                Node::branch(cyan("For"), children)
             }
         }
     }

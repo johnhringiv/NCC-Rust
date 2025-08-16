@@ -5,8 +5,8 @@
 A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
-So far chapter 7 (inc. all extra credit) is implemented, which includes a lexer, parser, semantic analysis, and code generator for basic C code with local variables and compound statements.
-This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on linux).
+So far chapter 8 (including extra credit up to chapter 7) is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with local variables, compound statements, and loops.
+This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on Linux).
 All provided tests pass.
 
 ## Language Grammar
@@ -19,12 +19,18 @@ The compiler currently implements a subset of C with the following grammar:
 <block> ::= "{" { <block-item> } "}"
 <block-item> ::= <statement> | <declaration>
 <declaration> ::= "int" <identifier> [ "=" <exp> ] ";"
+<for-init> ::= <declaration> | [ <exp> ] ";"
 <statement> ::= "return" <exp> ";"
             | <exp> ";"
             | "if" "(" <exp> ")" <statement> [ "else" <statement> ]
             | "goto" <identifier> ";"
             | <identifier> ":" <statement>
             | <block>
+            | "break" ";"
+            | "continue" ";"
+            | "while" "(" <exp> ")" <statement>
+            | "do" <statement> "while" "(" <exp> ")" ";"
+            | "for" "(" <for-init> [ <exp> ] ";" [ <exp> ] ")" <statement>
             | ";"
 <exp> ::= <factor> | <exp> <binop> <exp> | <exp> <assign-op> <exp> 
        | <exp> "?" <exp> ":" <exp> | <exp> "++" | <exp> "--"
@@ -53,6 +59,10 @@ The compiler supports:
 - **Conditional (ternary) operator**: `condition ? true_expr : false_expr`
 - **Control flow**:
   - `if`/`else` statements
+  - `while` loops
+  - `do-while` loops
+  - `for` loops with all three components (init, condition, update)
+  - `break` and `continue` statements
   - Compound statements/blocks
   - `goto` and labeled statements
   - `return` statements
@@ -76,10 +86,6 @@ cargo build --release
 ```
 
 ### Running Tests
-```sh
- ./writing-a-c-compiler-tests/test_compiler target/release/ncc --chapter 7 --extra-credit
-```
-or
 ```sh
 cargo test
 ```

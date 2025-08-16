@@ -5,7 +5,7 @@
    We also don't do scope validation another case that deserves a warning
 */
 use crate::lexer::Span;
-use crate::parser::{Block, BlockItem, Declaration, Expr, Identifier, Program, Stmt};
+use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, Stmt};
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -191,10 +191,101 @@ fn resolve_statement(
         }
         Stmt::Compound(block) => {
             let mut shadow_map = variable_map.clone();
-            resolve_block(block, &mut shadow_map, labels, jumps, name_gen)?;
+            resolve_block(block, &mut shadow_map, labels, jumps, name_gen)
+        }
+        Stmt::While(exp, stmt, _) => {
+            resolve_exp(exp, variable_map)?;
+            resolve_statement(stmt, variable_map, labels, jumps, name_gen)
+        }
+        Stmt::DoWhile(stmt, exp, _) => {
+            resolve_statement(stmt, variable_map, labels, jumps, name_gen)?;
+            resolve_exp(exp, variable_map)
+        }
+        Stmt::For(init, e1, e2, stmt, _) => {
+            let mut shadow_map = variable_map.clone();
+            match init {
+                ForInit::InitExp(exp) => {
+                    if let Some(e) = exp {
+                        resolve_exp(e, &shadow_map)?;
+                    }
+                }
+                ForInit::InitDecl(dec) => resolve_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new())?,
+            }
+            if let Some(e1) = e1 {
+                resolve_exp(e1, &shadow_map)?;
+            }
+            if let Some(e2) = e2 {
+                resolve_exp(e2, &shadow_map)?;
+            }
+            resolve_statement(stmt, &mut shadow_map, labels, jumps, name_gen)
+        }
+        Stmt::Break(..) | Stmt::Continue(..) => Ok(()),
+    }
+}
+
+fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>) -> Result<(), SemanticError> {
+    match stmt {
+        // terminating statements
+        Stmt::Return(_) | Stmt::Expression(_) | Stmt::Goto(..) | Stmt::Null => Ok(()),
+        Stmt::If(_, then_stmt, else_stmt) => {
+            label_statement(then_stmt, cur_label)?;
+            if let Some(c) = &mut **else_stmt {
+                label_statement(c, cur_label)
+            } else {
+                Ok(())
+            }
+        }
+        Stmt::Labeled(_, stmt, _) => label_statement(stmt, cur_label),
+        Stmt::Compound(block) => {
+            for bi in block.iter_mut() {
+                match bi {
+                    BlockItem::Statement(stmt) => label_statement(stmt, cur_label)?,
+                    BlockItem::Declaration(_) => {}
+                }
+            }
             Ok(())
         }
+        Stmt::Break(Identifier(s), span) => {
+            if let Some(label) = cur_label {
+                *s = format!("break_loop.{label}");
+                Ok(())
+            } else {
+                Err(SemanticError::with_span(
+                    "Break statement outside loop".to_string(),
+                    *span,
+                ))
+            }
+        }
+        Stmt::Continue(Identifier(s), span) => {
+            if let Some(label) = cur_label {
+                *s = format!("continue_loop.{label}");
+                Ok(())
+            } else {
+                Err(SemanticError::with_span(
+                    "Continue statement outside loop".to_string(),
+                    *span,
+                ))
+            }
+        }
+        Stmt::While(_, body, loop_num) | Stmt::DoWhile(body, _, loop_num) | Stmt::For(_, _, _, body, loop_num) => {
+            let new_label = match *cur_label {
+                None => 1,
+                Some(l) => l + 1,
+            };
+            *cur_label = Some(new_label);
+            *loop_num = new_label;
+            label_statement(body, cur_label)
+        }
     }
+}
+
+fn label_block(block: &mut Block, cur_label: &mut Option<u64>) -> Result<(), SemanticError> {
+    for bi in block.iter_mut() {
+        if let BlockItem::Statement(s) = bi {
+            label_statement(s, cur_label)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_block(
@@ -205,6 +296,7 @@ fn resolve_block(
     name_gen: &mut NameGenerator,
 ) -> Result<(), SemanticError> {
     let mut block_vars = HashSet::new();
+
     for bi in block.iter_mut() {
         match bi {
             BlockItem::Statement(s) => {
@@ -223,6 +315,9 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
     let mut labels = HashSet::new();
     let mut jumps: HashMap<String, Span> = HashMap::new();
     let mut name_gen = NameGenerator::new();
+
+    let mut cur_label = None;
+    label_block(&mut program.function.body, &mut cur_label)?;
 
     resolve_block(
         &mut program.function.body,

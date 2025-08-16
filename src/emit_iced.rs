@@ -1,18 +1,72 @@
 // Simple emitter using iced-x86 to generate machine code at runtime
 use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp};
-use iced_x86::BlockEncoderOptions;
-use iced_x86::IcedError;
-use iced_x86::code_asm::*;
+use iced_x86::{BlockEncoderOptions, IcedError, SymbolResolver, SymbolResult, code_asm::*};
 use object::write::{
     Object, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection,
 };
 use object::{Architecture, BinaryFormat, Endianness, SectionKind};
 use std::collections::HashMap;
 
-pub fn get_instructions(program: &codegen::Program) -> Result<Vec<iced_x86::Instruction>, IcedError> {
+// Symbol resolver for displaying labels in assembly output
+pub struct MySymbolResolver {
+    symbols: HashMap<u64, String>,
+}
+
+impl MySymbolResolver {
+    fn new(symbols: HashMap<u64, String>) -> Self {
+        Self { symbols }
+    }
+}
+
+impl SymbolResolver for MySymbolResolver {
+    fn symbol(
+        &'_ mut self,
+        _instruction: &iced_x86::Instruction,
+        _operand: u32,
+        _instruction_operand: Option<u32>,
+        address: u64,
+        _address_size: u32,
+    ) -> Option<SymbolResult<'_>> {
+        self.symbols
+            .get(&address)
+            .map(|name| SymbolResult::with_str(address, name.as_str()))
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub fn get_instructions(
+    program: &codegen::Program,
+) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, String>), IcedError> {
     let mut a = CodeAssembler::new(64)?;
-    emit_function(&mut a, &program.function)?;
-    Ok(Vec::from(a.instructions()))
+    let mut labels: HashMap<String, CodeLabel> = HashMap::new();
+    let mut label_idx = HashMap::new();
+
+    // Emit the function
+    a.push(gpr64::rbp)?;
+    a.mov(gpr64::rbp, gpr64::rsp)?;
+    for ins in &program.function.body {
+        emit_instruction(&mut a, ins, &mut labels, &mut label_idx)?;
+    }
+    // Assemble to get real addresses
+    let base_address = 0x1000u64;
+    let result = a.assemble_options(base_address, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
+
+    // Build address-to-label mapping for the SymbolResolver
+    let mut address_map = HashMap::new();
+    for (name, code_label) in labels {
+        if let Ok(address) = result.label_ip(&code_label) {
+            address_map.insert(address, name);
+        }
+    }
+    let resolver = MySymbolResolver::new(address_map);
+
+    // Decode the assembled instructions to get ones with proper addresses
+    let code_bytes = &result.inner.code_buffer;
+    let mut decoder = iced_x86::Decoder::new(64, code_bytes, iced_x86::DecoderOptions::NONE);
+    decoder.set_ip(base_address);
+    let instructions: Vec<iced_x86::Instruction> = decoder.into_iter().collect();
+
+    Ok((instructions, resolver, label_idx))
 }
 
 pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -86,10 +140,11 @@ pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::e
 
 fn emit_function(a: &mut CodeAssembler, fun_def: &codegen::FunctionDefinition) -> Result<(), IcedError> {
     let mut labels: HashMap<String, CodeLabel> = HashMap::new();
+    let mut label_idx = HashMap::new();
     a.push(gpr64::rbp)?;
     a.mov(gpr64::rbp, gpr64::rsp)?;
     for ins in &fun_def.body {
-        emit_instruction(a, ins, &mut labels)?;
+        emit_instruction(a, ins, &mut labels, &mut label_idx)?;
     }
     Ok(())
 }
@@ -117,6 +172,7 @@ fn emit_instruction(
     a: &mut CodeAssembler,
     ins: &Instruction,
     labels: &mut HashMap<String, CodeLabel>,
+    label_idx: &mut HashMap<usize, String>,
 ) -> Result<(), IcedError> {
     match ins {
         Instruction::Mov { src, dst } => match (src, dst) {
@@ -252,6 +308,7 @@ fn emit_instruction(
         Instruction::Label(lbl) => {
             let l = labels.entry(lbl.0.clone()).or_insert_with(|| a.create_label());
             a.set_label(l)?;
+            label_idx.insert(a.instructions().len(), lbl.0.clone());
         }
         Instruction::AllocateStack(off) => {
             if *off != 0 {
