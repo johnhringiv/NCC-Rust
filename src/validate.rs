@@ -223,23 +223,23 @@ fn resolve_statement(
     }
 }
 
-fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>) -> Result<(), SemanticError> {
+fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>, next_label: &mut u64) -> Result<(), SemanticError> {
     match stmt {
         // terminating statements
         Stmt::Return(_) | Stmt::Expression(_) | Stmt::Goto(..) | Stmt::Null => Ok(()),
         Stmt::If(_, then_stmt, else_stmt) => {
-            label_statement(then_stmt, cur_label)?;
+            label_statement(then_stmt, cur_label, next_label)?;
             if let Some(c) = &mut **else_stmt {
-                label_statement(c, cur_label)
+                label_statement(c, cur_label, next_label)
             } else {
                 Ok(())
             }
         }
-        Stmt::Labeled(_, stmt, _) => label_statement(stmt, cur_label),
+        Stmt::Labeled(_, stmt, _) => label_statement(stmt, cur_label, next_label),
         Stmt::Compound(block) => {
             for bi in block.iter_mut() {
                 match bi {
-                    BlockItem::Statement(stmt) => label_statement(stmt, cur_label)?,
+                    BlockItem::Statement(stmt) => label_statement(stmt, cur_label, next_label)?,
                     BlockItem::Declaration(_) => {}
                 }
             }
@@ -268,21 +268,22 @@ fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>) -> Result<(), S
             }
         }
         Stmt::While(_, body, loop_num) | Stmt::DoWhile(body, _, loop_num) | Stmt::For(_, _, _, body, loop_num) => {
-            let new_label = match *cur_label {
-                None => 1,
-                Some(l) => l + 1,
-            };
+            let new_label = *next_label;
+            *next_label += 1;  // Increment for next loop
+            let saved_label = *cur_label;  // Save the current label
             *cur_label = Some(new_label);
             *loop_num = new_label;
-            label_statement(body, cur_label)
+            let result = label_statement(body, cur_label, next_label);
+            *cur_label = saved_label;  // Restore the previous label
+            result
         }
     }
 }
 
-fn label_block(block: &mut Block, cur_label: &mut Option<u64>) -> Result<(), SemanticError> {
+fn label_block(block: &mut Block, cur_label: &mut Option<u64>, next_label: &mut u64) -> Result<(), SemanticError> {
     for bi in block.iter_mut() {
         if let BlockItem::Statement(s) = bi {
-            label_statement(s, cur_label)?;
+            label_statement(s, cur_label, next_label)?;
         }
     }
     Ok(())
@@ -317,7 +318,8 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
     let mut name_gen = NameGenerator::new();
 
     let mut cur_label = None;
-    label_block(&mut program.function.body, &mut cur_label)?;
+    let mut next_label = 1;
+    label_block(&mut program.function.body, &mut cur_label, &mut next_label)?;
 
     resolve_block(
         &mut program.function.body,
