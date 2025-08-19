@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     Identifier(String),
-    ConstantInt(i64),
+    ConstantInt(String),
     IntKeyword,              // int
     VoidKeyword,             // void
     ReturnKeyword,           // return
@@ -60,12 +60,15 @@ pub enum Token {
     ForKeyword,              // for
     BreakKeyword,            // break
     ContinueKeyword,         // continue
+    SwitchKeyword,           // switch
+    DefaultKeyword,          // default
+    CaseKeyword,             // case
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
     // Special handling tokens (handled differently in next_token)
     (r"^[a-zA-Z_]\w*\b", Token::Identifier(String::new())),
-    (r"^[0-9]+\b", Token::ConstantInt(0)),
+    (r"^[0-9]+\b", Token::ConstantInt(String::new())),
     // Keywords
     (r"^int\b", Token::IntKeyword),
     (r"^void\b", Token::VoidKeyword),
@@ -125,6 +128,9 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^for\b", Token::ForKeyword),
     (r"^break\b", Token::BreakKeyword),
     (r"^continue\b", Token::ContinueKeyword),
+    (r"^switch\b", Token::SwitchKeyword),
+    (r"^default\b", Token::DefaultKeyword),
+    (r"^case\b", Token::CaseKeyword),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -188,7 +194,7 @@ fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
         if let Some(mat) = regex.find(input) {
             let token = match variant {
                 Token::Identifier(_) => Token::Identifier(mat.as_str().to_string()),
-                Token::ConstantInt(_) => Token::ConstantInt(mat.as_str().parse().unwrap()),
+                Token::ConstantInt(_) => Token::ConstantInt(mat.as_str().to_string()),
                 other => other.clone(),
             };
             matches.push(TokenMatch {
@@ -252,6 +258,9 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
                 line += 1;
                 col = 1;
                 input = &input[newline_index + 1..];
+            } else {
+                // End of file reached with // or # comment - skip rest of input
+                break;
             }
             continue;
         } else if input.starts_with("/*") {

@@ -1,12 +1,12 @@
 use crate::parser;
-use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, UnaryOp};
+use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
 use crate::validate::NameGenerator;
 
 #[derive(Clone, Debug)]
 pub enum Val {
-    Constant(i64),
+    Constant(i32),
     Var(String),
 }
 
@@ -335,31 +335,31 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
                     condition: c,
                     target: else_label.clone(),
                 });
-                tackify_stmt(then_stmt, instructions, name_generator);
+                tackify_stmt(&then_stmt.stmt, instructions, name_generator);
                 instructions.push(Instruction::Jump {
                     target: end_label.clone(),
                 });
                 instructions.push(Instruction::Label(else_label));
-                tackify_stmt(e, instructions, name_generator);
+                tackify_stmt(&e.stmt, instructions, name_generator);
             } else {
                 // no else
                 instructions.push(Instruction::JumpIfZero {
                     condition: c,
                     target: end_label.clone(),
                 });
-                tackify_stmt(then_stmt, instructions, name_generator);
+                tackify_stmt(&then_stmt.stmt, instructions, name_generator);
             }
             instructions.push(Instruction::Label(end_label.clone()));
         }
-        &parser::Stmt::Labeled(label_name, stmt, _) => {
+        &parser::Stmt::Labeled(label_name, stmt) => {
             instructions.push(Instruction::Label(Identifier(label_name.to_string())));
-            tackify_stmt(stmt, instructions, name_generator)
+            tackify_stmt(&stmt.stmt, instructions, name_generator)
         }
-        &parser::Stmt::Goto(label_name, _) => instructions.push(Instruction::Jump {
+        &parser::Stmt::Goto(label_name) => instructions.push(Instruction::Jump {
             target: Identifier(label_name.to_string()),
         }),
         &parser::Stmt::Compound(block) => tackify_block(block, instructions, name_generator),
-        parser::Stmt::Break(target, _) | parser::Stmt::Continue(target, _) => {
+        parser::Stmt::Break(target) | parser::Stmt::Continue(target) => {
             instructions.push(Instruction::Jump { target: target.clone() })
         }
         parser::Stmt::While(condition, body, label) => {
@@ -372,7 +372,7 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
                 condition: c,
                 target: break_label.clone(),
             });
-            tackify_stmt(body, instructions, name_generator);
+            tackify_stmt(&body.stmt, instructions, name_generator);
             instructions.push(Instruction::Jump { target: continue_label });
             instructions.push(Instruction::Label(break_label));
         }
@@ -382,7 +382,7 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             let break_label = Identifier(format!("break_loop.{label}"));
 
             instructions.push(Instruction::Label(start_label.clone()));
-            tackify_stmt(body, instructions, name_generator);
+            tackify_stmt(&body.stmt, instructions, name_generator);
             instructions.push(Instruction::Label(continue_label));
             let c = tackify_expr(condition, instructions, name_generator);
             instructions.push(JumpIfNotZero {
@@ -413,7 +413,7 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
                     target: break_label.clone(),
                 })
             }
-            tackify_stmt(body, instructions, name_generator);
+            tackify_stmt(&body.stmt, instructions, name_generator);
             instructions.push(Instruction::Label(continue_label));
             if let Some(post) = post {
                 tackify_expr(post, instructions, name_generator);
@@ -421,13 +421,60 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             instructions.push(Instruction::Jump { target: start_label });
             instructions.push(Instruction::Label(break_label));
         }
+        Stmt::Switch(exp, stmt, switch_num, cases) => {
+            let end_label = Identifier(format!("break_switch.{switch_num}"));
+            let switch_val = tackify_expr(exp, instructions, name_generator);
+
+            // Build conditional jumps for each case
+            // this can be optimized with binary search and/or jump tables
+            let mut default_label = None;
+            for case in cases {
+                match case {
+                    parser::SwitchIntType::Int(val) => {
+                        let case_label = Identifier(case.label_str(*switch_num));
+                        let case_val = Val::Constant(*val);
+                        let cond = Val::Var(name_generator.next("case_cond"));
+                        instructions.push(Instruction::Binary {
+                            op: BinOp::Equal,
+                            src1: switch_val.clone(),
+                            src2: case_val,
+                            dst: cond.clone(),
+                        });
+                        instructions.push(Instruction::JumpIfNotZero {
+                            condition: cond,
+                            target: case_label,
+                        });
+                    }
+                    parser::SwitchIntType::Default => {
+                        default_label = Some(Identifier(case.label_str(*switch_num)));
+                    }
+                }
+            }
+
+            // Jump to default if it exists, otherwise jump to end
+            // cases following default will execute this is expected
+            if let Some(default) = default_label {
+                instructions.push(Instruction::Jump { target: default });
+            } else {
+                instructions.push(Instruction::Jump {
+                    target: end_label.clone(),
+                });
+            }
+
+            tackify_stmt(&stmt.stmt, instructions, name_generator);
+            instructions.push(Instruction::Label(end_label));
+        }
+        Stmt::Case(_, stmt, label) | Stmt::Default(stmt, label) => {
+            instructions.push(Instruction::Label(label.clone()));
+            tackify_stmt(&stmt.stmt, instructions, name_generator);
+        }
     }
 }
 
 fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
     for item in block {
         match item {
-            BlockItem::Statement(stmt) => tackify_stmt(stmt, instructions, name_generator),
+            BlockItem::Statement(stmt) => tackify_stmt(&stmt.stmt, instructions, name_generator),
             BlockItem::Declaration(dec) => tackify_declaration(dec, instructions, name_generator),
         }
     }

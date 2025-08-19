@@ -95,11 +95,21 @@ impl ItfDisplay for &str {
     }
 }
 
-impl ItfDisplay for i64 {
-    fn itf_node(&self) -> Node {
-        Node::leaf(magenta(self))
+// Macro to implement ItfDisplay for all integer types
+macro_rules! impl_itf_display_for_int {
+    ($($t:ty),*) => {
+        $(
+            impl ItfDisplay for $t {
+                fn itf_node(&self) -> Node {
+                    Node::leaf(magenta(self.to_string()))
+                }
+            }
+        )*
     }
 }
+
+// Implement for all integer types
+impl_itf_display_for_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 
 impl<T: ItfDisplay> ItfDisplay for Vec<T> {
     fn itf_node(&self) -> Node {

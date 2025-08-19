@@ -28,5 +28,35 @@
   },
   "evaluation_order/test_postinc.c": {
     "return_code": 5
+  },
+  "loops/complex_loop_expressions_simple.c": {
+    "return_code": 35
+  },
+  "loops/empty_for_components.c": {
+    "return_code": 17
+  },
+  "loops/nested_dowhile_continue.c": {
+    "return_code": 22
+  },
+  "loops/deeply_nested_loops.c": {
+    "return_code": 35
+  },
+  "loops/debug_conditional_break.c": {
+    "return_code": 2
+  },
+  "loops/debug_middle_break.c": {
+    "return_code": 10
+  },
+  "switch/complex_const_int.c": {
+    "return_code": 16
+  },
+  "int_wrapping/int_wrapping.c": {
+    "return_code": 0
+  },
+  "int_wrapping/loop_wrapping.c": {
+    "return_code": 2
+  },
+  "int_wrapping/overflow_tests.c": {
+    "return_code": 6
   }
 }

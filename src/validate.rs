@@ -5,7 +5,9 @@
    We also don't do scope validation another case that deserves a warning
 */
 use crate::lexer::Span;
-use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, Stmt};
+use crate::parser::{
+    BinOp, Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, SpannedStmt, Stmt, SwitchIntType, UnaryOp,
+};
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -158,42 +160,42 @@ fn resolve_decoration(
 }
 
 fn resolve_statement(
-    statement: &mut Stmt,
+    statement: &mut SpannedStmt,
     variable_map: &mut HashMap<String, VarInfo>,
     labels: &mut HashSet<String>,
     jumps: &mut HashMap<String, Span>,
     name_gen: &mut NameGenerator,
 ) -> Result<(), SemanticError> {
-    match statement {
+    match &mut statement.stmt {
         Stmt::Return(e) => resolve_exp(e, variable_map),
         Stmt::Expression(e) => resolve_exp(e, variable_map),
         Stmt::Null => Ok(()),
         Stmt::If(e, then_stmt, else_stmt) => {
             resolve_exp(e, variable_map)?;
             resolve_statement(then_stmt, variable_map, labels, jumps, name_gen)?;
-            match &mut **else_stmt {
+            match else_stmt.as_mut() {
                 Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps, name_gen),
                 None => Ok(()),
             }
         }
-        Stmt::Labeled(label_name, stmt, span) => {
+        Stmt::Labeled(label_name, stmt) => {
             if !labels.insert(label_name.to_string()) {
                 return Err(SemanticError {
-                    message: format!("Label {label_name:} already defined at {span}"),
+                    message: format!("Label {label_name:} already defined at {}", statement.span),
                     span: None,
                 });
             }
             resolve_statement(stmt, variable_map, labels, jumps, name_gen)
         }
-        Stmt::Goto(label_name, span) => {
-            jumps.insert(label_name.to_string(), *span);
+        Stmt::Goto(label_name) => {
+            jumps.insert(label_name.to_string(), statement.span);
             Ok(())
         }
         Stmt::Compound(block) => {
             let mut shadow_map = variable_map.clone();
             resolve_block(block, &mut shadow_map, labels, jumps, name_gen)
         }
-        Stmt::While(exp, stmt, _) => {
+        Stmt::While(exp, stmt, _) | Stmt::Switch(exp, stmt, ..) | Stmt::Case(exp, stmt, ..) => {
             resolve_exp(exp, variable_map)?;
             resolve_statement(stmt, variable_map, labels, jumps, name_gen)
         }
@@ -220,69 +222,269 @@ fn resolve_statement(
             resolve_statement(stmt, &mut shadow_map, labels, jumps, name_gen)
         }
         Stmt::Break(..) | Stmt::Continue(..) => Ok(()),
+        Stmt::Default(stmt, ..) => resolve_statement(stmt, variable_map, labels, jumps, name_gen),
     }
 }
 
-fn label_statement(stmt: &mut Stmt, cur_label: &mut Option<u64>) -> Result<(), SemanticError> {
-    match stmt {
+/// Evaluates a constant expression to an i32 value
+/// Returns None if the expression is not a compile-time constant
+fn eval_constant_expr(expr: &Expr) -> Option<i32> {
+    match expr {
+        Expr::Constant(val) => Some(*val),
+        Expr::Unary(op, inner) => {
+            let inner_val = eval_constant_expr(inner)?;
+            match op {
+                UnaryOp::Negate => Some(-inner_val),
+                UnaryOp::BitwiseComplement => Some(!inner_val),
+                UnaryOp::Not => Some(if inner_val == 0 { 1 } else { 0 }),
+            }
+        }
+        Expr::Binary(op, left, right) => {
+            let left_val = eval_constant_expr(left)?;
+            let right_val = eval_constant_expr(right)?;
+            match op {
+                BinOp::Add => Some(left_val.wrapping_add(right_val)),
+                BinOp::Subtract => Some(left_val.wrapping_sub(right_val)),
+                BinOp::Multiply => Some(left_val.wrapping_mul(right_val)),
+                BinOp::Divide => {
+                    if right_val == 0 {
+                        None // Division by zero
+                    } else {
+                        Some(left_val / right_val)
+                    }
+                }
+                BinOp::Remainder => {
+                    if right_val == 0 {
+                        None // Division by zero
+                    } else {
+                        Some(left_val % right_val)
+                    }
+                }
+                BinOp::BitwiseAnd => Some(left_val & right_val),
+                BinOp::BitwiseOr => Some(left_val | right_val),
+                BinOp::BitwiseXOr => Some(left_val ^ right_val),
+                BinOp::BitwiseLeftShift => Some(left_val << (right_val as u32)),
+                BinOp::BitwiseRightShift => Some(left_val >> (right_val as u32)),
+                BinOp::Equal => Some(if left_val == right_val { 1 } else { 0 }),
+                BinOp::NotEqual => Some(if left_val != right_val { 1 } else { 0 }),
+                BinOp::LessThan => Some(if left_val < right_val { 1 } else { 0 }),
+                BinOp::LessOrEqual => Some(if left_val <= right_val { 1 } else { 0 }),
+                BinOp::GreaterThan => Some(if left_val > right_val { 1 } else { 0 }),
+                BinOp::GreaterOrEqual => Some(if left_val >= right_val { 1 } else { 0 }),
+                BinOp::And => Some(if left_val != 0 && right_val != 0 { 1 } else { 0 }),
+                BinOp::Or => Some(if left_val != 0 || right_val != 0 { 1 } else { 0 }),
+                BinOp::Assignment | BinOp::CompoundAssignment | BinOp::Conditional => {
+                    unreachable!("only used for parsing")
+                }
+            }
+        }
+        Expr::Conditional(cond, true_expr, false_expr) => {
+            let cond_val = eval_constant_expr(cond)?;
+            if cond_val != 0 {
+                eval_constant_expr(true_expr)
+            } else {
+                eval_constant_expr(false_expr)
+            }
+        }
+        // Variables, assignments, function calls etc. are not constant
+        _ => None,
+    }
+}
+
+enum LabelTag {
+    Loop(u64),
+    Switch(u64),
+}
+
+struct LabelTracker {
+    cur_label: Vec<LabelTag>,
+    next_loop_label: u64,
+    next_switch_label: u64,
+    switch_to_cases: HashMap<u64, HashSet<SwitchIntType>>, // switch -> case e
+}
+
+impl LabelTracker {
+    fn new() -> Self {
+        LabelTracker {
+            cur_label: vec![],
+            next_loop_label: 0,
+            next_switch_label: 0,
+            switch_to_cases: HashMap::new(),
+        }
+    }
+
+    fn get_break_label(&self) -> Option<String> {
+        if let Some(label) = self.cur_label.last() {
+            let s = match label {
+                LabelTag::Switch(l) => format!("break_switch.{l}"),
+                LabelTag::Loop(l) => format!("break_loop.{l}"),
+            };
+            Some(s)
+        } else {
+            None
+        }
+    }
+
+    fn get_continue_label(&self) -> Option<String> {
+        if let Some(LabelTag::Loop(label)) = self.cur_label.iter().rev().find(|x| match x {
+            LabelTag::Switch(..) => false,
+            LabelTag::Loop(..) => true,
+        }) {
+            Some(format!("continue_loop.{label}"))
+        } else {
+            None
+        }
+    }
+
+    fn get_switch_case(&mut self, c: i32, span: &Span) -> Result<String, SemanticError> {
+        // get the active switch id
+        if let Some(LabelTag::Switch(label)) = self.cur_label.iter().rev().find(|x| match x {
+            LabelTag::Switch(..) => true,
+            LabelTag::Loop(..) => false,
+        }) {
+            let case_exp = SwitchIntType::Int(c);
+            if self.switch_to_cases.get_mut(label).unwrap().insert(case_exp.clone()) {
+                Ok(case_exp.label_str(*label))
+            } else {
+                Err(SemanticError::with_span(
+                    format!("Duplicate Case '{}' found in switch.", format!("{}", c).bold()),
+                    *span,
+                ))
+            }
+        } else {
+            Err(SemanticError::with_span("Case outside of switch".to_string(), *span))
+        }
+    }
+
+    fn get_switch_default(&mut self, span: &Span) -> Result<String, SemanticError> {
+        // get the active switch id
+        if let Some(LabelTag::Switch(label)) = self.cur_label.iter().rev().find(|x| match x {
+            LabelTag::Switch(..) => true,
+            LabelTag::Loop(..) => false,
+        }) {
+            let default_case = SwitchIntType::Default;
+            if self
+                .switch_to_cases
+                .get_mut(label)
+                .unwrap()
+                .insert(default_case.clone())
+            {
+                Ok(default_case.label_str(*label))
+            } else {
+                Err(SemanticError::with_span(
+                    format!("Duplicate '{}' found in switch.", "default".bold()),
+                    *span,
+                ))
+            }
+        } else {
+            Err(SemanticError::with_span("Default outside of switch".to_string(), *span))
+        }
+    }
+    fn next_loop_label(&mut self) -> u64 {
+        let res = self.next_loop_label;
+        self.next_loop_label += 1;
+        self.cur_label.push(LabelTag::Loop(res));
+        res
+    }
+
+    fn next_switch_label(&mut self) -> u64 {
+        let res = self.next_switch_label;
+        self.next_switch_label += 1;
+        self.switch_to_cases.insert(res, HashSet::new());
+        self.cur_label.push(LabelTag::Switch(res));
+        res
+    }
+
+    fn pop(&mut self) {
+        self.cur_label.pop();
+    }
+
+    fn pop_switch(&mut self, switch_id: u64) -> HashSet<SwitchIntType> {
+        self.cur_label.pop();
+        self.switch_to_cases.get(&switch_id).unwrap().clone()
+    }
+}
+
+fn label_statement(stmt: &mut SpannedStmt, label_tracker: &mut LabelTracker) -> Result<(), SemanticError> {
+    match &mut stmt.stmt {
         // terminating statements
         Stmt::Return(_) | Stmt::Expression(_) | Stmt::Goto(..) | Stmt::Null => Ok(()),
         Stmt::If(_, then_stmt, else_stmt) => {
-            label_statement(then_stmt, cur_label)?;
+            label_statement(then_stmt, label_tracker)?;
             if let Some(c) = &mut **else_stmt {
-                label_statement(c, cur_label)
+                label_statement(c, label_tracker)
             } else {
                 Ok(())
             }
         }
-        Stmt::Labeled(_, stmt, _) => label_statement(stmt, cur_label),
+        Stmt::Labeled(_, stmt) => label_statement(stmt, label_tracker),
         Stmt::Compound(block) => {
             for bi in block.iter_mut() {
                 match bi {
-                    BlockItem::Statement(stmt) => label_statement(stmt, cur_label)?,
+                    BlockItem::Statement(stmt) => {
+                        label_statement(stmt, label_tracker)?;
+                    }
                     BlockItem::Declaration(_) => {}
                 }
             }
             Ok(())
         }
-        Stmt::Break(Identifier(s), span) => {
-            if let Some(label) = cur_label {
-                *s = format!("break_loop.{label}");
+        Stmt::Break(Identifier(s)) => {
+            if let Some(break_label) = label_tracker.get_break_label() {
+                *s = break_label;
                 Ok(())
             } else {
                 Err(SemanticError::with_span(
                     "Break statement outside loop".to_string(),
-                    *span,
+                    stmt.span,
                 ))
             }
         }
-        Stmt::Continue(Identifier(s), span) => {
-            if let Some(label) = cur_label {
-                *s = format!("continue_loop.{label}");
+        Stmt::Continue(Identifier(s)) => {
+            if let Some(label) = label_tracker.get_continue_label() {
+                *s = label;
                 Ok(())
             } else {
                 Err(SemanticError::with_span(
                     "Continue statement outside loop".to_string(),
-                    *span,
+                    stmt.span,
                 ))
             }
         }
         Stmt::While(_, body, loop_num) | Stmt::DoWhile(body, _, loop_num) | Stmt::For(_, _, _, body, loop_num) => {
-            let new_label = match *cur_label {
-                None => 1,
-                Some(l) => l + 1,
-            };
-            *cur_label = Some(new_label);
-            *loop_num = new_label;
-            label_statement(body, cur_label)
+            *loop_num = label_tracker.next_loop_label();
+            let result = label_statement(body, label_tracker);
+            label_tracker.pop();
+            result
+        }
+        Stmt::Switch(_, stmt, switch_num, cases) => {
+            *switch_num = label_tracker.next_switch_label();
+            let result = label_statement(stmt, label_tracker);
+            *cases = label_tracker.pop_switch(*switch_num);
+            result
+        }
+        Stmt::Case(exp, s, Identifier(label)) => {
+            if let Some(exp) = eval_constant_expr(exp) {
+                *label = label_tracker.get_switch_case(exp, &stmt.span)?;
+                label_statement(s, label_tracker)
+            } else {
+                Err(SemanticError::with_span(
+                    "Expression is not an integer constant expression".to_string(),
+                    stmt.span,
+                ))
+            }
+        }
+        Stmt::Default(s, Identifier(label)) => {
+            *label = label_tracker.get_switch_default(&stmt.span)?;
+            label_statement(s, label_tracker)
         }
     }
 }
 
-fn label_block(block: &mut Block, cur_label: &mut Option<u64>) -> Result<(), SemanticError> {
+fn label_block(block: &mut Block, label_tracker: &mut LabelTracker) -> Result<(), SemanticError> {
     for bi in block.iter_mut() {
-        if let BlockItem::Statement(s) = bi {
-            label_statement(s, cur_label)?;
+        if let BlockItem::Statement(stmt) = bi {
+            label_statement(stmt, label_tracker)?;
         }
     }
     Ok(())
@@ -299,8 +501,8 @@ fn resolve_block(
 
     for bi in block.iter_mut() {
         match bi {
-            BlockItem::Statement(s) => {
-                resolve_statement(s, variable_map, labels, jumps, name_gen)?;
+            BlockItem::Statement(stmt) => {
+                resolve_statement(stmt, variable_map, labels, jumps, name_gen)?;
             }
             BlockItem::Declaration(d) => {
                 resolve_decoration(d, variable_map, name_gen, &mut block_vars)?;
@@ -316,8 +518,8 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
     let mut jumps: HashMap<String, Span> = HashMap::new();
     let mut name_gen = NameGenerator::new();
 
-    let mut cur_label = None;
-    label_block(&mut program.function.body, &mut cur_label)?;
+    let mut label_tracker = LabelTracker::new();
+    label_block(&mut program.function.body, &mut label_tracker)?;
 
     resolve_block(
         &mut program.function.body,
