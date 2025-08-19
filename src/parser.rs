@@ -139,6 +139,7 @@ pub enum SwitchIntType {
     Default
 }
 
+//todo refactor with spannedstmt struct
 #[derive(Debug)]
 pub enum Stmt {
     Return(Expr),
@@ -500,6 +501,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
                 let label = Identifier(label_name);
                 let span = tokens.pop_front().unwrap().span; // consume identifier
                 tokens.pop_front(); // consume colon
+                declaration_check(tokens)?;
                 let stmt = parse_statement(tokens)?;
                 Ok(Stmt::Labeled(label, Box::new(stmt), span))
             } else {
@@ -563,21 +565,44 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
             let span = tokens.pop_front().unwrap().span;
             let exp = parse_exp(tokens, 0)?;
             expect(&Token::Colon, tokens)?;
+            declaration_check(tokens)?;
             let stmt = parse_statement(tokens)?;
             Ok(Stmt::Case(exp, Box::from(stmt), Identifier("_dummy".to_string()), span))
         }
         Token::DefaultKeyword => {
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Colon, tokens)?;
+            declaration_check(tokens)?;
             let stmt = parse_statement(tokens)?;
             Ok(Stmt::Default(Box::from(stmt), Identifier("_dummy".to_string()), span))
         }
         Token::SwitchKeyword => {
-            tokens.pop_front();
+            //todo repalce with stmt span when available
+            let span =tokens.pop_front().unwrap().span;
             expect(&Token::OpenParen, tokens)?;
             let exp = parse_exp(tokens, 0)?;
             expect(&Token::CloseParen, tokens)?;
             let stmt = parse_statement(tokens)?;
+            // check for stmt before first case
+            match &stmt {
+                Stmt::Case(..) | Stmt::Default(..) => {}
+                Stmt::Compound(block) => {
+                    if let Some(BlockItem::Statement(s)) = block.first() {
+                        eprintln!(
+                            "{}: {}: statement will never be executed {}",
+                            span,
+                            "warning".purple(),
+                            "[-Wswitch-unreachable]".purple()
+                        );
+                    }
+                }
+                _ => eprintln!(
+                    "{}: {}: statement will never be executed {}",
+                    span,
+                    "warning".purple(),
+                    "[-Wswitch-unreachable]".purple()
+                )
+            }
             Ok(Stmt::Switch(exp, Box::from(stmt), 0, HashSet::new()))
         }
         _ => {
@@ -585,6 +610,17 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
             expect(&Token::Semicolon, tokens)?;
             Ok(Stmt::Expression(expr))
         }
+    }
+}
+
+fn declaration_check(tokens: &VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
+    if tokens.front().map(|t| &t.token) == Some(&Token::IntKeyword) {
+        Err(SyntaxError::with_span(
+            "A label can only be part of a statement and a declaration is not a statement. Add a statement or ';' before the declaration.".to_string(),
+            Some(tokens.front().unwrap().span),
+        ))
+    } else {
+        Ok(())
     }
 }
 

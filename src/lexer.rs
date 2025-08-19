@@ -258,6 +258,9 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
                 line += 1;
                 col = 1;
                 input = &input[newline_index + 1..];
+            } else {
+                // End of file reached with // or # comment - skip rest of input
+                break;
             }
             continue;
         } else if input.starts_with("/*") {

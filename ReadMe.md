@@ -5,7 +5,7 @@
 A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
-So far chapter 8 (including extra credit up to chapter 7) is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with local variables, compound statements, and loops.
+So far chapter 8, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with local variables, compound statements, loops, and switch statements.
 This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on Linux).
 All provided tests pass.
 
@@ -31,6 +31,9 @@ The compiler currently implements a subset of C with the following grammar:
             | "while" "(" <exp> ")" <statement>
             | "do" <statement> "while" "(" <exp> ")" ";"
             | "for" "(" <for-init> [ <exp> ] ";" [ <exp> ] ")" <statement>
+            | "switch" "(" <exp> ")" <statement>
+            | "case" <exp> ":" <statement>
+            | "default" ":" <statement>
             | ";"
 <exp> ::= <factor> | <exp> <binop> <exp> | <exp> <assign-op> <exp> 
        | <exp> "?" <exp> ":" <exp> | <exp> "++" | <exp> "--"
@@ -59,6 +62,7 @@ The compiler supports:
 - **Conditional (ternary) operator**: `condition ? true_expr : false_expr`
 - **Control flow**:
   - `if`/`else` statements
+  - `switch` statements with `case` and `default` labels
   - `while` loops
   - `do-while` loops
   - `for` loops with all three components (init, condition, update)
