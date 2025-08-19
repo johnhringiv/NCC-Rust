@@ -73,8 +73,23 @@ The compiler supports:
 - **Expression statements** and **null statements**
 
 ### Safer C
-- We enforce left to right evaluation of binary operations to avoid undefined behavior.
-- The compiler emits warnings for variable shadowing to help catch potential bugs.
+
+NCC provides several safety features and guarantees to help developers write more reliable code:
+
+#### Guaranteed Behaviors
+- **Deterministic integer overflow**: Integer arithmetic uses two's complement wrapping (32-bit). For example, `INT_MAX + 1` reliably wraps to `INT_MIN`.
+- **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from evaluation order.
+
+#### Compile-Time Warnings
+- **Variable shadowing** (`Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer scope
+- **Duplicate switch cases** (` Wswitch-unreachable`): Detects and reports duplicate case values in switch statements, including those from constant expressions
+
+#### Developer Experience
+- **Precise error locations**: All errors and warnings include exact line and column numbers with file:line:column format, making it easy to locate problematic code
+- **Contextual error messages**: Semantic errors reference related code locations (e.g., showing both the shadowing variable and the original declaration)
+- **Pretty-printed ASTs**: Visual tree representations of parsed code (`--parse`), intermediate representations (`--tacky`), and generated code (`--codegen`) for debugging and understanding compilation stages
+
+These features help catch common bugs at compile time while providing predictable runtime behavior.
 
 ## Requirements
 

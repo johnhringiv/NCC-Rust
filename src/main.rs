@@ -260,7 +260,7 @@ pub mod test_utils {
     use std::path::Path;
 
     static CHAPTER_COMPLETED: i32 = 8;
-    static EXTRA_COMPLETED: i32 = 7;
+    static EXTRA_COMPLETED: i32 = 8;
     pub enum Stage {
         Lex,
         Parse,

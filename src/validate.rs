@@ -5,7 +5,7 @@
    We also don't do scope validation another case that deserves a warning
 */
 use crate::lexer::Span;
-use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, Stmt, UnaryOp, BinOp, SwitchIntType};
+use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, Stmt, UnaryOp, BinOp, SwitchIntType, SpannedStmt};
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -158,35 +158,35 @@ fn resolve_decoration(
 }
 
 fn resolve_statement(
-    statement: &mut Stmt,
+    statement: &mut SpannedStmt,
     variable_map: &mut HashMap<String, VarInfo>,
     labels: &mut HashSet<String>,
     jumps: &mut HashMap<String, Span>,
     name_gen: &mut NameGenerator,
 ) -> Result<(), SemanticError> {
-    match statement {
+    match &mut statement.stmt {
         Stmt::Return(e) => resolve_exp(e, variable_map),
         Stmt::Expression(e) => resolve_exp(e, variable_map),
         Stmt::Null => Ok(()),
         Stmt::If(e, then_stmt, else_stmt) => {
             resolve_exp(e, variable_map)?;
             resolve_statement(then_stmt, variable_map, labels, jumps, name_gen)?;
-            match &mut **else_stmt {
+            match else_stmt.as_mut() {
                 Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps, name_gen),
                 None => Ok(()),
             }
         }
-        Stmt::Labeled(label_name, stmt, span) => {
+        Stmt::Labeled(label_name, stmt) => {
             if !labels.insert(label_name.to_string()) {
                 return Err(SemanticError {
-                    message: format!("Label {label_name:} already defined at {span}"),
+                    message: format!("Label {label_name:} already defined at {}", statement.span),
                     span: None,
                 });
             }
             resolve_statement(stmt, variable_map, labels, jumps, name_gen)
         }
-        Stmt::Goto(label_name, span) => {
-            jumps.insert(label_name.to_string(), *span);
+        Stmt::Goto(label_name) => {
+            jumps.insert(label_name.to_string(), statement.span);
             Ok(())
         }
         Stmt::Compound(block) => {
@@ -338,9 +338,9 @@ impl LabelTracker {
             LabelTag::Switch(..) => true,
             LabelTag::Loop(..) => false
         }) {
-            let case_label = format!("switch.{label}_case.{c}");
-            if self.switch_to_cases.get_mut(label).unwrap().insert(SwitchIntType::Int(c)) {
-                Ok(case_label)
+            let case_exp = SwitchIntType::Int(c);
+            if self.switch_to_cases.get_mut(label).unwrap().insert(case_exp.clone()) {
+                Ok(case_exp.label_str(*label))
             } else {
                 Err(SemanticError::with_span(format!("Duplicate Case '{}' found in switch.", format!("{}", c).bold()), *span))
             }
@@ -355,9 +355,9 @@ impl LabelTracker {
             LabelTag::Switch(..) => true,
             LabelTag::Loop(..) => false
         }) {
-            let switch_label = format!("switch.{label}_default");
-            if self.switch_to_cases.get_mut(label).unwrap().insert(SwitchIntType::Default) {
-                Ok(switch_label)
+            let default_case = SwitchIntType::Default;
+            if self.switch_to_cases.get_mut(label).unwrap().insert(default_case.clone()) {
+                Ok(default_case.label_str(*label))
             } else {
                 Err(SemanticError::with_span(format!("Duplicate '{}' found in switch.", "default".bold()), *span))
             }
@@ -391,8 +391,8 @@ impl LabelTracker {
 
 }
 
-fn label_statement(stmt: &mut Stmt, label_tracker: &mut LabelTracker) -> Result<(), SemanticError> {
-    match stmt {
+fn label_statement(stmt: &mut SpannedStmt, label_tracker: &mut LabelTracker) -> Result<(), SemanticError> {
+    match &mut stmt.stmt {
         // terminating statements
         Stmt::Return(_) | Stmt::Expression(_) | Stmt::Goto(..) | Stmt::Null => Ok(()),
         Stmt::If(_, then_stmt, else_stmt) => {
@@ -403,35 +403,37 @@ fn label_statement(stmt: &mut Stmt, label_tracker: &mut LabelTracker) -> Result<
                 Ok(())
             }
         }
-        Stmt::Labeled(_, stmt, _) => label_statement(stmt, label_tracker),
+        Stmt::Labeled(_, stmt) => label_statement(stmt, label_tracker),
         Stmt::Compound(block) => {
             for bi in block.iter_mut() {
                 match bi {
-                    BlockItem::Statement(stmt) => label_statement(stmt, label_tracker)?,
+                    BlockItem::Statement(stmt) => {
+                        label_statement(stmt, label_tracker)?;
+                    }
                     BlockItem::Declaration(_) => {}
                 }
             }
             Ok(())
         }
-        Stmt::Break(Identifier(s), span) => {
+        Stmt::Break(Identifier(s)) => {
             if let Some(break_label) = label_tracker.get_break_label() {
                 *s = break_label;
                 Ok(())
             } else {
                 Err(SemanticError::with_span(
                     "Break statement outside loop".to_string(),
-                    *span,
+                    stmt.span,
                 ))
             }
         }
-        Stmt::Continue(Identifier(s), span) => {
+        Stmt::Continue(Identifier(s)) => {
             if let Some(label) = label_tracker.get_continue_label() {
                 *s = label;
                 Ok(())
             } else {
                 Err(SemanticError::with_span(
                     "Continue statement outside loop".to_string(),
-                    *span,
+                    stmt.span,
                 ))
             }
         }
@@ -441,32 +443,31 @@ fn label_statement(stmt: &mut Stmt, label_tracker: &mut LabelTracker) -> Result<
             label_tracker.pop();
             result
         }
-        Stmt::Switch(exp, stmt, switch_num, cases) => {
-            //switch.1 (e) -> goto switch.1_case_e
+        Stmt::Switch(_, stmt, switch_num, cases) => {
             *switch_num = label_tracker.next_switch_label();
             let result = label_statement(stmt, label_tracker);
             *cases = label_tracker.pop_switch(*switch_num);
             result
         }
-        Stmt::Case(exp, stmt, Identifier(s), span) => {
+        Stmt::Case(exp, s, Identifier(label)) => {
             if let Some(exp) = eval_constant_expr(exp) {
-                *s = label_tracker.get_switch_case(exp as i32, span)?;
-                label_statement(stmt, label_tracker)
+                *label = label_tracker.get_switch_case(exp, &stmt.span)?;
+                label_statement(s, label_tracker)
             } else {
-                Err(SemanticError::with_span("Expression is not an integer constant expression".to_string(), *span))
+                Err(SemanticError::with_span("Expression is not an integer constant expression".to_string(), stmt.span))
             }
         }
-        Stmt::Default(stmt, Identifier(s), span) => {
-            *s = label_tracker.get_switch_default(span)?;
-            label_statement(stmt, label_tracker)
+        Stmt::Default(s, Identifier(label)) => {
+            *label = label_tracker.get_switch_default(&stmt.span)?;
+            label_statement(s, label_tracker)
         }
     }
 }
 
 fn label_block(block: &mut Block, label_tracker: &mut LabelTracker) -> Result<(), SemanticError> {
     for bi in block.iter_mut() {
-        if let BlockItem::Statement(s) = bi {
-            label_statement(s, label_tracker)?;
+        if let BlockItem::Statement(stmt) = bi {
+            label_statement(stmt, label_tracker)?;
         }
     }
     Ok(())
@@ -483,8 +484,8 @@ fn resolve_block(
 
     for bi in block.iter_mut() {
         match bi {
-            BlockItem::Statement(s) => {
-                resolve_statement(s, variable_map, labels, jumps, name_gen)?;
+            BlockItem::Statement(stmt) => {
+                resolve_statement(stmt, variable_map, labels, jumps, name_gen)?;
             }
             BlockItem::Declaration(d) => {
                 resolve_decoration(d, variable_map, name_gen, &mut block_vars)?;

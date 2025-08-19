@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 static CHAPTER_COMPLETED: i32 = 8;
-static EXTRA_COMPLETED: i32 = 7;
+static EXTRA_COMPLETED: i32 = 8;
 
 #[derive(Debug, PartialEq)]
 enum ProgramOutput {
@@ -386,4 +386,40 @@ fn test_wshadow_warning() {
     );
 
     println!("✓ WShadow warning test passed: variable shadowing warning detected");
+}
+
+fn test_warning(test_file: &str, warning: &str) {
+    let path = std::path::Path::new(test_file);
+    let binary_path = path.with_extension("");
+
+    // Get the path to the ncc binary
+    let ncc_path = get_ncc_binary_path();
+
+    // Run ncc to compile the file and capture stderr for warnings
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .output()
+        .expect("Failed to execute ncc");
+
+    std::fs::remove_file(&binary_path).ok();
+
+    // Convert stderr to string to check for warnings
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // Check that WShadow warning is present
+    assert!(
+        stderr_output.contains(warning),
+        "Expected {} warning, but stderr was: {}",
+        warning,
+        stderr_output
+    );
+}
+
+#[test]
+fn test_switch_unreachable() {
+    let files = ["writing-a-c-compiler-tests/tests/chapter_8/valid/extra_credit/switch_no_case.c", "writing-a-c-compiler-tests/tests/chapter_8/valid/extra_credit/switch_nested_cases.c"];
+
+    for file in files {
+        test_warning(file, "-Wswitch-unreachable")
+    }
 }

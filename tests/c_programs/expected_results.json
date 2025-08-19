@@ -46,5 +46,17 @@
   },
   "loops/debug_middle_break.c": {
     "return_code": 10
+  },
+  "switch/complex_const_int.c": {
+    "return_code": 16
+  },
+  "int_wrapping/int_wrapping.c": {
+    "return_code": 0
+  },
+  "int_wrapping/loop_wrapping.c": {
+    "return_code": 2
+  },
+  "int_wrapping/overflow_tests.c": {
+    "return_code": 6
   }
 }
