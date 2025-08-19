@@ -157,7 +157,6 @@ impl SwitchIntType {
     }
 }
 
-//todo refactor with spannedstmt struct
 #[derive(Debug, Clone)]
 pub struct SpannedStmt {
     pub stmt: Stmt,
