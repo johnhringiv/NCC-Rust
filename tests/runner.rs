@@ -417,7 +417,10 @@ fn test_warning(test_file: &str, warning: &str) {
 
 #[test]
 fn test_switch_unreachable() {
-    let files = ["writing-a-c-compiler-tests/tests/chapter_8/valid/extra_credit/switch_no_case.c", "writing-a-c-compiler-tests/tests/chapter_8/valid/extra_credit/switch_nested_cases.c"];
+    let files = [
+        "writing-a-c-compiler-tests/tests/chapter_8/valid/extra_credit/switch_no_case.c",
+        "writing-a-c-compiler-tests/tests/chapter_8/valid/extra_credit/switch_nested_cases.c",
+    ];
 
     for file in files {
         test_warning(file, "-Wswitch-unreachable")

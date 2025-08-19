@@ -5,7 +5,9 @@
    We also don't do scope validation another case that deserves a warning
 */
 use crate::lexer::Span;
-use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, Stmt, UnaryOp, BinOp, SwitchIntType, SpannedStmt};
+use crate::parser::{
+    BinOp, Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, SpannedStmt, Stmt, SwitchIntType, UnaryOp,
+};
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -220,7 +222,7 @@ fn resolve_statement(
             resolve_statement(stmt, &mut shadow_map, labels, jumps, name_gen)
         }
         Stmt::Break(..) | Stmt::Continue(..) => Ok(()),
-        Stmt::Default(stmt, ..) => resolve_statement(stmt, variable_map, labels, jumps, name_gen)
+        Stmt::Default(stmt, ..) => resolve_statement(stmt, variable_map, labels, jumps, name_gen),
     }
 }
 
@@ -271,7 +273,9 @@ fn eval_constant_expr(expr: &Expr) -> Option<i32> {
                 BinOp::GreaterOrEqual => Some(if left_val >= right_val { 1 } else { 0 }),
                 BinOp::And => Some(if left_val != 0 && right_val != 0 { 1 } else { 0 }),
                 BinOp::Or => Some(if left_val != 0 || right_val != 0 { 1 } else { 0 }),
-                BinOp::Assignment | BinOp::CompoundAssignment | BinOp::Conditional => unreachable!("only used for parsing")
+                BinOp::Assignment | BinOp::CompoundAssignment | BinOp::Conditional => {
+                    unreachable!("only used for parsing")
+                }
             }
         }
         Expr::Conditional(cond, true_expr, false_expr) => {
@@ -289,14 +293,14 @@ fn eval_constant_expr(expr: &Expr) -> Option<i32> {
 
 enum LabelTag {
     Loop(u64),
-    Switch(u64)
+    Switch(u64),
 }
 
 struct LabelTracker {
     cur_label: Vec<LabelTag>,
     next_loop_label: u64,
     next_switch_label: u64,
-    switch_to_cases: HashMap<u64, HashSet<SwitchIntType>> // switch -> case e
+    switch_to_cases: HashMap<u64, HashSet<SwitchIntType>>, // switch -> case e
 }
 
 impl LabelTracker {
@@ -324,7 +328,7 @@ impl LabelTracker {
     fn get_continue_label(&self) -> Option<String> {
         if let Some(LabelTag::Loop(label)) = self.cur_label.iter().rev().find(|x| match x {
             LabelTag::Switch(..) => false,
-            LabelTag::Loop(..) => true
+            LabelTag::Loop(..) => true,
         }) {
             Some(format!("continue_loop.{label}"))
         } else {
@@ -336,13 +340,16 @@ impl LabelTracker {
         // get the active switch id
         if let Some(LabelTag::Switch(label)) = self.cur_label.iter().rev().find(|x| match x {
             LabelTag::Switch(..) => true,
-            LabelTag::Loop(..) => false
+            LabelTag::Loop(..) => false,
         }) {
             let case_exp = SwitchIntType::Int(c);
             if self.switch_to_cases.get_mut(label).unwrap().insert(case_exp.clone()) {
                 Ok(case_exp.label_str(*label))
             } else {
-                Err(SemanticError::with_span(format!("Duplicate Case '{}' found in switch.", format!("{}", c).bold()), *span))
+                Err(SemanticError::with_span(
+                    format!("Duplicate Case '{}' found in switch.", format!("{}", c).bold()),
+                    *span,
+                ))
             }
         } else {
             Err(SemanticError::with_span("Case outside of switch".to_string(), *span))
@@ -353,13 +360,21 @@ impl LabelTracker {
         // get the active switch id
         if let Some(LabelTag::Switch(label)) = self.cur_label.iter().rev().find(|x| match x {
             LabelTag::Switch(..) => true,
-            LabelTag::Loop(..) => false
+            LabelTag::Loop(..) => false,
         }) {
             let default_case = SwitchIntType::Default;
-            if self.switch_to_cases.get_mut(label).unwrap().insert(default_case.clone()) {
+            if self
+                .switch_to_cases
+                .get_mut(label)
+                .unwrap()
+                .insert(default_case.clone())
+            {
                 Ok(default_case.label_str(*label))
             } else {
-                Err(SemanticError::with_span(format!("Duplicate '{}' found in switch.", "default".bold()), *span))
+                Err(SemanticError::with_span(
+                    format!("Duplicate '{}' found in switch.", "default".bold()),
+                    *span,
+                ))
             }
         } else {
             Err(SemanticError::with_span("Default outside of switch".to_string(), *span))
@@ -388,7 +403,6 @@ impl LabelTracker {
         self.cur_label.pop();
         self.switch_to_cases.get(&switch_id).unwrap().clone()
     }
-
 }
 
 fn label_statement(stmt: &mut SpannedStmt, label_tracker: &mut LabelTracker) -> Result<(), SemanticError> {
@@ -454,7 +468,10 @@ fn label_statement(stmt: &mut SpannedStmt, label_tracker: &mut LabelTracker) -> 
                 *label = label_tracker.get_switch_case(exp, &stmt.span)?;
                 label_statement(s, label_tracker)
             } else {
-                Err(SemanticError::with_span("Expression is not an integer constant expression".to_string(), stmt.span))
+                Err(SemanticError::with_span(
+                    "Expression is not an integer constant expression".to_string(),
+                    stmt.span,
+                ))
             }
         }
         Stmt::Default(s, Identifier(label)) => {

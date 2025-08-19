@@ -136,7 +136,7 @@ impl BinOp {
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub enum SwitchIntType {
     Int(i32),
-    Default
+    Default,
 }
 
 impl SwitchIntType {
@@ -161,7 +161,7 @@ impl SwitchIntType {
 #[derive(Debug, Clone)]
 pub struct SpannedStmt {
     pub stmt: Stmt,
-    pub span: Span
+    pub span: Span,
 }
 #[derive(Debug, Clone)]
 pub enum Stmt {
@@ -173,8 +173,8 @@ pub enum Stmt {
     Compound(Block),
     Break(Identifier),
     Continue(Identifier),
-    While(Expr, Box<SpannedStmt>, u64),                              // while(condition, body, label)
-    DoWhile(Box<SpannedStmt>, Expr, u64),                            // dowhile(body, condition, label)
+    While(Expr, Box<SpannedStmt>, u64),   // while(condition, body, label)
+    DoWhile(Box<SpannedStmt>, Expr, u64), // dowhile(body, condition, label)
     For(ForInit, Option<Expr>, Option<Expr>, Box<SpannedStmt>, u64), // for(init, condition, post, body, label)
     Switch(Expr, Box<SpannedStmt>, u64, HashSet<SwitchIntType>),
     Case(Expr, Box<SpannedStmt>, Identifier),
@@ -316,12 +316,16 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                     Err(_) => Err(SyntaxError::with_span(
                         format!("Integer constant '{}' does not fit in 32-bit int", value_str.bold()),
                         Some(spanned.span),
-                    ))
+                    )),
                 }
             }
             Token::Negation => {
                 // simply treating negation as an unop cases a panic when unwrapping int min
-                if let Some(SpannedToken{token: Token::ConstantInt(value_str), span: _}) = tokens.get_mut(1) {
+                if let Some(SpannedToken {
+                    token: Token::ConstantInt(value_str),
+                    span: _,
+                }) = tokens.get_mut(1)
+                {
                     *value_str = format!("-{value_str}");
                     tokens.pop_front();
                     parse_factor(tokens)
@@ -508,17 +512,20 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
     };
     match next_token.token {
         Token::ReturnKeyword => {
-            let span =tokens.pop_front().unwrap().span;
+            let span = tokens.pop_front().unwrap().span;
             let exp = parse_exp(tokens, 0)?;
             expect(&Token::Semicolon, tokens)?;
-            Ok(SpannedStmt {stmt: Stmt::Return(exp), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Return(exp),
+                span,
+            })
         }
         Token::Semicolon => {
-            let span =tokens.pop_front().unwrap().span;
-            Ok(SpannedStmt {stmt: Stmt::Null, span})
+            let span = tokens.pop_front().unwrap().span;
+            Ok(SpannedStmt { stmt: Stmt::Null, span })
         }
         Token::IfKeyword => {
-            let span =tokens.pop_front().unwrap().span;
+            let span = tokens.pop_front().unwrap().span;
             let condition = get_condition(tokens)?;
             let then_stmt = parse_statement(tokens)?;
             // check for else
@@ -529,13 +536,16 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
                 None
             };
             let stmt = Stmt::If(condition, Box::new(then_stmt), Box::new(else_stmt));
-            Ok(SpannedStmt{stmt, span})
+            Ok(SpannedStmt { stmt, span })
         }
         Token::GotoKeyword => {
             let span = tokens.pop_front().unwrap().span;
             let (target, _) = parse_identifier(tokens)?;
             expect(&Token::Semicolon, tokens)?;
-            Ok(SpannedStmt{stmt: Stmt::Goto(target), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Goto(target),
+                span,
+            })
         }
         Token::Identifier(label_name) => {
             // Check if it's a label (identifier followed by colon)
@@ -545,12 +555,18 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
                 tokens.pop_front(); // consume colon
                 declaration_check(tokens)?;
                 let stmt = parse_statement(tokens)?;
-                Ok(SpannedStmt {stmt: Stmt::Labeled(label, Box::new(stmt)), span})
+                Ok(SpannedStmt {
+                    stmt: Stmt::Labeled(label, Box::new(stmt)),
+                    span,
+                })
             } else {
                 // It's an expression statement
                 let expr = parse_exp(tokens, 0)?;
                 let span = expect(&Token::Semicolon, tokens)?;
-                Ok(SpannedStmt {stmt: Stmt::Expression(expr), span})
+                Ok(SpannedStmt {
+                    stmt: Stmt::Expression(expr),
+                    span,
+                })
             }
         }
         Token::OpenBrace => {
@@ -560,23 +576,35 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
                 block.push(parse_block_item(tokens)?);
             }
             expect(&Token::CloseBrace, tokens)?;
-            Ok(SpannedStmt {stmt: Stmt::Compound(block), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Compound(block),
+                span,
+            })
         }
         Token::BreakKeyword => {
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Semicolon, tokens)?;
-            Ok(SpannedStmt{ stmt: Stmt::Break(Identifier("_dummy".to_string())), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Break(Identifier("_dummy".to_string())),
+                span,
+            })
         }
         Token::ContinueKeyword => {
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Semicolon, tokens)?;
-            Ok(SpannedStmt{ stmt: Stmt::Continue(Identifier("_dummy".to_string())), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Continue(Identifier("_dummy".to_string())),
+                span,
+            })
         }
         Token::WhileKeyword => {
             let span = tokens.pop_front().unwrap().span;
             let condition = get_condition(tokens)?;
             let body = parse_statement(tokens)?;
-            Ok(SpannedStmt{stmt: Stmt::While(condition, Box::from(body), 0), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::While(condition, Box::from(body), 0),
+                span,
+            })
         }
         Token::DoKeyword => {
             let span = tokens.pop_front().unwrap().span;
@@ -584,7 +612,10 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             expect(&Token::WhileKeyword, tokens)?;
             let condition = get_condition(tokens)?;
             expect(&Token::Semicolon, tokens)?;
-            Ok(SpannedStmt{stmt: Stmt::DoWhile(Box::from(body), condition, 0), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::DoWhile(Box::from(body), condition, 0),
+                span,
+            })
         }
         Token::ForKeyword => {
             let span = tokens.pop_front().unwrap().span;
@@ -601,7 +632,10 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             let post = parse_exp(tokens, 0).ok();
             expect(&Token::CloseParen, tokens)?;
             let body = parse_statement(tokens)?;
-            Ok(SpannedStmt{stmt: Stmt::For(init, condition, post, Box::from(body), 0), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::For(init, condition, post, Box::from(body), 0),
+                span,
+            })
         }
         Token::CaseKeyword => {
             let span = tokens.pop_front().unwrap().span;
@@ -609,14 +643,20 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             expect(&Token::Colon, tokens)?;
             declaration_check(tokens)?;
             let stmt = parse_statement(tokens)?;
-            Ok(SpannedStmt{stmt: Stmt::Case(exp, Box::from(stmt), Identifier("_dummy".to_string())), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Case(exp, Box::from(stmt), Identifier("_dummy".to_string())),
+                span,
+            })
         }
         Token::DefaultKeyword => {
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Colon, tokens)?;
             declaration_check(tokens)?;
             let stmt = parse_statement(tokens)?;
-            Ok(SpannedStmt{stmt: Stmt::Default(Box::from(stmt), Identifier("_dummy".to_string())), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Default(Box::from(stmt), Identifier("_dummy".to_string())),
+                span,
+            })
         }
         Token::SwitchKeyword => {
             let span = tokens.pop_front().unwrap().span;
@@ -626,12 +666,18 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             let stmt = parse_statement(tokens)?;
             // check for stmt before first case
             switch_unreachable_check(&stmt);
-            Ok(SpannedStmt{stmt: Stmt::Switch(exp, Box::from(stmt), 0, HashSet::new()), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Switch(exp, Box::from(stmt), 0, HashSet::new()),
+                span,
+            })
         }
         _ => {
             let expr = parse_exp(tokens, 0)?;
             let span = expect(&Token::Semicolon, tokens)?;
-            Ok(SpannedStmt{stmt: Stmt::Expression(expr), span})
+            Ok(SpannedStmt {
+                stmt: Stmt::Expression(expr),
+                span,
+            })
         }
     }
 }
@@ -649,7 +695,7 @@ fn switch_unreachable_check(stmt: &SpannedStmt) {
             stmt.span,
             "warning".purple(),
             "[-Wswitch-unreachable]".purple()
-        )
+        ),
     }
 }
 
@@ -848,27 +894,21 @@ impl ItfDisplay for Stmt {
                 children.push(Node::branch("body:", vec![body.stmt.itf_node()]));
                 Node::branch(cyan("For"), children)
             }
-            Stmt::Switch(expr, body, ..) => {
-                Node::branch(
-                    cyan("Switch"),
-                    vec![
-                        Node::branch("expr:", vec![expr.itf_node()]),
-                        Node::branch("body:", vec![body.stmt.itf_node()]),
-                    ],
-                )
-            }
-            Stmt::Case(expr, stmt, _) => {
-                Node::branch(
-                    cyan("Case"),
-                    vec![
-                        Node::branch("expr:", vec![expr.itf_node()]),
-                        Node::branch("stmt:", vec![stmt.stmt.itf_node()]),
-                    ],
-                )
-            }
-            Stmt::Default(stmt, ..) => {
-                Node::branch(cyan("Default"), vec![stmt.stmt.itf_node()])
-            }
+            Stmt::Switch(expr, body, ..) => Node::branch(
+                cyan("Switch"),
+                vec![
+                    Node::branch("expr:", vec![expr.itf_node()]),
+                    Node::branch("body:", vec![body.stmt.itf_node()]),
+                ],
+            ),
+            Stmt::Case(expr, stmt, _) => Node::branch(
+                cyan("Case"),
+                vec![
+                    Node::branch("expr:", vec![expr.itf_node()]),
+                    Node::branch("stmt:", vec![stmt.stmt.itf_node()]),
+                ],
+            ),
+            Stmt::Default(stmt, ..) => Node::branch(cyan("Default"), vec![stmt.stmt.itf_node()]),
         }
     }
 }

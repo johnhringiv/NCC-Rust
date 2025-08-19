@@ -1,4 +1,4 @@
-use crate::{parser};
+use crate::parser;
 use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
@@ -424,7 +424,7 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
         Stmt::Switch(exp, stmt, switch_num, cases) => {
             let end_label = Identifier(format!("break_switch.{switch_num}"));
             let switch_val = tackify_expr(exp, instructions, name_generator);
-            
+
             // Build conditional jumps for each case
             // this can be optimized with binary search and/or jump tables
             let mut default_label = None;
@@ -450,13 +450,15 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
                     }
                 }
             }
-            
+
             // Jump to default if it exists, otherwise jump to end
             // cases following default will execute this is expected
             if let Some(default) = default_label {
                 instructions.push(Instruction::Jump { target: default });
             } else {
-                instructions.push(Instruction::Jump { target: end_label.clone() });
+                instructions.push(Instruction::Jump {
+                    target: end_label.clone(),
+                });
             }
 
             tackify_stmt(&stmt.stmt, instructions, name_generator);
