@@ -278,7 +278,7 @@ fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
 
 fn convert_val(ast: &tacky::Val) -> Operand {
     match ast {
-        tacky::Val::Constant(value) => Operand::Imm(*value),
+        tacky::Val::Constant(value) => Operand::Imm(*value as i64),
         tacky::Val::Var(s) => Operand::Pseudo(s.clone()),
     }
 }

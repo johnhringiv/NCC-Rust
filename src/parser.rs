@@ -14,7 +14,7 @@
 use crate::lexer::{Span, SpannedToken, Token};
 use crate::pretty::{ItfDisplay, Node, cyan, green, simple_node, yellow};
 use colored::*;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,7 +71,7 @@ impl From<&Token> for AssignOp {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    Constant(i64),
+    Constant(i32),
     Var(Identifier, Span),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
@@ -133,6 +133,12 @@ impl BinOp {
     }
 }
 
+#[derive(Eq, Hash, PartialEq, Debug, Clone)]
+pub enum SwitchIntType {
+    Int(i32),
+    Default
+}
+
 #[derive(Debug)]
 pub enum Stmt {
     Return(Expr),
@@ -146,6 +152,9 @@ pub enum Stmt {
     While(Expr, Box<Stmt>, u64),                              // while(condition, body, label)
     DoWhile(Box<Stmt>, Expr, u64),                            // dowhile(body, condition, label)
     For(ForInit, Option<Expr>, Option<Expr>, Box<Stmt>, u64), // for(init, condition, post, body, label)
+    Switch(Expr, Box<Stmt>, u64, HashSet<SwitchIntType>),
+    Case(Expr, Box<Stmt>, Identifier, Span),
+    Default(Box<Stmt>, Identifier, Span),
     Null,
 }
 
@@ -550,6 +559,27 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<Stmt, SyntaxEr
             let body = parse_statement(tokens)?;
             Ok(Stmt::For(init, condition, post, Box::from(body), 0))
         }
+        Token::CaseKeyword => {
+            let span = tokens.pop_front().unwrap().span;
+            let exp = parse_exp(tokens, 0)?;
+            expect(&Token::Colon, tokens)?;
+            let stmt = parse_statement(tokens)?;
+            Ok(Stmt::Case(exp, Box::from(stmt), Identifier("_dummy".to_string()), span))
+        }
+        Token::DefaultKeyword => {
+            let span = tokens.pop_front().unwrap().span;
+            expect(&Token::Colon, tokens)?;
+            let stmt = parse_statement(tokens)?;
+            Ok(Stmt::Default(Box::from(stmt), Identifier("_dummy".to_string()), span))
+        }
+        Token::SwitchKeyword => {
+            tokens.pop_front();
+            expect(&Token::OpenParen, tokens)?;
+            let exp = parse_exp(tokens, 0)?;
+            expect(&Token::CloseParen, tokens)?;
+            let stmt = parse_statement(tokens)?;
+            Ok(Stmt::Switch(exp, Box::from(stmt), 0, HashSet::new()))
+        }
         _ => {
             let expr = parse_exp(tokens, 0)?;
             expect(&Token::Semicolon, tokens)?;
@@ -735,6 +765,27 @@ impl ItfDisplay for Stmt {
                 }
                 children.push(Node::branch("body:", vec![body.itf_node()]));
                 Node::branch(cyan("For"), children)
+            }
+            Stmt::Switch(expr, body, ..) => {
+                Node::branch(
+                    cyan("Switch"),
+                    vec![
+                        Node::branch("expr:", vec![expr.itf_node()]),
+                        Node::branch("body:", vec![body.itf_node()]),
+                    ],
+                )
+            }
+            Stmt::Case(expr, stmt, _, _) => {
+                Node::branch(
+                    cyan("Case"),
+                    vec![
+                        Node::branch("expr:", vec![expr.itf_node()]),
+                        Node::branch("stmt:", vec![stmt.itf_node()]),
+                    ],
+                )
+            }
+            Stmt::Default(stmt, ..) => {
+                Node::branch(cyan("Default"), vec![stmt.itf_node()])
             }
         }
     }

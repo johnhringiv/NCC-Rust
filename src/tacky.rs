@@ -1,12 +1,12 @@
-use crate::parser;
-use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, UnaryOp};
+use crate::{parser};
+use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
 use crate::validate::NameGenerator;
 
 #[derive(Clone, Debug)]
 pub enum Val {
-    Constant(i64),
+    Constant(i32),
     Var(String),
 }
 
@@ -420,6 +420,51 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
             }
             instructions.push(Instruction::Jump { target: start_label });
             instructions.push(Instruction::Label(break_label));
+        }
+        Stmt::Switch(exp, stmt, switch_num, cases) => {
+            let end_label = Identifier(format!("break_switch.{switch_num}"));
+            let switch_val = tackify_expr(exp, instructions, name_generator);
+            
+            // Build conditional jumps for each case
+            // this can be optimized with binary search and/or jump tables
+            let mut default_label = None;
+            for case in cases {
+                match case {
+                    parser::SwitchIntType::Int(val) => {
+                        let case_label = Identifier(format!("switch.{switch_num}_case.{val}"));
+                        let case_val = Val::Constant(*val);
+                        let cond = Val::Var(name_generator.next("case_cond"));
+                        instructions.push(Instruction::Binary {
+                            op: BinOp::Equal,
+                            src1: switch_val.clone(),
+                            src2: case_val,
+                            dst: cond.clone(),
+                        });
+                        instructions.push(Instruction::JumpIfNotZero {
+                            condition: cond,
+                            target: case_label,
+                        });
+                    }
+                    parser::SwitchIntType::Default => {
+                        default_label = Some(Identifier(format!("switch.{switch_num}_default")));
+                    }
+                }
+            }
+            
+            // Jump to default if it exists, otherwise jump to end
+            // cases following default will execute this is expected
+            if let Some(default) = default_label {
+                instructions.push(Instruction::Jump { target: default });
+            } else {
+                instructions.push(Instruction::Jump { target: end_label.clone() });
+            }
+
+            tackify_stmt(stmt, instructions, name_generator);
+            instructions.push(Instruction::Label(end_label));
+        }
+        Stmt::Case(_, stmt, label, _) | Stmt::Default(stmt, label, _) => {
+            instructions.push(Instruction::Label(label.clone()));
+            tackify_stmt(stmt, instructions, name_generator);
         }
     }
 }

@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     Identifier(String),
-    ConstantInt(i64),
+    ConstantInt(i32),
     IntKeyword,              // int
     VoidKeyword,             // void
     ReturnKeyword,           // return
@@ -60,6 +60,9 @@ pub enum Token {
     ForKeyword,              // for
     BreakKeyword,            // break
     ContinueKeyword,         // continue
+    SwitchKeyword,           // switch
+    DefaultKeyword,          // default
+    CaseKeyword,             // case
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
@@ -125,6 +128,9 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^for\b", Token::ForKeyword),
     (r"^break\b", Token::BreakKeyword),
     (r"^continue\b", Token::ContinueKeyword),
+    (r"^switch\b", Token::SwitchKeyword),
+    (r"^default\b", Token::DefaultKeyword),
+    (r"^case\b", Token::CaseKeyword),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
