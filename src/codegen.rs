@@ -20,10 +20,10 @@ pub enum Reg {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operand {
-    Imm(i64),
+    Imm(i32),
     Reg(Reg),
     Pseudo(String),
-    Stack(i64),
+    Stack(i32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,8 +56,8 @@ pub enum Instruction {
     JmpCC { code: CondCode, label: Identifier },
     SetCC { code: CondCode, op: Operand },
     Label(Identifier),
-    AllocateStack(i64),
-    DeallocateStack(i64),
+    AllocateStack(i32),
+    DeallocateStack(i32),
     Push(Operand),
     Call(Identifier),
     Ret,
@@ -121,7 +121,7 @@ fn convert_function_call(fun_name: &Identifier, args: &Vec<Val>, dst: &Val) -> V
     }
     instructions.push(Instruction::Call(fun_name.clone()));
 
-    let bytes_to_remove = 8 * stack_args.len() as i64 + stack_padding;
+    let bytes_to_remove = 8 * stack_args.len() as i32 + stack_padding;
     if bytes_to_remove > 0 {
         instructions.push(Instruction::DeallocateStack(bytes_to_remove));
     }
@@ -321,7 +321,7 @@ fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
 
 fn convert_val(ast: &tacky::Val) -> Operand {
     match ast {
-        tacky::Val::Constant(value) => Operand::Imm(*value as i64),
+        tacky::Val::Constant(value) => Operand::Imm(*value),
         tacky::Val::Var(s) => Operand::Pseudo(s.clone()),
     }
 }
@@ -336,7 +336,7 @@ fn convert_function(ast: &tacky::FunctionDefinition) -> FunctionDefinition {
     }
 
     for (i, Identifier(param)) in params.iter().skip(6).enumerate() {
-        let stack_offset = 16 + (i as i64 * 8); // +16 for saved RBP and return address
+        let stack_offset = 16 + (i as i32 * 8); // +16 for saved RBP and return address
         instructions.push(Instruction::Mov {
             src: Operand::Stack(stack_offset),
             dst: Operand::Pseudo(param.clone()),
@@ -367,8 +367,8 @@ pub fn generate(ast: &tacky::Program) -> Program {
 }
 
 struct StackMapping {
-    stack_mapping: std::collections::HashMap<String, i64>,
-    offset: i64,
+    stack_mapping: std::collections::HashMap<String, i32>,
+    offset: i32,
 }
 
 impl StackMapping {
@@ -400,7 +400,7 @@ impl StackMapping {
     }
 }
 
-pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i64> {
+pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
     let mut offsets = HashMap::new();
     for FunctionDefinition { name, body } in program.functions.iter_mut() {
         let mut stack_mapping = StackMapping::new();
@@ -438,7 +438,7 @@ pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i64> {
     offsets
 }
 
-pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i64>) {
+pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
     for FunctionDefinition { name, body } in program.functions.iter_mut() {
         let mut stack_offset = stack_offsets[name];
         // stack_offset is negative, so convert to positive, round up to 16, then negate for AllocateStack
@@ -554,7 +554,7 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i64>) 
 
 /// Coalesces consecutive labels by mapping subsequent labels to the first one
 pub fn coalesce_labels(program: &mut Program) {
-    for FunctionDefinition{name, body} in program.functions.iter_mut() {
+    for FunctionDefinition{name: _name, body} in program.functions.iter_mut() {
         let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut new_ins = Vec::new();
         let mut current_label: Option<String> = None;

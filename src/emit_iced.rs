@@ -273,7 +273,7 @@ fn gpr64_reg(reg: &Reg) -> AsmRegister64 {
     }
 }
 
-fn mem_rbp(offset: i64) -> AsmMemoryOperand {
+fn mem_rbp(offset: i32) -> AsmMemoryOperand {
     if offset >= 0 {
         dword_ptr(gpr64::rbp + offset)
     } else {
@@ -291,11 +291,11 @@ fn emit_instruction(
 ) -> Result<(), IcedError> {
     match ins {
         Instruction::Mov { src, dst } => match (src, dst) {
-            (Operand::Imm(v), Operand::Reg(r)) => a.mov(gpr32(r), *v as i32)?,
+            (Operand::Imm(v), Operand::Reg(r)) => a.mov(gpr32(r), *v)?,
             (Operand::Reg(s), Operand::Reg(d)) => a.mov(gpr32(d), gpr32(s))?,
             (Operand::Reg(s), Operand::Stack(off)) => a.mov(mem_rbp(*off), gpr32(s))?,
             (Operand::Stack(off), Operand::Reg(d)) => a.mov(gpr32(d), mem_rbp(*off))?,
-            (Operand::Imm(v), Operand::Stack(off)) => a.mov(mem_rbp(*off), *v as i32)?,
+            (Operand::Imm(v), Operand::Stack(off)) => a.mov(mem_rbp(*off), *v)?,
             _ => unreachable!("unsupported mov combination"),
         },
         Instruction::Unary { op, dst } => match op {
@@ -313,69 +313,69 @@ fn emit_instruction(
         Instruction::Binary { op, src, dst } => match op {
             BinaryOp::Add => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.add(gpr32(d), gpr32(s))?,
-                (Operand::Imm(v), Operand::Reg(d)) => a.add(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.add(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.add(mem_rbp(*off), gpr32(s))?,
-                (Operand::Imm(v), Operand::Stack(off)) => a.add(mem_rbp(*off), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.add(mem_rbp(*off), *v)?,
                 _ => unimplemented!(),
             },
             BinaryOp::Sub => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.sub(gpr32(d), gpr32(s))?,
-                (Operand::Imm(v), Operand::Reg(d)) => a.sub(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.sub(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.sub(mem_rbp(*off), gpr32(s))?,
-                (Operand::Imm(v), Operand::Stack(off)) => a.sub(mem_rbp(*off), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.sub(mem_rbp(*off), *v)?,
                 _ => unimplemented!(),
             },
             BinaryOp::Mult => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.imul_2(gpr32(d), gpr32(s))?,
-                (Operand::Imm(v), Operand::Reg(d)) => a.imul_3(gpr32(d), gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.imul_3(gpr32(d), gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.imul_2(gpr32(s), mem_rbp(*off))?,
                 (Operand::Stack(off), Operand::Reg(d)) => a.imul_2(gpr32(d), mem_rbp(*off))?,
                 _ => unimplemented!("Mult {:?}, {:?}", src, dst),
             },
             BinaryOp::BitAnd => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.and(gpr32(d), gpr32(s))?,
-                (Operand::Imm(v), Operand::Reg(d)) => a.and(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.and(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.and(mem_rbp(*off), gpr32(s))?,
-                (Operand::Imm(v), Operand::Stack(off)) => a.and(mem_rbp(*off), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.and(mem_rbp(*off), *v)?,
                 _ => unimplemented!(),
             },
             BinaryOp::BitOr => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.or(gpr32(d), gpr32(s))?,
-                (Operand::Imm(v), Operand::Reg(d)) => a.or(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.or(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.or(mem_rbp(*off), gpr32(s))?,
-                (Operand::Imm(v), Operand::Stack(off)) => a.or(mem_rbp(*off), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.or(mem_rbp(*off), *v)?,
                 _ => unimplemented!(),
             },
             BinaryOp::BitXOr => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.xor(gpr32(d), gpr32(s))?,
-                (Operand::Imm(v), Operand::Reg(d)) => a.xor(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.xor(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.xor(mem_rbp(*off), gpr32(s))?,
-                (Operand::Imm(v), Operand::Stack(off)) => a.xor(mem_rbp(*off), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.xor(mem_rbp(*off), *v)?,
                 _ => unimplemented!(),
             },
             BinaryOp::BitShl => match (src, dst) {
-                (Operand::Imm(v), Operand::Reg(d)) => a.shl(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.shl(gpr32(d), *v)?,
                 (Operand::Reg(Reg::CX), Operand::Reg(d)) => a.shl(gpr32(d), gpr8::cl)?,
-                (Operand::Imm(v), Operand::Stack(off)) => a.shl(mem_rbp(*off), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.shl(mem_rbp(*off), *v)?,
                 (Operand::Reg(Reg::CX), Operand::Stack(off)) => a.shl(mem_rbp(*off), gpr8::cl)?,
                 _ => unimplemented!(),
             },
             BinaryOp::BitSar => match (src, dst) {
-                (Operand::Imm(v), Operand::Reg(d)) => a.sar(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d)) => a.sar(gpr32(d), *v)?,
                 (Operand::Reg(Reg::CX), Operand::Reg(d)) => a.sar(gpr32(d), cl)?,
-                (Operand::Imm(v), Operand::Stack(off)) => a.sar(mem_rbp(*off), *v as i32)?,
+                (Operand::Imm(v), Operand::Stack(off)) => a.sar(mem_rbp(*off), *v)?,
                 (Operand::Reg(Reg::CX), Operand::Stack(off)) => a.sar(mem_rbp(*off), gpr8::cl)?,
                 _ => unimplemented!(),
             },
         },
         Instruction::Cmp { v1, v2 } => match (v1, v2) {
             (Operand::Reg(r1), Operand::Reg(r2)) => a.cmp(gpr32(r2), gpr32(r1))?,
-            (Operand::Reg(r1), Operand::Imm(v)) => a.cmp(gpr32(r1), *v as i32)?,
+            (Operand::Reg(r1), Operand::Imm(v)) => a.cmp(gpr32(r1), *v)?,
             (Operand::Reg(r1), Operand::Stack(off)) => a.cmp(mem_rbp(*off), gpr32(r1))?,
             (Operand::Stack(off), Operand::Reg(r)) => a.cmp(gpr32(r), mem_rbp(*off))?,
-            (Operand::Stack(o1), Operand::Imm(v)) => a.cmp(mem_rbp(*o1), *v as i32)?,
-            (Operand::Imm(v), Operand::Reg(r)) => a.cmp(gpr32(r), *v as i32)?,
-            (Operand::Imm(v), Operand::Stack(off)) => a.cmp(mem_rbp(*off), *v as i32)?,
+            (Operand::Stack(o1), Operand::Imm(v)) => a.cmp(mem_rbp(*o1), *v)?,
+            (Operand::Imm(v), Operand::Reg(r)) => a.cmp(gpr32(r), *v)?,
+            (Operand::Imm(v), Operand::Stack(off)) => a.cmp(mem_rbp(*off), *v)?,
             _ => unimplemented!(),
         },
         Instruction::Cdq => {
@@ -427,7 +427,7 @@ fn emit_instruction(
         }
         Instruction::AllocateStack(off) => {
             if *off != 0 {
-                a.sub(gpr64::rsp, *off as i32)?;
+                a.sub(gpr64::rsp, *off)?;
             }
         }
         Instruction::Ret => {
@@ -436,10 +436,10 @@ fn emit_instruction(
             a.ret()?;
         },
         Instruction::DeallocateStack(off)  => {
-            a.add(gpr64::rsp, *off as i32)?;
+            a.add(gpr64::rsp, *off)?;
         }
         Instruction::Push(op) => match op{
-            Operand::Imm(c) => a.push(*c as i32)?,
+            Operand::Imm(c) => a.push(*c)?,
             Operand::Reg(reg) => a.push(gpr64_reg(reg))?,
             Operand::Stack(off) => a.push(qword_ptr(gpr64::rbp - (-*off)))?,
             Operand::Pseudo(_) => unreachable!(),
