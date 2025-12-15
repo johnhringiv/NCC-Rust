@@ -12,7 +12,6 @@
 //!   but generate distinct AST nodes
 //!
 use crate::lexer::{Span, SpannedToken, Token};
-use crate::pretty::{ItfDisplay, Node, cyan, green, simple_node, yellow};
 use colored::*;
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
@@ -80,6 +79,7 @@ pub enum Expr {
     PostFixOp(IncDec, Box<Expr>, Span),
     PreFixOp(IncDec, Box<Expr>, Span),
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    FunctionCall(Identifier, Vec<Expr>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -183,18 +183,32 @@ pub enum Stmt {
 
 #[derive(Debug, Clone)]
 pub enum ForInit {
-    InitDecl(Declaration),
+    InitDecl(VarDeclaration),
     InitExp(Option<Expr>),
 }
 
 #[derive(PartialEq, Clone)]
-pub struct Declaration {
+pub struct VarDeclaration {
     pub name: Identifier,
     pub init: Option<Expr>,
     pub span: Span,
 }
 
-impl fmt::Debug for Declaration {
+#[derive(Debug, Clone)]
+pub struct FunDeclaration {
+    pub name: Identifier,
+    pub params: Vec<Identifier>,
+    pub body: Option<Block>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum Declaration {
+    VarDeclaration(VarDeclaration),
+    FunDeclaration(FunDeclaration),
+}
+
+impl fmt::Debug for VarDeclaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("Declaration");
         debug_struct.field("name", &self.name);
@@ -207,19 +221,24 @@ impl fmt::Debug for Declaration {
 
 pub type Block = Vec<BlockItem>;
 
+fn parse_block(tokens: &mut VecDeque<SpannedToken>) -> Result<Block, SyntaxError> {
+    expect(&Token::OpenBrace, tokens)?;
+    let mut body = vec![];
+    while tokens.front().map(|t| &t.token) != Some(&Token::CloseBrace) {
+        body.push(parse_block_item(tokens)?);
+    }
+    expect(&Token::CloseBrace, tokens)?;
+    Ok(body)
+}
+
 #[derive(Debug, Clone)]
 pub enum BlockItem {
     Statement(SpannedStmt),
     Declaration(Declaration),
 }
 
-pub struct Function {
-    pub name: Identifier,
-    pub body: Block,
-}
-
 pub struct Program {
-    pub function: Function,
+    pub functions: Vec<FunDeclaration>,
 }
 
 pub struct SyntaxError {
@@ -233,27 +252,30 @@ impl SyntaxError {
             .as_ref()
             .map(|t| format!("{}", t).bold().to_string())
             .unwrap_or("end of file".to_string());
-        let found_str = found
-            .as_ref()
-            .map(|t| format!("{}", t.token).bold().to_string())
-            .unwrap_or("end of file".bold().to_string());
         let span = found.as_ref().map(|t| t.span);
 
         SyntaxError {
-            message: format!("expected {}, found {}", expected_str, found_str),
+            message: format!(
+                "expected {}, found {}",
+                expected_str,
+                SyntaxError::get_found_str(&found)
+            ),
             span,
         }
     }
 
-    pub fn expression(found: Option<SpannedToken>) -> Self {
-        let found_str = found
+    fn get_found_str(found: &Option<SpannedToken>) -> String {
+        found
             .as_ref()
             .map(|t| format!("{}", t.token).bold().to_string())
-            .unwrap_or("end of file".bold().to_string());
+            .unwrap_or_else(|| "end of file".bold().to_string())
+    }
+
+    pub fn expression(found: Option<SpannedToken>) -> Self {
         let span = found.as_ref().map(|t| t.span);
 
         SyntaxError {
-            message: format!("expected an expression, found {}", found_str),
+            message: format!("expected an expression, found {}", SyntaxError::get_found_str(&found)),
             span,
         }
     }
@@ -357,7 +379,18 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             }
             Token::Identifier(name) => {
                 tokens.pop_front();
-                Ok(Expr::Var(Identifier(name.clone()), spanned.span))
+                if let Some(tmp) = tokens.front().cloned() {
+                    if tmp.token == Token::OpenParen {
+                        tokens.pop_front();
+                        // parse the function call
+                        let params = parse_function_args(tokens, &Some(spanned.span))?;
+                        Ok(Expr::FunctionCall(Identifier(name.clone()), params, spanned.span))
+                    } else {
+                        Ok(Expr::Var(Identifier(name.clone()), spanned.span))
+                    }
+                } else {
+                    Err(SyntaxError::expression(next_token))
+                }
             }
             _ => Err(SyntaxError::expression(next_token)),
         },
@@ -568,18 +601,10 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
                 })
             }
         }
-        Token::OpenBrace => {
-            let span = tokens.pop_front().unwrap().span;
-            let mut block = Vec::new();
-            while tokens.front().map(|t| &t.token) != Some(&Token::CloseBrace) {
-                block.push(parse_block_item(tokens)?);
-            }
-            expect(&Token::CloseBrace, tokens)?;
-            Ok(SpannedStmt {
-                stmt: Stmt::Compound(block),
-                span,
-            })
-        }
+        Token::OpenBrace => Ok(SpannedStmt {
+            stmt: Stmt::Compound(parse_block(tokens)?),
+            span: next_token.span,
+        }),
         Token::BreakKeyword => {
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Semicolon, tokens)?;
@@ -620,7 +645,15 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             let span = tokens.pop_front().unwrap().span;
             let err_span = expect(&Token::OpenParen, tokens)?;
             let init = if let Some(dec) = parse_declaration(tokens, &Some(err_span))? {
-                ForInit::InitDecl(dec)
+                match dec {
+                    Declaration::VarDeclaration(var) => ForInit::InitDecl(var),
+                    Declaration::FunDeclaration(_) => {
+                        return Err(SyntaxError::with_span(
+                            "function declaration not allowed in for init".to_string(),
+                            Some(err_span),
+                        ));
+                    }
+                }
             } else {
                 let init = parse_exp(tokens, 0).ok();
                 expect(&Token::Semicolon, tokens)?;
@@ -731,23 +764,37 @@ fn parse_declaration(
 ) -> Result<Option<Declaration>, SyntaxError> {
     if let Some(front) = tokens.front() {
         if front.token == Token::IntKeyword {
-            // decoration
-            let mut init = None;
             tokens.pop_front();
             let (name, span) = parse_identifier(tokens)?;
             if let Some(front) = tokens.front() {
-                if front.token == Token::Assignment {
+                if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) {
+                    // function declaration
                     tokens.pop_front();
-                    init = Some(parse_exp(tokens, 0)?);
+                    let params = parse_function_params(tokens, &Some(span))?;
+
+                    let body = parse_function_body(tokens)?;
+
+                    Ok(Some(Declaration::FunDeclaration(FunDeclaration {
+                        name,
+                        params,
+                        body,
+                        span,
+                    })))
+                } else {
+                    let mut init = None;
+                    if front.token == Token::Assignment {
+                        tokens.pop_front();
+                        init = Some(parse_exp(tokens, 0)?);
+                    }
+                    expect(&Token::Semicolon, tokens)?;
+                    Ok(Some(Declaration::VarDeclaration(VarDeclaration { name, init, span })))
                 }
             } else {
-                return Err(SyntaxError::with_span(
+                Err(SyntaxError::with_span(
                     "EOF when parsing declaration".to_string(),
                     Some(span),
-                ));
+                ))
             }
-            expect(&Token::Semicolon, tokens)?;
-            Ok(Some(Declaration { name, init, span }))
         } else {
             Ok(None)
         }
@@ -759,225 +806,102 @@ fn parse_declaration(
     }
 }
 
-fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<Function, SyntaxError> {
-    expect(&Token::IntKeyword, tokens)?;
-    let (name, _span) = parse_identifier(tokens)?;
-    expect(&Token::OpenParen, tokens)?;
-    expect(&Token::VoidKeyword, tokens)?;
-    expect(&Token::CloseParen, tokens)?;
-    expect(&Token::OpenBrace, tokens)?;
-    let mut function_body = Vec::new();
-    while tokens.front().is_some() && tokens.front().unwrap().token != Token::CloseBrace {
-        let next_block = parse_block_item(tokens)?;
-        function_body.push(next_block);
+fn parse_arg_comma(tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
+    if let Some(next_token) = tokens.front().cloned()
+        && next_token.token == Token::Comma
+    {
+        tokens.pop_front();
+        if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+            return Err(SyntaxError::with_span(
+                "Trailing comma not allowed.".to_string(),
+                Some(next_token.span),
+            ));
+        }
     }
-    expect(&Token::CloseBrace, tokens)?;
+    Ok(())
+}
 
-    Ok(Function {
+fn parse_function_params(
+    tokens: &mut VecDeque<SpannedToken>,
+    err_span: &Option<Span>,
+) -> Result<Vec<Identifier>, SyntaxError> {
+    let mut params = vec![];
+    if let Some(front) = tokens.front().cloned() {
+        if front.token == Token::VoidKeyword {
+            tokens.pop_front();
+        } else {
+            loop {
+                if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                    break;
+                }
+                expect(&Token::IntKeyword, tokens)?;
+                let (name, _span) = parse_identifier(tokens)?;
+                params.push(name.clone());
+                parse_arg_comma(tokens)?;
+            }
+        }
+        expect(&Token::CloseParen, tokens)?;
+        Ok(params)
+    } else {
+        Err(SyntaxError::with_span(
+            "EOF when parsing function parameters".to_string(),
+            *err_span,
+        ))
+    }
+}
+
+fn parse_function_args(tokens: &mut VecDeque<SpannedToken>, err_span: &Option<Span>) -> Result<Vec<Expr>, SyntaxError> {
+    let mut params = vec![];
+    if let Some(front) = tokens.front().cloned() {
+        if front.token == Token::VoidKeyword {
+            tokens.pop_front();
+        } else {
+            loop {
+                if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                    break;
+                }
+                params.push(parse_exp(tokens, 0)?);
+                parse_arg_comma(tokens)?;
+            }
+        }
+        expect(&Token::CloseParen, tokens)?;
+        Ok(params)
+    } else {
+        Err(SyntaxError::with_span(
+            "EOF when parsing function parameters".to_string(),
+            *err_span,
+        ))
+    }
+}
+
+fn parse_function_body(tokens: &mut VecDeque<SpannedToken>) -> Result<Option<Block>, SyntaxError> {
+    if tokens.front().map(|t| &t.token) == Some(&Token::OpenBrace) {
+        Ok(Some(parse_block(tokens)?))
+    } else {
+        expect(&Token::Semicolon, tokens)?;
+        Ok(None)
+    }
+}
+
+fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<FunDeclaration, SyntaxError> {
+    expect(&Token::IntKeyword, tokens)?;
+    let (name, span) = parse_identifier(tokens)?;
+    expect(&Token::OpenParen, tokens)?;
+    let params = parse_function_params(tokens, &Some(span))?;
+    let body = parse_function_body(tokens)?;
+
+    Ok(FunDeclaration {
         name,
-        body: function_body,
+        params,
+        body,
+        span,
     })
 }
 
 pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, SyntaxError> {
-    let fun_def = parse_function_definition(tokens)?;
-    if tokens.is_empty() {
-        Ok(Program { function: fun_def })
-    } else {
-        Err(SyntaxError::new(None, tokens.front().cloned()))
+    let mut functions = vec![parse_function_definition(tokens)?];
+    while !tokens.is_empty() {
+        functions.push(parse_function_definition(tokens)?)
     }
-}
-
-// AST pretty printing
-simple_node!(UnaryOp);
-simple_node!(BinOp);
-simple_node!(AssignOp);
-simple_node!(IncDec);
-
-impl ItfDisplay for ForInit {
-    fn itf_node(&self) -> Node {
-        match self {
-            ForInit::InitDecl(decl) => decl.itf_node(),
-            ForInit::InitExp(opt_expr) => match opt_expr {
-                Some(expr) => expr.itf_node(),
-                None => Node::leaf(cyan("None")),
-            },
-        }
-    }
-}
-
-impl ItfDisplay for Identifier {
-    fn itf_node(&self) -> Node {
-        Node::leaf(green(format!("Identifier(\"{}\")", self.0)))
-    }
-}
-impl ItfDisplay for Expr {
-    fn itf_node(&self) -> Node {
-        match self {
-            Expr::Constant(c) => Node::leaf(yellow(format!("Constant({c})"))),
-            Expr::Var(id, _span) => id.itf_node(),
-            Expr::Unary(op, e) => Node::branch(cyan(format!("Unary ({op:?})")), vec![e.itf_node()]),
-            Expr::Binary(op, e1, e2) => {
-                Node::branch(cyan(format!("Binary ({op:?})")), vec![e1.itf_node(), e2.itf_node()])
-            }
-            Expr::Assignment(lhs, rhs, _span) => Node::branch(cyan("Assignment"), vec![lhs.itf_node(), rhs.itf_node()]),
-            Expr::CompoundAssignment(op, lhs, rhs, _span) => Node::branch(
-                cyan(format!("CompoundAssignment ({op:?})")),
-                vec![lhs.itf_node(), rhs.itf_node()],
-            ),
-            Expr::PostFixOp(op, e, _span) => Node::branch(cyan(format!("PostFix ({op:?})")), vec![e.itf_node()]),
-            Expr::PreFixOp(op, e, _span) => Node::branch(cyan(format!("PreFix ({op:?})")), vec![e.itf_node()]),
-            Expr::Conditional(condition, then_expr, else_expr) => Node::branch(
-                cyan("Conditional"),
-                vec![
-                    Node::branch("condition:", vec![condition.itf_node()]),
-                    Node::branch("then:", vec![then_expr.itf_node()]),
-                    Node::branch("else:", vec![else_expr.itf_node()]),
-                ],
-            ),
-        }
-    }
-}
-impl ItfDisplay for SpannedStmt {
-    fn itf_node(&self) -> Node {
-        self.stmt.itf_node()
-    }
-}
-
-impl ItfDisplay for Stmt {
-    fn itf_node(&self) -> Node {
-        match self {
-            Stmt::Return(expr) => Node::branch(cyan("Return"), vec![expr.itf_node()]),
-            Stmt::Expression(expr) => Node::branch(cyan("Expression"), vec![expr.itf_node()]),
-            Stmt::If(condition, then_stmt, else_stmt) => {
-                let mut children = vec![
-                    Node::branch("condition:", vec![condition.itf_node()]),
-                    Node::branch("then:", vec![then_stmt.stmt.itf_node()]),
-                ];
-                if let Some(else_s) = else_stmt.as_ref() {
-                    children.push(Node::branch("else:", vec![else_s.stmt.itf_node()]));
-                }
-                Node::branch(cyan("If"), children)
-            }
-            Stmt::Null => Node::leaf(cyan("Null")),
-            Stmt::Goto(label) => Node::branch(cyan("Goto"), vec![label.itf_node()]),
-            Stmt::Labeled(label, stmt) => Node::branch(cyan("Labeled"), vec![label.itf_node(), stmt.stmt.itf_node()]),
-            Stmt::Compound(block) => {
-                let children: Vec<Node> = block.iter().map(|item| item.itf_node()).collect();
-                Node::branch(cyan("Compound"), children)
-            }
-            Stmt::Break(..) => Node::leaf(cyan("Break")),
-            Stmt::Continue(..) => Node::leaf(cyan("Continue")),
-            Stmt::While(condition, body, _) => Node::branch(
-                cyan("While"),
-                vec![
-                    Node::branch("condition:", vec![condition.itf_node()]),
-                    Node::branch("body:", vec![body.stmt.itf_node()]),
-                ],
-            ),
-            Stmt::DoWhile(body, condition, _) => Node::branch(
-                cyan("DoWhile"),
-                vec![
-                    Node::branch("body:", vec![body.stmt.itf_node()]),
-                    Node::branch("condition:", vec![condition.itf_node()]),
-                ],
-            ),
-            Stmt::For(init, condition, post, body, _) => {
-                let mut children = vec![Node::branch("init:", vec![init.itf_node()])];
-                if let Some(cond) = condition {
-                    children.push(Node::branch("condition:", vec![cond.itf_node()]));
-                }
-                if let Some(post_expr) = post {
-                    children.push(Node::branch("post:", vec![post_expr.itf_node()]));
-                }
-                children.push(Node::branch("body:", vec![body.stmt.itf_node()]));
-                Node::branch(cyan("For"), children)
-            }
-            Stmt::Switch(expr, body, ..) => Node::branch(
-                cyan("Switch"),
-                vec![
-                    Node::branch("expr:", vec![expr.itf_node()]),
-                    Node::branch("body:", vec![body.stmt.itf_node()]),
-                ],
-            ),
-            Stmt::Case(expr, stmt, _) => Node::branch(
-                cyan("Case"),
-                vec![
-                    Node::branch("expr:", vec![expr.itf_node()]),
-                    Node::branch("stmt:", vec![stmt.stmt.itf_node()]),
-                ],
-            ),
-            Stmt::Default(stmt, ..) => Node::branch(cyan("Default"), vec![stmt.stmt.itf_node()]),
-        }
-    }
-}
-impl ItfDisplay for Declaration {
-    fn itf_node(&self) -> Node {
-        let name_node = Node::leaf(format!("name: {}", self.name.itf_node().text));
-        match &self.init {
-            Some(init_expr) => {
-                let init_node = Node::branch("init:", vec![init_expr.itf_node()]);
-                Node::branch(cyan("Declaration"), vec![name_node, init_node])
-            }
-            None => Node::branch(cyan("Declaration"), vec![name_node]),
-        }
-    }
-}
-impl ItfDisplay for BlockItem {
-    fn itf_node(&self) -> Node {
-        match self {
-            BlockItem::Statement(stmt) => stmt.itf_node(),
-            BlockItem::Declaration(decl) => decl.itf_node(),
-        }
-    }
-}
-impl ItfDisplay for Function {
-    fn itf_node(&self) -> Node {
-        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
-        let mut body_node = self.body.itf_node();
-        body_node.text = format!("body: {}", body_node.text);
-        Node::branch(cyan("Function"), vec![name_line, body_node])
-    }
-}
-impl ItfDisplay for Program {
-    fn itf_node(&self) -> Node {
-        Node::branch(cyan("Program"), vec![self.function.itf_node()])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::test_utils::{Stage, get_sandler_dirs, run_tests};
-
-    #[test]
-    fn test_conditional_valid() {
-        let dirs = vec!["c_programs/conditional/valid/".to_string()];
-        let (passed, failed) = run_tests(&dirs, true, &Stage::Parse);
-        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
-
-    #[test]
-    fn test_conditional_invalid() {
-        let dirs = vec!["c_programs/conditional/invalid_parse/".to_string()];
-        let (passed, failed) = run_tests(&dirs, false, &Stage::Parse);
-        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
-
-    #[test]
-    fn sandler_tests_valid() {
-        let dirs = get_sandler_dirs(true, &Stage::Parse);
-        let (passed, failed) = run_tests(&dirs, true, &Stage::Parse);
-        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
-
-    #[test]
-    fn sandler_tests_invalid() {
-        let dirs = get_sandler_dirs(false, &Stage::Parse);
-        let (passed, failed) = run_tests(&dirs, false, &Stage::Parse);
-        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
+    Ok(Program { functions })
 }

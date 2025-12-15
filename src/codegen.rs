@@ -1,24 +1,28 @@
 use crate::parser;
 use crate::parser::Identifier;
-use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::tacky;
-use crate::tacky::BinOp;
+use crate::tacky::{BinOp, Val};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {
     AX,
+    CX,
     DX,
+    DI,
+    SI,
+    R8,
+    R9,
     R10,
     R11,
-    CX,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operand {
-    Imm(i64),
+    Imm(i32),
     Reg(Reg),
     Pseudo(String),
-    Stack(i64),
+    Stack(i32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,7 +55,10 @@ pub enum Instruction {
     JmpCC { code: CondCode, label: Identifier },
     SetCC { code: CondCode, op: Operand },
     Label(Identifier),
-    AllocateStack(i64),
+    AllocateStack(i32),
+    DeallocateStack(i32),
+    Push(Operand),
+    Call(Identifier),
     Ret,
 }
 
@@ -86,7 +93,52 @@ pub struct FunctionDefinition {
 
 #[derive(Debug, PartialEq)]
 pub struct Program {
-    pub function: FunctionDefinition,
+    pub functions: Vec<FunctionDefinition>,
+}
+
+fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val) -> Vec<Instruction> {
+    let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
+    let (register_args, stack_args) = args.split_at(args.len().min(6));
+    let mut instructions = Vec::new();
+    let stack_padding = if stack_args.len() % 2 != 0 {
+        instructions.push(Instruction::AllocateStack(8));
+        8
+    } else {
+        0
+    };
+    for (tacky_arg, reg) in register_args.iter().zip(arg_registers) {
+        let assembly_arg = convert_val(tacky_arg);
+        instructions.push(Instruction::Mov {
+            src: assembly_arg,
+            dst: Operand::Reg(reg),
+        });
+    }
+    for tacky_arg in stack_args.iter().rev() {
+        let assembly_arg = convert_val(tacky_arg);
+        match assembly_arg {
+            Operand::Imm(_) | Operand::Reg(_) => instructions.push(Instruction::Push(assembly_arg)),
+            Operand::Stack(_) | Operand::Pseudo(_) => {
+                instructions.push(Instruction::Mov {
+                    src: assembly_arg,
+                    dst: Operand::Reg(Reg::AX),
+                });
+                instructions.push(Instruction::Push(Operand::Reg(Reg::AX)))
+            }
+        }
+    }
+    instructions.push(Instruction::Call(fun_name.clone()));
+
+    let bytes_to_remove = 8 * stack_args.len() as i32 + stack_padding;
+    if bytes_to_remove > 0 {
+        instructions.push(Instruction::DeallocateStack(bytes_to_remove));
+    }
+    let assembly_dst = convert_val(dst);
+    instructions.push(Instruction::Mov {
+        src: Operand::Reg(Reg::AX),
+        dst: assembly_dst,
+    });
+
+    instructions
 }
 
 fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
@@ -246,6 +298,7 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
             let dst = convert_val(dst);
             vec![Instruction::Mov { src, dst }]
         }
+        tacky::Instruction::FunCall { fun_name, args, dst } => convert_function_call(fun_name, args, dst),
     }
 }
 
@@ -278,35 +331,55 @@ fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
 
 fn convert_val(ast: &tacky::Val) -> Operand {
     match ast {
-        tacky::Val::Constant(value) => Operand::Imm(*value as i64),
+        tacky::Val::Constant(value) => Operand::Imm(*value),
         tacky::Val::Var(s) => Operand::Pseudo(s.clone()),
     }
 }
 
 fn convert_function(ast: &tacky::FunctionDefinition) -> FunctionDefinition {
-    let tacky::FunctionDefinition { name, body } = ast;
+    let tacky::FunctionDefinition { name, params, body } = ast;
+    let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
+    let mut instructions = vec![];
+
+    for (Identifier(param), reg) in params.iter().zip(arg_registers) {
+        instructions.push(Instruction::Mov {
+            src: Operand::Reg(reg),
+            dst: Operand::Pseudo(param.clone()),
+        });
+    }
+
+    for (i, Identifier(param)) in params.iter().skip(6).enumerate() {
+        let stack_offset = 16 + (i as i32 * 8); // +16 for saved RBP and return address
+        instructions.push(Instruction::Mov {
+            src: Operand::Stack(stack_offset),
+            dst: Operand::Pseudo(param.clone()),
+        });
+    }
+
+    instructions.extend(body.iter().flat_map(convert_instruction));
     {
         FunctionDefinition {
             name: name.to_string(),
-            body: body.iter().flat_map(convert_instruction).collect(),
+            body: instructions,
         }
     }
 }
 
 pub fn generate(ast: &tacky::Program) -> Program {
-    let tacky::Program { function } = ast;
-    let mut p = Program {
-        function: convert_function(function),
-    };
-    let stack_offset = replace_pseudo_registers(&mut p);
-    fix_invalid(&mut p, stack_offset);
+    let mut functions = vec![];
+    for function in ast.functions.as_slice() {
+        functions.push(convert_function(function))
+    }
+    let mut p = Program { functions };
+    let stack_offsets = replace_pseudo_registers(&mut p);
+    fix_invalid(&mut p, &stack_offsets);
     coalesce_labels(&mut p);
     p
 }
 
 struct StackMapping {
-    stack_mapping: std::collections::HashMap<String, i64>,
-    offset: i64,
+    stack_mapping: std::collections::HashMap<String, i32>,
+    offset: i32,
 }
 
 impl StackMapping {
@@ -338,251 +411,195 @@ impl StackMapping {
     }
 }
 
-pub fn replace_pseudo_registers(program: &mut Program) -> i64 {
-    let Program {
-        function: FunctionDefinition { name: _, body },
-    } = program;
-    let mut stack_mapping = StackMapping::new();
+pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
+    let mut offsets = HashMap::new();
+    for FunctionDefinition { name, body } in program.functions.iter_mut() {
+        let mut stack_mapping = StackMapping::new();
 
-    for ins in body.iter_mut() {
-        match ins {
-            Instruction::Mov { src, dst } => {
-                *src = stack_mapping.replace_pseudo(src);
-                *dst = stack_mapping.replace_pseudo(dst);
+        for ins in body.iter_mut() {
+            match ins {
+                Instruction::Mov { src, dst } | Instruction::Binary { op: _, src, dst } => {
+                    *src = stack_mapping.replace_pseudo(src);
+                    *dst = stack_mapping.replace_pseudo(dst);
+                }
+                Instruction::Unary { op: _, dst } => *dst = stack_mapping.replace_pseudo(dst),
+                Instruction::Idiv(src) => {
+                    *src = stack_mapping.replace_pseudo(src);
+                }
+                Instruction::Cmp { v1, v2 } => {
+                    *v1 = stack_mapping.replace_pseudo(v1);
+                    *v2 = stack_mapping.replace_pseudo(v2);
+                }
+                Instruction::SetCC { op, .. } | Instruction::Push(op) => {
+                    *op = stack_mapping.replace_pseudo(op);
+                }
+                _ => {}
             }
-            Instruction::Unary { op: _, dst } => *dst = stack_mapping.replace_pseudo(dst),
-            Instruction::Binary { op: _, src, dst } => {
-                *src = stack_mapping.replace_pseudo(src);
-                *dst = stack_mapping.replace_pseudo(dst);
-            }
-            Instruction::Idiv(src) => {
-                *src = stack_mapping.replace_pseudo(src);
-            }
-            Instruction::Cmp { v1, v2 } => {
-                *v1 = stack_mapping.replace_pseudo(v1);
-                *v2 = stack_mapping.replace_pseudo(v2);
-            }
-            Instruction::SetCC { op, .. } => {
-                *op = stack_mapping.replace_pseudo(op);
-            }
-            _ => {}
         }
+        offsets.insert(name.to_string(), stack_mapping.offset);
     }
-    stack_mapping.offset
+    offsets
 }
 
-pub fn fix_invalid(program: &mut Program, stack_offset: i64) {
-    let Program {
-        function: FunctionDefinition { name: _, body },
-    } = program;
-    let mut new_ins = vec![Instruction::AllocateStack(stack_offset)];
-    for ins in body.iter() {
-        match ins {
-            Instruction::Mov {
-                src: Operand::Stack(src),
-                dst: Operand::Stack(dst),
-            } => {
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Stack(*src),
-                    dst: Operand::Reg(Reg::R10),
-                });
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Reg(Reg::R10),
-                    dst: Operand::Stack(*dst),
-                });
-            }
-            Instruction::Idiv(Operand::Imm(c)) => {
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Imm(*c),
-                    dst: Operand::Reg(Reg::R10),
-                });
-                new_ins.push(Instruction::Idiv(Operand::Reg(Reg::R10)));
-            }
-            Instruction::Binary {
-                op: BinaryOp::Mult,
-                src,
-                dst: Operand::Stack(dst),
-            } => {
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Stack(*dst),
-                    dst: Operand::Reg(Reg::R11),
-                });
-                new_ins.push(Instruction::Binary {
-                    op: BinaryOp::Mult,
-                    src: src.clone(),
-                    dst: Operand::Reg(Reg::R11),
-                });
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Reg(Reg::R11),
-                    dst: Operand::Stack(*dst),
-                });
-            }
-            Instruction::Binary {
-                op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr),
-                src: Operand::Stack(src),
-                dst: Operand::Stack(dst),
-            } => {
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Stack(*src),
-                    dst: Operand::Reg(Reg::R10),
-                });
-                new_ins.push(Instruction::Binary {
-                    op: op.clone(),
-                    src: Operand::Reg(Reg::R10),
-                    dst: Operand::Stack(*dst),
-                });
-            }
-            Instruction::Binary {
-                op: op @ (BinaryOp::BitShl | BinaryOp::BitSar),
-                src: Operand::Stack(src),
-                dst,
-            } => {
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Stack(*src),
-                    dst: Operand::Reg(Reg::CX),
-                });
-                new_ins.push(Instruction::Binary {
-                    op: op.clone(),
-                    src: Operand::Reg(Reg::CX),
-                    dst: dst.clone(),
-                });
-            }
-            Instruction::Cmp {
-                v1: Operand::Stack(v1),
-                v2: Operand::Stack(v2),
-            } => {
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Stack(*v1),
-                    dst: Operand::Reg(Reg::R10),
-                });
-                new_ins.push(Instruction::Cmp {
-                    v1: Operand::Reg(Reg::R10),
-                    v2: Operand::Stack(*v2),
-                });
-            }
-            Instruction::Cmp {
-                v1,
-                v2: Operand::Imm(c),
-            } => {
-                new_ins.push(Instruction::Mov {
-                    src: Operand::Imm(*c),
-                    dst: Operand::Reg(Reg::R11),
-                });
-                new_ins.push(Instruction::Cmp {
-                    v1: v1.clone(),
-                    v2: Operand::Reg(Reg::R11),
-                });
-            }
-            _ => new_ins.push(ins.clone()),
+pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
+    for FunctionDefinition { name, body } in program.functions.iter_mut() {
+        // stack_offset is negative, so convert to positive, round up to 16, then negate for AllocateStack
+        let mut positive_offset = -stack_offsets[name];
+        if positive_offset % 16 != 0 {
+            positive_offset = ((positive_offset / 16) + 1) * 16;
         }
+        let mut new_ins = vec![Instruction::AllocateStack(positive_offset)];
+        for ins in body.iter() {
+            match ins {
+                Instruction::Mov {
+                    src: Operand::Stack(src),
+                    dst: Operand::Stack(dst),
+                } => {
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Stack(*src),
+                        dst: Operand::Reg(Reg::R10),
+                    });
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Reg(Reg::R10),
+                        dst: Operand::Stack(*dst),
+                    });
+                }
+                Instruction::Idiv(Operand::Imm(c)) => {
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Imm(*c),
+                        dst: Operand::Reg(Reg::R10),
+                    });
+                    new_ins.push(Instruction::Idiv(Operand::Reg(Reg::R10)));
+                }
+                Instruction::Binary {
+                    op: BinaryOp::Mult,
+                    src,
+                    dst: Operand::Stack(dst),
+                } => {
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Stack(*dst),
+                        dst: Operand::Reg(Reg::R11),
+                    });
+                    new_ins.push(Instruction::Binary {
+                        op: BinaryOp::Mult,
+                        src: src.clone(),
+                        dst: Operand::Reg(Reg::R11),
+                    });
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Reg(Reg::R11),
+                        dst: Operand::Stack(*dst),
+                    });
+                }
+                Instruction::Binary {
+                    op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr),
+                    src: Operand::Stack(src),
+                    dst: Operand::Stack(dst),
+                } => {
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Stack(*src),
+                        dst: Operand::Reg(Reg::R10),
+                    });
+                    new_ins.push(Instruction::Binary {
+                        op: op.clone(),
+                        src: Operand::Reg(Reg::R10),
+                        dst: Operand::Stack(*dst),
+                    });
+                }
+                Instruction::Binary {
+                    op: op @ (BinaryOp::BitShl | BinaryOp::BitSar),
+                    src: Operand::Stack(src),
+                    dst,
+                } => {
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Stack(*src),
+                        dst: Operand::Reg(Reg::CX),
+                    });
+                    new_ins.push(Instruction::Binary {
+                        op: op.clone(),
+                        src: Operand::Reg(Reg::CX),
+                        dst: dst.clone(),
+                    });
+                }
+                Instruction::Cmp {
+                    v1: Operand::Stack(v1),
+                    v2: Operand::Stack(v2),
+                } => {
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Stack(*v1),
+                        dst: Operand::Reg(Reg::R10),
+                    });
+                    new_ins.push(Instruction::Cmp {
+                        v1: Operand::Reg(Reg::R10),
+                        v2: Operand::Stack(*v2),
+                    });
+                }
+                Instruction::Cmp {
+                    v1,
+                    v2: Operand::Imm(c),
+                } => {
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Imm(*c),
+                        dst: Operand::Reg(Reg::R11),
+                    });
+                    new_ins.push(Instruction::Cmp {
+                        v1: v1.clone(),
+                        v2: Operand::Reg(Reg::R11),
+                    });
+                }
+                _ => new_ins.push(ins.clone()),
+            }
+        }
+        *body = new_ins;
     }
-    *body = new_ins;
 }
 
 /// Coalesces consecutive labels by mapping subsequent labels to the first one
 pub fn coalesce_labels(program: &mut Program) {
-    let Program {
-        function: FunctionDefinition { name: _, body },
-    } = program;
-
-    let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut new_ins = Vec::new();
-    let mut current_label: Option<String> = None;
-
-    // First pass: build label mapping
-    for ins in body.iter() {
-        match ins {
-            Instruction::Label(Identifier(label)) => {
-                if let Some(first_label) = &current_label {
-                    // Map this label to the first label in the sequence
-                    // Do not push to new_ins
-                    label_map.insert(label.clone(), first_label.clone());
-                } else {
-                    // This is the first label in a potential sequence
-                    current_label = Some(label.clone());
+    for FunctionDefinition { name: _name, body } in program.functions.iter_mut() {
+        let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut new_ins = Vec::new();
+        let mut current_label: Option<String> = None;
+        // First pass: build label mapping
+        for ins in body.iter() {
+            match ins {
+                Instruction::Label(Identifier(label)) => {
+                    if let Some(first_label) = &current_label {
+                        // Map this label to the first label in the sequence
+                        // Do not push to new_ins
+                        label_map.insert(label.clone(), first_label.clone());
+                    } else {
+                        // This is the first label in a potential sequence
+                        current_label = Some(label.clone());
+                        new_ins.push(ins.clone());
+                    }
+                }
+                _ => {
+                    // Non-label instruction, reset the sequence
+                    current_label = None;
                     new_ins.push(ins.clone());
                 }
             }
-            _ => {
-                // Non-label instruction, reset the sequence
-                current_label = None;
-                new_ins.push(ins.clone());
-            }
         }
-    }
 
-    // Second pass: update jump targets
-    for ins in new_ins.iter_mut() {
-        match ins {
-            Instruction::Jmp(Identifier(label)) => {
-                if let Some(new_label) = label_map.get(label) {
-                    *label = new_label.clone();
+        // Second pass: update jump targets
+        for ins in new_ins.iter_mut() {
+            match ins {
+                Instruction::Jmp(Identifier(label)) => {
+                    if let Some(new_label) = label_map.get(label) {
+                        *label = new_label.clone();
+                    }
                 }
-            }
-            Instruction::JmpCC {
-                label: Identifier(label),
-                ..
-            } => {
-                if let Some(new_label) = label_map.get(label) {
-                    *label = new_label.clone();
+                Instruction::JmpCC {
+                    label: Identifier(label),
+                    ..
+                } => {
+                    if let Some(new_label) = label_map.get(label) {
+                        *label = new_label.clone();
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
-    }
-
-    *body = new_ins;
-}
-
-// Implementing ItfDisplay for the enums and structs
-simple_node!(Reg);
-simple_node!(UnaryOp);
-simple_node!(BinaryOp);
-simple_node!(CondCode);
-
-impl ItfDisplay for Operand {
-    fn itf_node(&self) -> Node {
-        match self {
-            Operand::Imm(i) => Node::branch(cyan("Imm"), vec![i.itf_node()]),
-            Operand::Reg(r) => Node::branch(cyan("Reg"), vec![r.itf_node()]),
-            Operand::Pseudo(s) => Node::branch(cyan("Pseudo"), vec![s.itf_node()]),
-            Operand::Stack(o) => Node::branch(cyan("Stack"), vec![o.itf_node()]),
-        }
-    }
-}
-
-impl ItfDisplay for Instruction {
-    fn itf_node(&self) -> Node {
-        match self {
-            Instruction::Mov { src, dst } => Node::branch(cyan("Mov"), vec![src.itf_node(), dst.itf_node()]),
-            Instruction::Unary { op, dst } => Node::branch(cyan("Unary"), vec![op.itf_node(), dst.itf_node()]),
-            Instruction::Binary { op, src, dst } => {
-                Node::branch(cyan("Binary"), vec![op.itf_node(), src.itf_node(), dst.itf_node()])
-            }
-            Instruction::Cmp { v1, v2 } => Node::branch(cyan("Cmp"), vec![v1.itf_node(), v2.itf_node()]),
-            Instruction::Idiv(op) => Node::branch(cyan("Idiv"), vec![op.itf_node()]),
-            Instruction::Cdq => Node::leaf(cyan("Cdq")),
-            Instruction::Jmp(label) => Node::branch(cyan("Jmp"), vec![label.itf_node()]),
-            Instruction::JmpCC { code, label } => Node::branch(cyan("JmpCC"), vec![code.itf_node(), label.itf_node()]),
-            Instruction::SetCC { code, op } => Node::branch(cyan("SetCC"), vec![code.itf_node(), op.itf_node()]),
-            Instruction::Label(l) => Node::branch(cyan("Label"), vec![l.itf_node()]),
-            Instruction::AllocateStack(off) => Node::branch(cyan("AllocateStack"), vec![off.itf_node()]),
-            Instruction::Ret => Node::leaf(cyan("Ret")),
-        }
-    }
-}
-
-impl ItfDisplay for FunctionDefinition {
-    fn itf_node(&self) -> Node {
-        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
-        let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
-        let body_node = Node::branch(cyan("body"), body_children);
-        Node::branch(cyan("FunctionDefinition"), vec![name_line, body_node])
-    }
-}
-
-impl ItfDisplay for Program {
-    fn itf_node(&self) -> Node {
-        Node::branch(cyan("Program"), vec![self.function.itf_node()])
+        *body = new_ins;
     }
 }

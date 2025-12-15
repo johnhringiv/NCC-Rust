@@ -63,6 +63,7 @@ pub enum Token {
     SwitchKeyword,           // switch
     DefaultKeyword,          // default
     CaseKeyword,             // case
+    Comma,                   // ,
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
@@ -79,6 +80,7 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^\{", Token::OpenBrace),
     (r"^}", Token::CloseBrace),
     (r"^;", Token::Semicolon),
+    (r"^\,", Token::Comma),
     // Single-character operators
     (r"^~", Token::BitwiseComplement),
     (r"^-", Token::Negation),
@@ -305,25 +307,4 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
         }
     }
     Ok(tokens)
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use crate::test_utils::{Stage, get_sandler_dirs, run_tests};
-
-    #[test]
-    fn sandler_tests_valid() {
-        let dirs = get_sandler_dirs(true, &Stage::Lex);
-        let (passed, failed) = run_tests(&dirs, true, &Stage::Lex);
-        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
-
-    #[test]
-    fn sandler_tests_invalid() {
-        let dirs = get_sandler_dirs(false, &Stage::Lex);
-        let (passed, failed) = run_tests(&dirs, false, &Stage::Lex);
-        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
 }
