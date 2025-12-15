@@ -59,6 +59,10 @@ struct Args {
     #[arg(long)]
     gcc: bool,
 
+    /// Link statically (no runtime dependencies)
+    #[arg(long = "static")]
+    static_link: bool,
+
     /// Use text based asm building instead of iced (Deprecated)
     #[arg(long)]
     no_iced: bool,
@@ -192,13 +196,7 @@ fn main() {
 
         fs::remove_file(&asm_file).expect("Failed to delete assembly file");
     } else {
-        // Use emit_object_for_linking when creating object files for external linking (-c or gcc)
-        // Use emit_object when creating standalone executables
-        let obj = if args.c || args.gcc {
-            emit_iced::emit_object_for_linking(&code_ast).expect("iced obj")
-        } else {
-            emit_iced::emit_object(&code_ast).expect("iced obj")
-        };
+        let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
 
         if args.s {
             let (asm, resolver, label_idx) = emit_iced::get_instructions(&code_ast).unwrap();
@@ -260,8 +258,85 @@ fn main() {
             }
         } else {
             let linker = Linker::new();
-            let args_vec = ["-o", &out_file, &obj_file, "--entry=_start"];
-            let parsed = WildArgs::parse(args_vec.iter()).expect("parse args");
+
+            // Library search paths (architecture-specific)
+            let lib_dirs = [
+                "/lib/x86_64-linux-gnu",      // Ubuntu/Debian
+                "/usr/lib/x86_64-linux-gnu",  // Alternative Ubuntu/Debian
+                "/lib64",                      // RHEL/Fedora
+                "/usr/lib64",                  // RHEL/Fedora alt
+                "/usr/lib",                    // Generic
+            ];
+
+            // Find the library directory that has CRT files
+            let lib_dir = lib_dirs.iter()
+                .find(|d| std::path::Path::new(&format!("{}/crt1.o", d)).exists());
+
+            let mut args_vec: Vec<String> = vec!["-o".to_string(), out_file.clone()];
+
+            // Static linking: no dynamic linker needed, links against libc.a
+            if args.static_link {
+                args_vec.push("-static".to_string());
+            } else {
+                // Find dynamic linker for dynamic linking
+                let ld_paths = [
+                    "/lib64/ld-linux-x86-64.so.2",
+                    "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                ];
+                if let Some(ld) = ld_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+                    args_vec.push(format!("--dynamic-linker={}", ld));
+                }
+            }
+
+            // Add library search paths
+            for dir in &lib_dirs {
+                if std::path::Path::new(dir).exists() {
+                    args_vec.push(format!("-L{}", dir));
+                }
+            }
+
+            // For static linking, we need libgcc for compiler support routines
+            if args.static_link {
+                // Find gcc library directory
+                let gcc_dirs = [
+                    "/usr/lib/gcc/x86_64-linux-gnu/13",
+                    "/usr/lib/gcc/x86_64-linux-gnu/12",
+                    "/usr/lib/gcc/x86_64-linux-gnu/11",
+                    "/usr/lib/gcc/x86_64-linux-gnu/10",
+                    "/usr/lib/gcc/x86_64-linux-gnu/9",
+                    "/usr/lib64/gcc/x86_64-linux-gnu/13",
+                ];
+                if let Some(gcc_dir) = gcc_dirs.iter().find(|d| std::path::Path::new(d).exists()) {
+                    args_vec.push(format!("-L{}", gcc_dir));
+                }
+            }
+
+            // Add CRT startup files and object file in correct order:
+            // crt1.o crti.o <user objects> -lc [-lgcc -lgcc_eh] crtn.o
+            if let Some(dir) = lib_dir {
+                args_vec.push(format!("{}/crt1.o", dir));
+                args_vec.push(format!("{}/crti.o", dir));
+            }
+
+            // User object file
+            args_vec.push(obj_file.clone());
+
+            // Link with libc
+            args_vec.push("-lc".to_string());
+
+            // Static linking needs libgcc for compiler support
+            if args.static_link {
+                args_vec.push("-lgcc".to_string());
+                args_vec.push("-lgcc_eh".to_string());
+            }
+
+            // CRT epilogue
+            if let Some(dir) = lib_dir {
+                args_vec.push(format!("{}/crtn.o", dir));
+            }
+
+            let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
+            let parsed = WildArgs::parse(args_refs.iter()).expect("parse args");
             let _ = libwild::setup_tracing(&parsed);
             linker.run(&parsed).expect("link failed");
         }

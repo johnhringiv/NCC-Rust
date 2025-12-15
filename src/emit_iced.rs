@@ -37,9 +37,7 @@ impl SymbolResolver for MySymbolResolver {
 pub fn get_instructions(
     program: &codegen::Program,
 ) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, String>), Box<dyn std::error::Error>> {
-    // Generate the actual object file (without _start for cleaner disassembly)
-    // and get internal label information
-    let (obj_bytes, internal_labels) = emit_object_with_labels(program, false)?;
+    let (obj_bytes, internal_labels) = emit_object_with_labels(program)?;
 
     // Parse the object file
     let obj = object::File::parse(&*obj_bytes)?;
@@ -91,18 +89,10 @@ pub fn get_instructions(
 }
 
 pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    emit_object_internal(program, true)
+    emit_object_with_labels(program).map(|(bytes, _)| bytes)
 }
 
-pub fn emit_object_for_linking(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    emit_object_internal(program, false)
-}
-
-fn emit_object_internal(program: &codegen::Program, include_start: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    emit_object_with_labels(program, include_start).map(|(bytes, _)| bytes)
-}
-
-fn emit_object_with_labels(program: &codegen::Program, include_start: bool) -> Result<(Vec<u8>, HashMap<usize, String>), Box<dyn std::error::Error>> {
+fn emit_object_with_labels(program: &codegen::Program) -> Result<(Vec<u8>, HashMap<usize, String>), Box<dyn std::error::Error>> {
     let mut a = CodeAssembler::new(64)?;
 
     // Create labels for all functions upfront
@@ -116,20 +106,6 @@ fn emit_object_with_labels(program: &codegen::Program, include_start: bool) -> R
 
     // Track all internal labels across all functions
     let mut all_label_idx: HashMap<usize, String> = HashMap::new();
-
-    // _start entry point (calls main, then exits) - only for standalone executables
-    let mut start_lbl = a.create_label();
-    if include_start {
-        a.set_label(&mut start_lbl)?;
-        a.call(*fn_labels.get("main").expect("no main function"))?;
-        a.mov(gpr64::rdi, gpr64::rax)?;
-        if cfg!(target_os = "macos") {
-            a.mov(gpr64::rax, 0x2000001i64)?;
-        } else {
-            a.mov(gpr64::rax, 60i64)?;
-        }
-        a.syscall()?;
-    }
 
     // Emit all functions
     for fun_def in &program.functions {
@@ -145,16 +121,6 @@ fn emit_object_with_labels(program: &codegen::Program, include_start: bool) -> R
     }
 
     let result = a.assemble_options(0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
-
-    let main_off = result.label_ip(fn_labels.get("main").unwrap())?;
-
-    let (start_off, start_size) = if include_start {
-        let start_off = result.label_ip(&start_lbl)?;
-        let start_size = main_off - start_off;
-        (start_off, start_size)
-    } else {
-        (0, 0)
-    };
 
     // Get function offsets before moving the code buffer
     let mut func_offsets: Vec<(String, u64)> = Vec::new();
@@ -186,24 +152,6 @@ fn emit_object_with_labels(program: &codegen::Program, include_start: bool) -> R
     obj.add_file_symbol(b"ncc".to_vec());
     let text = obj.section_id(StandardSection::Text);
     obj.append_section_data(text, &code, 1);
-
-    if include_start {
-        let symbol_name = if cfg!(target_os = "macos") {
-            b"start".to_vec()
-        } else {
-            b"_start".to_vec()
-        };
-        obj.add_symbol(Symbol {
-            name: symbol_name,
-            value: start_off,
-            size: start_size,
-            kind: SymbolKind::Text,
-            scope: SymbolScope::Linkage,
-            weak: false,
-            section: SymbolSection::Section(text),
-            flags: SymbolFlags::None,
-        });
-    }
 
     // Add all function symbols
     for (func_name, func_off) in &func_offsets {
