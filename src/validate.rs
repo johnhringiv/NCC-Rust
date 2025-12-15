@@ -388,15 +388,17 @@ fn resolve_fun_decoration(
             used_vars,
         )?;
     }
-    for (Identifier(param), org_name) in dec.params.iter().zip(original_params) {
-        if !used_vars.contains(param) {
-            eprintln!(
-                "{}: {}: unused parameter '{}' {}",
-                dec.span,
-                "warning".purple(),
-                org_name.bold(),
-                "[-Wunused-parameter]".purple()
-            );
+    if dec.body.is_some() {
+        for (Identifier(param), org_name) in dec.params.iter().zip(original_params) {
+            if !used_vars.contains(param) {
+                eprintln!(
+                    "{}: {}: unused parameter '{}' {}",
+                    dec.span,
+                    "warning".purple(),
+                    org_name.bold(),
+                    "[-Wunused-parameter]".purple()
+                );
+            }
         }
     }
     Ok(())

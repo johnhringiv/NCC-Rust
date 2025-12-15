@@ -540,3 +540,27 @@ fn test_unused_parameter_warning() {
 
     println!("✓ Unused parameter warning test passed");
 }
+
+#[test]
+fn test_no_warning_on_declaration() {
+    let test_file = "tests/c_programs/warnings/no_warning_on_declaration.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // Function declarations (no body) should NOT trigger unused parameter warnings
+    assert!(
+        !stderr_output.contains("-Wunused-parameter"),
+        "Declaration-only functions should not trigger unused parameter warnings, but got: {}",
+        stderr_output
+    );
+
+    println!("✓ No warning on declaration test passed");
+}

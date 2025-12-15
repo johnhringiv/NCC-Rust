@@ -416,7 +416,7 @@ fn main() {
     }
 
     if args.run {
-        let run_status = std::process::Command::new(&out_file)
+        let run_status = std::process::Command::new(format!("./{}", &out_file))
             .status()
             .expect("Failed to execute compiled binary");
         match run_status.code() {

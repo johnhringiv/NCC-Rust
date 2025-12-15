@@ -248,7 +248,7 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
     let mut line = 1;
     let mut col = 1;
     while !input.is_empty() {
-        let trimmed = input.trim_start_matches([' ', '\t']);
+        let trimmed = input.trim_start_matches([' ', '\t', '\r']);
         col += input.len() - trimmed.len();
         input = trimmed;
 
