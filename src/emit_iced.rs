@@ -4,7 +4,7 @@ use iced_x86::{BlockEncoderOptions, IcedError, SymbolResolver, SymbolResult, cod
 use object::write::{
     Object, Relocation, RelocationFlags, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection, SymbolId,
 };
-use object::{Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationKind, SectionKind};
+use object::{Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationKind, SectionKind, Object as ObjectRead, ObjectSection, ObjectSymbol};
 use std::collections::HashMap;
 
 // Symbol resolver for displaying labels in assembly output
@@ -36,38 +36,58 @@ impl SymbolResolver for MySymbolResolver {
 #[allow(clippy::type_complexity)]
 pub fn get_instructions(
     program: &codegen::Program,
-) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, String>), IcedError> {
-    let mut a = CodeAssembler::new(64)?;
-    let mut labels: HashMap<String, CodeLabel> = HashMap::new();
-    let mut label_idx = HashMap::new();
+) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, String>), Box<dyn std::error::Error>> {
+    // Generate the actual object file (without _start for cleaner disassembly)
+    // and get internal label information
+    let (obj_bytes, internal_labels) = emit_object_with_labels(program, false)?;
 
-    // Emit the function
-    a.push(gpr64::rbp)?;
-    a.mov(gpr64::rbp, gpr64::rsp)?;
-    let mut external_calls = Vec::new();
-    for ins in &program.functions[0].body { //todo
-        emit_instruction(&mut a, ins, &mut labels, &mut label_idx, &HashMap::new(), &mut external_calls)?;
-    }
-    // Assemble to get real addresses
-    let base_address = 0x1000u64;
-    let result = a.assemble_options(base_address, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
+    // Parse the object file
+    let obj = object::File::parse(&*obj_bytes)?;
 
-    // Build address-to-label mapping for the SymbolResolver
+    // Extract .text section
+    let text_section = obj.section_by_name(".text")
+        .ok_or("No .text section found")?;
+    let code = text_section.data()?;
+
+    // Build symbol resolver from object file symbols
     let mut address_map = HashMap::new();
-    for (name, code_label) in labels {
-        if let Ok(address) = result.label_ip(&code_label) {
-            address_map.insert(address, name);
+    let mut function_offsets = HashMap::new();
+    for symbol in obj.symbols() {
+        if let Ok(name) = symbol.name() {
+            if !name.is_empty() && symbol.kind() == object::SymbolKind::Text {
+                address_map.insert(symbol.address(), name.to_string());
+                function_offsets.insert(name.to_string(), symbol.address());
+            }
         }
     }
-    let resolver = MySymbolResolver::new(address_map);
 
-    // Decode the assembled instructions to get ones with proper addresses
-    let code_bytes = &result.inner.code_buffer;
-    let mut decoder = iced_x86::Decoder::new(64, code_bytes, iced_x86::DecoderOptions::NONE);
-    decoder.set_ip(base_address);
+    // Build combined label index (functions + internal labels)
+    // The internal_labels map instruction indices to names
+    // We need to convert instruction indices to byte offsets
+    let mut label_idx = HashMap::new();
+
+    // Add function names at their byte offsets
+    for (name, offset) in function_offsets {
+        label_idx.insert(offset as usize, name);
+    }
+
+    // Decode instructions to get byte offsets for internal labels
+    let mut decoder = iced_x86::Decoder::new(64, code, iced_x86::DecoderOptions::NONE);
+    decoder.set_ip(0);
     let instructions: Vec<iced_x86::Instruction> = decoder.into_iter().collect();
 
-    Ok((instructions, resolver, label_idx))
+    // Map instruction indices from internal_labels to byte offsets
+    let mut current_offset = 0;
+    for (ins_idx, ins) in instructions.iter().enumerate() {
+        if let Some(label_name) = internal_labels.get(&ins_idx) {
+            label_idx.insert(current_offset, label_name.clone());
+            // Also add to address_map so SymbolResolver can resolve jump targets
+            address_map.insert(current_offset as u64, label_name.clone());
+        }
+        current_offset += ins.len();
+    }
+
+    Ok((instructions, MySymbolResolver::new(address_map), label_idx))
 }
 
 pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -79,6 +99,10 @@ pub fn emit_object_for_linking(program: &codegen::Program) -> Result<Vec<u8>, Bo
 }
 
 fn emit_object_internal(program: &codegen::Program, include_start: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    emit_object_with_labels(program, include_start).map(|(bytes, _)| bytes)
+}
+
+fn emit_object_with_labels(program: &codegen::Program, include_start: bool) -> Result<(Vec<u8>, HashMap<usize, String>), Box<dyn std::error::Error>> {
     let mut a = CodeAssembler::new(64)?;
 
     // Create labels for all functions upfront
@@ -89,6 +113,9 @@ fn emit_object_internal(program: &codegen::Program, include_start: bool) -> Resu
 
     // Track external function calls (instruction index, function name)
     let mut external_calls: Vec<(usize, String)> = Vec::new();
+
+    // Track all internal labels across all functions
+    let mut all_label_idx: HashMap<usize, String> = HashMap::new();
 
     // _start entry point (calls main, then exits) - only for standalone executables
     let mut start_lbl = a.create_label();
@@ -108,7 +135,13 @@ fn emit_object_internal(program: &codegen::Program, include_start: bool) -> Resu
     for fun_def in &program.functions {
         let lbl = fn_labels.get_mut(&fun_def.name).unwrap();
         a.set_label(lbl)?;
-        emit_function(&mut a, fun_def, &fn_labels, &mut external_calls)?;
+
+        let mut labels = HashMap::new();
+        let mut label_idx = HashMap::new();
+        emit_function_body(&mut a, fun_def, &fn_labels, &mut external_calls, &mut labels, &mut label_idx)?;
+
+        // Aggregate labels from this function
+        all_label_idx.extend(label_idx);
     }
 
     let result = a.assemble_options(0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
@@ -229,16 +262,21 @@ fn emit_object_internal(program: &codegen::Program, include_start: bool) -> Resu
         }
     }
 
-    Ok(obj.write()?)
+    Ok((obj.write()?, all_label_idx))
 }
 
-fn emit_function(a: &mut CodeAssembler, fun_def: &codegen::FunctionDefinition, fn_labels:  &HashMap<String, CodeLabel>, external_calls: &mut Vec<(usize, String)>) -> Result<(), IcedError> {
-    let mut labels: HashMap<String, CodeLabel> = HashMap::new();
-    let mut label_idx = HashMap::new();
+fn emit_function_body(
+    a: &mut CodeAssembler,
+    fun_def: &codegen::FunctionDefinition,
+    fn_labels: &HashMap<String, CodeLabel>,
+    external_calls: &mut Vec<(usize, String)>,
+    labels: &mut HashMap<String, CodeLabel>,
+    label_idx: &mut HashMap<usize, String>,
+) -> Result<(), IcedError> {
     a.push(gpr64::rbp)?;
     a.mov(gpr64::rbp, gpr64::rsp)?;
     for ins in &fun_def.body {
-        emit_instruction(a, ins, &mut labels, &mut label_idx, fn_labels, external_calls)?;
+        emit_instruction(a, ins, labels, label_idx, fn_labels, external_calls)?;
     }
     Ok(())
 }

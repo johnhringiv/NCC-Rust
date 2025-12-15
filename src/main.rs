@@ -209,11 +209,20 @@ fn main() {
             let mut output = MyFormatterOutput::new();
 
             println!("Generated ASM\n");
-            println!("{}:", "main".green());
-            for (idx, ins) in asm.iter().enumerate() {
-                if let Some(label) = label_idx.get(&idx) {
-                    println!("{}:", label.green())
+
+            let mut current_offset = 0;
+            let mut current_function = 0;
+
+            for ins in asm.iter() {
+                // Check if we've reached a new function based on byte offset
+                if let Some(label_name) = label_idx.get(&current_offset) {
+                    if current_function > 0 {
+                        println!(); // blank line between functions
+                    }
+                    println!("{}:", label_name.green());
+                    current_function += 1;
                 }
+
                 print!("  ");
                 output.vec.clear();
                 formatter.format(ins, &mut output);
@@ -221,7 +230,10 @@ fn main() {
                     print!("{}", get_color(text.as_str(), *kind));
                 }
                 println!();
+                current_offset += ins.len();
             }
+
+            std::process::exit(0);
         }
 
         let obj_file = format!("{out_file}.o");

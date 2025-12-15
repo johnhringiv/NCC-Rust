@@ -440,10 +440,8 @@ pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
 
 pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
     for FunctionDefinition { name, body } in program.functions.iter_mut() {
-        let mut stack_offset = stack_offsets[name];
         // stack_offset is negative, so convert to positive, round up to 16, then negate for AllocateStack
-        let mut positive_offset = -stack_offset;
-        // Round up to next multiple of 16 for proper stack alignment
+        let mut positive_offset = -stack_offsets[name];
         if positive_offset % 16 != 0{
             positive_offset = ((positive_offset / 16) + 1) * 16;
         }
