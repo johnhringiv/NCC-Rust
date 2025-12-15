@@ -63,6 +63,7 @@ pub enum Token {
     SwitchKeyword,           // switch
     DefaultKeyword,          // default
     CaseKeyword,             // case
+    Comma,                   // ,
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
@@ -79,6 +80,7 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^\{", Token::OpenBrace),
     (r"^}", Token::CloseBrace),
     (r"^;", Token::Semicolon),
+    (r"^\,", Token::Comma),
     // Single-character operators
     (r"^~", Token::BitwiseComplement),
     (r"^-", Token::Negation),

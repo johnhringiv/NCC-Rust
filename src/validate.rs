@@ -5,9 +5,7 @@
    We also don't do scope validation another case that deserves a warning
 */
 use crate::lexer::Span;
-use crate::parser::{
-    BinOp, Block, BlockItem, Declaration, Expr, ForInit, Identifier, Program, SpannedStmt, Stmt, SwitchIntType, UnaryOp,
-};
+use crate::parser::{BinOp, Block, BlockItem, Declaration, VarDeclaration, Expr, ForInit, Identifier, Program, SpannedStmt, Stmt, SwitchIntType, UnaryOp, FunDeclaration};
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -35,10 +33,26 @@ impl fmt::Debug for SemanticError {
     }
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub enum SymbolType {
+    Int,
+    FunType(u64 /*param count*/)
+}
+
+#[derive(Clone)]
+struct Symbol {
+    symbol_type: SymbolType,
+    initialized: bool,
+    span: Span
+}
+
+type SymbolTable = HashMap<String, Symbol>;
+
 #[derive(Clone)]
 struct VarInfo {
     renamed: String,
     span: Span,
+    ext_link: bool
 }
 
 pub struct NameGenerator {
@@ -54,6 +68,181 @@ impl NameGenerator {
         let count = self.counts.entry(base.to_string()).or_insert(0);
         *count += 1;
         format!("{base}.{count}")
+    }
+}
+
+fn typecheck_variable_declaration(decl: &VarDeclaration, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
+    let sym = Symbol {
+        symbol_type: SymbolType::Int,
+        initialized: decl.init.is_some(),
+        span: decl.span,
+    };
+    symbols.insert(decl.name.0.clone(), sym);
+    if let Some(init) = &decl.init {
+        typecheck_exp(init, symbols)
+    } else {
+        Ok(())
+    }
+}
+
+fn typecheck_exp(exp: &Expr, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
+    match exp {
+        Expr::Constant(_) => Ok(()),
+        Expr::Var(Identifier(name), span) => {
+            if let Some(expected) = symbols.get(name) {
+                match expected.symbol_type {
+                    SymbolType::FunType(_) => {
+                        Err(SemanticError::with_span(
+                            format!("cannot use function '{}' as a variable", name.bold()),
+                            *span
+                        ))
+                    },
+                    SymbolType::Int => Ok(())
+                }
+            } else {unreachable!("Undefined variable in typechecking")}
+        }
+        Expr::Unary(_, e1) | Expr::PostFixOp(_, e1, _) | Expr::PreFixOp(_, e1, _) => typecheck_exp(e1, symbols),
+        Expr::Binary(_, e1, e2) | Expr::Assignment(e1, e2, _) | Expr::CompoundAssignment(_, e1, e2, _) => {
+            typecheck_exp(e1, symbols)?;
+            typecheck_exp(e2, symbols)
+        }
+        Expr::Conditional(e1, e2, e3) => {
+            typecheck_exp(e1, symbols)?;
+            typecheck_exp(e2, symbols)?;
+            typecheck_exp(e3, symbols)
+        }
+        Expr::FunctionCall(Identifier(name), args, span) => {
+            if let Some(expected) = symbols.get(name) {
+                match expected.symbol_type {
+                    SymbolType::FunType(param_cnt) => {
+                        if param_cnt != args.len() as u64 {
+                            Err(SemanticError::with_span(
+                                format!(
+                                    "function '{}' expects {} argument{} but {} {} provided",
+                                    name.bold(),
+                                    param_cnt,
+                                    if param_cnt == 1 { "" } else { "s" },
+                                    args.len(),
+                                    if args.len() == 1 { "was" } else { "were" }
+                                ),
+                                *span
+                            ))
+                        } else {
+                            for arg in args {
+                                typecheck_exp(arg, symbols)?
+                            }
+                            Ok(())
+                        }
+                    },
+                    SymbolType::Int => Err(SemanticError::with_span(
+                        format!("cannot call '{}' as a function: identifier is a variable", name.bold()),
+                        *span
+                    ))
+                }
+            } else {unreachable!("Undefined function call in typechecking")}
+        }
+    }
+}
+
+fn typecheck_function_declaration(decl: &FunDeclaration, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
+    let mut insert = true;
+    let sym = Symbol {
+        symbol_type: SymbolType::FunType(decl.params.len() as u64),
+        initialized: decl.body.is_some(),
+        span: decl.span,
+    };
+    if let Some(old_dec) = symbols.get(&decl.name.0) {
+        if old_dec.symbol_type != sym.symbol_type {
+            return Err(SemanticError::with_span(
+                format!(
+                    "incompatible declaration of function '{}'\n{}: {}: previous declaration was here",
+                    decl.name.0.bold(),
+                    old_dec.span,
+                    "note".cyan()
+                ),
+                decl.span
+            ))
+        }
+        if old_dec.initialized && decl.body.is_some() {
+            return Err(SemanticError::with_span(
+                format!(
+                    "redefinition of function '{}'\n{}: {}: previous definition was here",
+                    decl.name.0.bold(),
+                    old_dec.span,
+                    "note".cyan()
+                ),
+                decl.span
+            ))
+        }
+        insert = !old_dec.initialized && sym.initialized;
+    }
+
+    if insert {
+        symbols.insert(decl.name.0.clone(), sym);
+    }
+
+
+    if let Some(body) = decl.body.as_ref() {
+        for Identifier(name) in &decl.params {
+            symbols.insert(name.clone(), Symbol{
+                symbol_type: SymbolType::Int,
+                initialized: true,
+                span: decl.span,
+            });
+        }
+        typecheck_block(body, symbols)
+    } else {
+        Ok(())
+    }
+}
+
+fn typecheck_block(block: &Block, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
+    for item in block {
+        match item {
+            BlockItem::Declaration(Declaration::VarDeclaration(var)) => {
+                typecheck_variable_declaration(var, symbols)?;
+            }
+            BlockItem::Declaration(Declaration::FunDeclaration(fun)) => {
+                typecheck_function_declaration(fun, symbols)?;
+            }
+            BlockItem::Statement(stmt) => {
+                typecheck_stmt(&stmt.stmt, symbols)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn typecheck_stmt(stmt: &Stmt, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
+    match stmt {
+        Stmt::Return(e1) | Stmt::Expression(e1) => typecheck_exp(e1, symbols),
+        Stmt::If(cond, then_s, else_s) => {
+            typecheck_exp(cond, symbols)?;
+            typecheck_stmt(&then_s.stmt, symbols)?;
+            if let Some(e) = else_s.as_ref() { typecheck_stmt(&e.stmt, symbols)?; }
+            Ok(())
+        }
+        Stmt::Goto(_) | Stmt::Null | Stmt::Break(_) | Stmt::Continue(_) => Ok(()),
+        Stmt::Labeled(_, s) | Stmt::Default(s, _) => typecheck_stmt(&s.stmt, symbols),
+        Stmt::Compound(block) => typecheck_block(block, symbols),
+        Stmt::While(e, s, _) | Stmt::DoWhile(s, e, _) | Stmt::Switch(e, s, ..) | Stmt::Case(e, s, _) => {
+            typecheck_stmt(&s.stmt, symbols)?;
+            typecheck_exp(e, symbols)
+        }
+        Stmt::For(init, cond, post, body, _) => {
+            match init {
+                ForInit::InitExp(Some(e)) => typecheck_exp(e, symbols)?,
+                ForInit::InitExp(None) => {}
+                ForInit::InitDecl(decl) => typecheck_variable_declaration(decl, symbols)?
+            }
+            if let Some(cond) = cond {
+                typecheck_exp(cond, symbols)?;
+            }
+            if let Some(post) = post {
+                typecheck_exp(post, symbols)?;
+            }
+            typecheck_stmt(&body.stmt, symbols)
+        }
     }
 }
 
@@ -101,12 +290,134 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
             resolve_exp(then_exp, variable_map)?;
             resolve_exp(else_exp, variable_map)?;
             Ok(())
+        },
+        Expr::FunctionCall(Identifier(name), args, span) => match variable_map.get(name) {
+            Some(var_info) => {
+                // checking if new name matches old tells us if we have a variable shadowing
+                if name == &var_info.renamed {
+                    for arg in args {
+                        resolve_exp(arg, variable_map)?;
+                    }
+                    Ok(())
+                } else { //todo create test case hitting this
+                    Err(SemanticError::with_span(
+                        format!(
+                            "cannot call '{}' as a function: identifier is shadowed by variable declared at {}",
+                            name.bold(),
+                            var_info.span
+                        ),
+                        *span,
+                    ))
+                }
+            }
+            None => {
+                Err(SemanticError::with_span(
+                    format!("Function \'{}\' not defined", name.bold()),
+                    *span,
+                ))
+            }
         }
     }
 }
 
-fn resolve_decoration(
-    dec: &mut Declaration,
+fn resolve_fun_decoration(
+    dec: &mut FunDeclaration,
+    variable_map: &mut HashMap<String, VarInfo>,
+    block_vars: &mut HashSet<String>,
+    labels: &mut HashSet<String>,
+    jumps: &mut HashMap<String, Span>,
+    name_gen: &mut NameGenerator,
+) -> Result<(), SemanticError> {
+    let Identifier(name) = &dec.name;
+
+    // shadow is some when replacing an existing entry
+    let shadow = variable_map.insert(
+        name.clone(),
+        VarInfo {
+            renamed: name.clone(),
+            span: dec.span,
+            ext_link: true
+        },
+    );
+    if let Some(shadow) = shadow && !shadow.ext_link && block_vars.contains(name) { // declared in current scope and not externally linked
+        return Err(SemanticError::with_span(
+            format!(
+                "function {} already declared\n{}: {}: previous decoration was here",
+                name.bold(), // todo check
+                shadow.span,
+                "note".to_string().cyan(),
+            ),
+            dec.span,
+        ))
+    }
+    block_vars.insert(name.clone());
+
+    let mut inner_map = variable_map.clone();
+    let mut inner_block_vars = HashSet::new();
+    for param in &mut dec.params {
+        resolve_param(param, &mut inner_map, name_gen, &mut inner_block_vars, dec.span)?;
+    }
+
+    if let Some(block) = &mut dec.body {
+        resolve_block(block, &mut inner_block_vars, &mut inner_map, labels, jumps, name_gen)
+    } else {
+        Ok(())
+    }
+}
+
+fn resolve_param(
+    param: &mut Identifier,
+    variable_map: &mut HashMap<String, VarInfo>,
+    name_gen: &mut NameGenerator,
+    block_vars: &mut HashSet<String>,
+    span: Span
+) -> Result<(), SemanticError> {
+    let Identifier(name) = param.clone();
+
+    // if the value doesn't exist in block_vars we want to insert or update
+    if block_vars.insert(name.clone()) {
+        let unique_name = name_gen.next(&name);
+        let shadow = variable_map.insert(
+            name.clone(),
+            VarInfo {
+                renamed: unique_name.clone(),
+                span,
+                ext_link: false
+            },
+        );
+        if let Some(shadow) = shadow {
+            eprintln!(
+                "{}: {}: variable {} shadows previous declaration {}",
+                span,
+                "warning".purple(),
+                format!("'{}'", name).bold(),
+                "[-Wshadow]".purple()
+            );
+            eprintln!(
+                "{}: {}: previous declaration of {} was here",
+                shadow.span,
+                "note".cyan(),
+                format!("'{}'", name).bold()
+            );
+        }
+        *param = Identifier(unique_name);
+        Ok(())
+    } else {
+        let original_def = variable_map.get(&name).unwrap();
+        Err(SemanticError::with_span(
+            format!(
+                "variable {} already declared\n{}: {}: previous decoration was here",
+                format!("'{}'", name).bold(),
+                original_def.span,
+                "note".to_string().cyan(),
+            ),
+            span,
+        ))
+    }
+}
+
+fn resolve_var_decoration(
+    dec: &mut VarDeclaration,
     variable_map: &mut HashMap<String, VarInfo>,
     name_gen: &mut NameGenerator,
     block_vars: &mut HashSet<String>,
@@ -121,6 +432,7 @@ fn resolve_decoration(
             VarInfo {
                 renamed: unique_name.clone(),
                 span: dec.span,
+                ext_link: false
             },
         );
         if let Some(shadow) = shadow {
@@ -179,7 +491,7 @@ fn resolve_statement(
             }
         }
         Stmt::Labeled(label_name, stmt) => {
-            if !labels.insert(label_name.to_string()) {
+            if !labels.insert(label_name.0.clone()) {
                 return Err(SemanticError {
                     message: format!("Label {label_name:} already defined at {}", statement.span),
                     span: None,
@@ -188,12 +500,12 @@ fn resolve_statement(
             resolve_statement(stmt, variable_map, labels, jumps, name_gen)
         }
         Stmt::Goto(label_name) => {
-            jumps.insert(label_name.to_string(), statement.span);
+            jumps.insert(label_name.0.clone(), statement.span);
             Ok(())
         }
         Stmt::Compound(block) => {
             let mut shadow_map = variable_map.clone();
-            resolve_block(block, &mut shadow_map, labels, jumps, name_gen)
+            resolve_block(block, &mut HashSet::new(), &mut shadow_map, labels, jumps, name_gen)
         }
         Stmt::While(exp, stmt, _) | Stmt::Switch(exp, stmt, ..) | Stmt::Case(exp, stmt, ..) => {
             resolve_exp(exp, variable_map)?;
@@ -211,7 +523,7 @@ fn resolve_statement(
                         resolve_exp(e, &shadow_map)?;
                     }
                 }
-                ForInit::InitDecl(dec) => resolve_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new())?,
+                ForInit::InitDecl(dec) => resolve_var_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new())?,
             }
             if let Some(e1) = e1 {
                 resolve_exp(e1, &shadow_map)?;
@@ -492,20 +804,31 @@ fn label_block(block: &mut Block, label_tracker: &mut LabelTracker) -> Result<()
 
 fn resolve_block(
     block: &mut Block,
+    block_vars: &mut HashSet<String>,
     variable_map: &mut HashMap<String, VarInfo>,
     labels: &mut HashSet<String>,
     jumps: &mut HashMap<String, Span>,
     name_gen: &mut NameGenerator,
 ) -> Result<(), SemanticError> {
-    let mut block_vars = HashSet::new();
 
     for bi in block.iter_mut() {
         match bi {
             BlockItem::Statement(stmt) => {
                 resolve_statement(stmt, variable_map, labels, jumps, name_gen)?;
             }
-            BlockItem::Declaration(d) => {
-                resolve_decoration(d, variable_map, name_gen, &mut block_vars)?;
+            BlockItem::Declaration(d) => match d {
+                Declaration::VarDeclaration(var) => {
+                    resolve_var_decoration(var, variable_map, name_gen, block_vars)?;
+                }
+                Declaration::FunDeclaration(fun) => {
+                    if fun.body.is_some() {
+                        return Err(SemanticError::with_span(
+                            "function definition is not allowed here".to_string(),
+                            fun.span,
+                        ));
+                    }
+                    resolve_fun_decoration(fun, variable_map, block_vars, labels, jumps, name_gen)?
+                },
             }
         }
     }
@@ -514,30 +837,29 @@ fn resolve_block(
 
 pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticError> {
     let mut variable_map = HashMap::new();
-    let mut labels = HashSet::new();
-    let mut jumps: HashMap<String, Span> = HashMap::new();
     let mut name_gen = NameGenerator::new();
+    let mut undefined_jumps = Vec::new();
 
     let mut label_tracker = LabelTracker::new();
-    label_block(&mut program.function.body, &mut label_tracker)?;
+    for function in program.functions.iter_mut() {
+        let mut labels = HashSet::new();
+        let mut jumps: HashMap<String, Span> = HashMap::new();
+        if let Some(body) = &mut function.body {
+            label_block(body, &mut label_tracker)?;
+        }
+        let mut block_vars = HashSet::new();
+        resolve_fun_decoration(function, &mut variable_map, &mut block_vars, &mut labels, &mut jumps, &mut name_gen)?;
 
-    resolve_block(
-        &mut program.function.body,
-        &mut variable_map,
-        &mut labels,
-        &mut jumps,
-        &mut name_gen,
-    )?;
-
-    // Find jumps to non-existent labels and report with spans
-    let mut undefined_jumps = Vec::new();
-    for (label, span) in jumps.iter() {
-        if !labels.contains(label) {
-            undefined_jumps.push((label.clone(), *span));
+        // Find jumps to non-existent labels and report with spans
+        for (label, span) in jumps.iter() {
+            if !labels.contains(label) {
+                undefined_jumps.push((label.clone(), *span));
+            }
         }
     }
 
     if undefined_jumps.is_empty() {
+        typecheck_program(program)?;
         Ok(name_gen)
     } else {
         let (label, span) = &undefined_jumps[0];
@@ -546,6 +868,16 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
             *span,
         ))
     }
+}
+
+pub fn typecheck_program(program: &Program) -> Result<(), SemanticError> {
+    let mut symbols = SymbolTable::new();
+
+    for decl in &program.functions {
+        typecheck_function_declaration(decl, &mut symbols)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

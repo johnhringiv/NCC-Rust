@@ -80,6 +80,7 @@ pub enum Expr {
     PostFixOp(IncDec, Box<Expr>, Span),
     PreFixOp(IncDec, Box<Expr>, Span),
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    FunctionCall(Identifier, Vec<Expr>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -183,18 +184,32 @@ pub enum Stmt {
 
 #[derive(Debug, Clone)]
 pub enum ForInit {
-    InitDecl(Declaration),
+    InitDecl(VarDeclaration),
     InitExp(Option<Expr>),
 }
 
 #[derive(PartialEq, Clone)]
-pub struct Declaration {
+pub struct VarDeclaration {
     pub name: Identifier,
     pub init: Option<Expr>,
     pub span: Span,
 }
 
-impl fmt::Debug for Declaration {
+#[derive(Debug, Clone)]
+pub struct FunDeclaration {
+    pub name: Identifier,
+    pub params: Vec<Identifier>,
+    pub body: Option<Block>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum Declaration {
+    VarDeclaration(VarDeclaration),
+    FunDeclaration(FunDeclaration),
+}
+
+impl fmt::Debug for VarDeclaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("Declaration");
         debug_struct.field("name", &self.name);
@@ -207,19 +222,24 @@ impl fmt::Debug for Declaration {
 
 pub type Block = Vec<BlockItem>;
 
+fn parse_block(tokens: &mut VecDeque<SpannedToken>) -> Result<Block, SyntaxError> {
+    expect(&Token::OpenBrace, tokens)?;
+    let mut body = vec![];
+    while tokens.front().map(|t| &t.token) != Some(&Token::CloseBrace) {
+        body.push(parse_block_item(tokens)?);
+    }
+    expect(&Token::CloseBrace, tokens)?;
+    Ok(body)
+}
+
 #[derive(Debug, Clone)]
 pub enum BlockItem {
     Statement(SpannedStmt),
     Declaration(Declaration),
 }
 
-pub struct Function {
-    pub name: Identifier,
-    pub body: Block,
-}
-
 pub struct Program {
-    pub function: Function,
+    pub functions: Vec<FunDeclaration>,
 }
 
 pub struct SyntaxError {
@@ -357,7 +377,18 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             }
             Token::Identifier(name) => {
                 tokens.pop_front();
-                Ok(Expr::Var(Identifier(name.clone()), spanned.span))
+                if let Some(tmp) = tokens.front().cloned() {
+                    if tmp.token == Token::OpenParen {
+                        tokens.pop_front();
+                        // parse the function call
+                        let params = parse_function_args(tokens, &Some(spanned.span))?;
+                        Ok(Expr::FunctionCall(Identifier(name.clone()), params, spanned.span))
+                    } else {
+                        Ok(Expr::Var(Identifier(name.clone()), spanned.span))
+                    }
+                } else {
+                    Err(SyntaxError::expression(next_token))
+                }
             }
             _ => Err(SyntaxError::expression(next_token)),
         },
@@ -569,15 +600,9 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             }
         }
         Token::OpenBrace => {
-            let span = tokens.pop_front().unwrap().span;
-            let mut block = Vec::new();
-            while tokens.front().map(|t| &t.token) != Some(&Token::CloseBrace) {
-                block.push(parse_block_item(tokens)?);
-            }
-            expect(&Token::CloseBrace, tokens)?;
             Ok(SpannedStmt {
-                stmt: Stmt::Compound(block),
-                span,
+                stmt: Stmt::Compound(parse_block(tokens)?),
+                span: next_token.span,
             })
         }
         Token::BreakKeyword => {
@@ -620,7 +645,15 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             let span = tokens.pop_front().unwrap().span;
             let err_span = expect(&Token::OpenParen, tokens)?;
             let init = if let Some(dec) = parse_declaration(tokens, &Some(err_span))? {
-                ForInit::InitDecl(dec)
+                match dec {
+                    Declaration::VarDeclaration(var) => ForInit::InitDecl(var),
+                    Declaration::FunDeclaration(_) => {
+                        return  Err(SyntaxError::with_span(
+                            "function declaration not allowed in for init".to_string(),
+                            Some(err_span),
+                        ));
+                    }
+                }
             } else {
                 let init = parse_exp(tokens, 0).ok();
                 expect(&Token::Semicolon, tokens)?;
@@ -731,23 +764,44 @@ fn parse_declaration(
 ) -> Result<Option<Declaration>, SyntaxError> {
     if let Some(front) = tokens.front() {
         if front.token == Token::IntKeyword {
-            // decoration
-            let mut init = None;
             tokens.pop_front();
             let (name, span) = parse_identifier(tokens)?;
             if let Some(front) = tokens.front() {
-                if front.token == Token::Assignment {
+                if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) { // function declaration
                     tokens.pop_front();
-                    init = Some(parse_exp(tokens, 0)?);
+                    let params = parse_function_params(tokens, &Some(span))?;
+
+                    let body = if tokens.front().map(|t| &t.token) == Some(&Token::OpenBrace) {
+                        Some(parse_block(tokens)?)
+                    } else {
+                        expect(&Token::Semicolon, tokens)?;
+                        None
+                    };
+
+                    Ok(Some(Declaration::FunDeclaration(FunDeclaration {
+                        name,
+                        params,
+                        body,
+                        span,
+                    })))
+
+                } else {
+                    let mut init = None;
+                    if front.token == Token::Assignment {
+                        tokens.pop_front();
+                        init = Some(parse_exp(tokens, 0)?);
+                    }
+                    expect(&Token::Semicolon, tokens)?;
+                    Ok(Some(Declaration::VarDeclaration(VarDeclaration { name, init, span })))
                 }
+
+
             } else {
-                return Err(SyntaxError::with_span(
+                Err(SyntaxError::with_span(
                     "EOF when parsing declaration".to_string(),
                     Some(span),
-                ));
+                ))
             }
-            expect(&Token::Semicolon, tokens)?;
-            Ok(Some(Declaration { name, init, span }))
         } else {
             Ok(None)
         }
@@ -759,33 +813,105 @@ fn parse_declaration(
     }
 }
 
-fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<Function, SyntaxError> {
-    expect(&Token::IntKeyword, tokens)?;
-    let (name, _span) = parse_identifier(tokens)?;
-    expect(&Token::OpenParen, tokens)?;
-    expect(&Token::VoidKeyword, tokens)?;
-    expect(&Token::CloseParen, tokens)?;
-    expect(&Token::OpenBrace, tokens)?;
-    let mut function_body = Vec::new();
-    while tokens.front().is_some() && tokens.front().unwrap().token != Token::CloseBrace {
-        let next_block = parse_block_item(tokens)?;
-        function_body.push(next_block);
+fn parse_function_params(
+    tokens: &mut VecDeque<SpannedToken>,
+    err_span: &Option<Span>,
+) -> Result<Vec<Identifier>, SyntaxError> {
+    let mut params = vec![];
+    if let Some(front) = tokens.front().cloned() {
+        if front.token == Token::VoidKeyword {
+            tokens.pop_front();
+        } else {
+            loop {
+                if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                    break;
+                }
+                expect(&Token::IntKeyword, tokens)?;
+                let (name, _span) = parse_identifier(tokens)?;
+                params.push(name.clone());
+                // we expect comma or close
+                if let Some(next_token) = tokens.front().cloned() {
+                    if next_token.token == Token::Comma {
+                        tokens.pop_front();
+                        if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                            return Err(SyntaxError::with_span("Trailing comma not allowed.".to_string(), Some(next_token.span)));
+                        }
+                    }
+                }
+            }
+        }
+        expect(&Token::CloseParen, tokens)?;
+        Ok(params)
+    } else {
+        Err(SyntaxError::with_span(
+            "EOF when parsing function parameters".to_string(),
+            *err_span,
+        ))
     }
-    expect(&Token::CloseBrace, tokens)?;
+}
 
-    Ok(Function {
+fn parse_function_args(
+    tokens: &mut VecDeque<SpannedToken>,
+    err_span: &Option<Span>,
+) -> Result<Vec<Expr>, SyntaxError> {
+    let mut params = vec![];
+    if let Some(front) = tokens.front().cloned() {
+        if front.token == Token::VoidKeyword {
+            tokens.pop_front();
+        } else {
+            loop {
+                if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                    break;
+                }
+                params.push(parse_exp(tokens, 0)?);
+                // we expect comma or close
+                if let Some(next_token) = tokens.front().cloned() {
+                    if next_token.token == Token::Comma {
+                        tokens.pop_front();
+                        if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                            return Err(SyntaxError::with_span("Trailing comma not allowed.".to_string(), Some(next_token.span)));
+                        }
+                    }
+                }
+            }
+        }
+        expect(&Token::CloseParen, tokens)?;
+        Ok(params)
+    } else {
+        Err(SyntaxError::with_span(
+            "EOF when parsing function parameters".to_string(),
+            *err_span,
+        ))
+    }
+}
+
+fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<FunDeclaration, SyntaxError> {
+    expect(&Token::IntKeyword, tokens)?;
+    let (name, span) = parse_identifier(tokens)?;
+    expect(&Token::OpenParen, tokens)?;
+    let params = parse_function_params(tokens, &Some(span))?;
+
+    let body = if tokens.front().map(|t| &t.token) == Some(&Token::OpenBrace) {
+        Some(parse_block(tokens)?)
+    } else {
+        expect(&Token::Semicolon, tokens)?;
+        None
+    };
+
+    Ok(FunDeclaration {
         name,
-        body: function_body,
+        params,
+        body,
+        span,
     })
 }
 
 pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, SyntaxError> {
-    let fun_def = parse_function_definition(tokens)?;
-    if tokens.is_empty() {
-        Ok(Program { function: fun_def })
-    } else {
-        Err(SyntaxError::new(None, tokens.front().cloned()))
+    let mut functions = vec![parse_function_definition(tokens)?];
+    while !tokens.is_empty() {
+        functions.push(parse_function_definition(tokens)?)
     }
+    Ok(Program{ functions })
 }
 
 // AST pretty printing
@@ -835,6 +961,14 @@ impl ItfDisplay for Expr {
                     Node::branch("else:", vec![else_expr.itf_node()]),
                 ],
             ),
+            Expr::FunctionCall(name, args, _span) => {
+                let mut children = vec![Node::leaf(format!("name: {}", name.itf_node().text))];
+                if !args.is_empty() {
+                    let arg_nodes: Vec<Node> = args.iter().map(|a| a.itf_node()).collect();
+                    children.push(Node::branch("args:", arg_nodes));
+                }
+                Node::branch(cyan("FunctionCall"), children)
+            }
         }
     }
 }
@@ -911,15 +1045,38 @@ impl ItfDisplay for Stmt {
         }
     }
 }
-impl ItfDisplay for Declaration {
+impl ItfDisplay for VarDeclaration {
     fn itf_node(&self) -> Node {
         let name_node = Node::leaf(format!("name: {}", self.name.itf_node().text));
         match &self.init {
             Some(init_expr) => {
                 let init_node = Node::branch("init:", vec![init_expr.itf_node()]);
-                Node::branch(cyan("Declaration"), vec![name_node, init_node])
+                Node::branch(cyan("VarDeclaration"), vec![name_node, init_node])
             }
-            None => Node::branch(cyan("Declaration"), vec![name_node]),
+            None => Node::branch(cyan("VarDeclaration"), vec![name_node]),
+        }
+    }
+}
+impl ItfDisplay for FunDeclaration {
+    fn itf_node(&self) -> Node {
+        let mut children = vec![Node::leaf(format!("name: {}", self.name.itf_node().text))];
+        if !self.params.is_empty() {
+            let param_nodes: Vec<Node> = self.params.iter().map(|p| p.itf_node()).collect();
+            children.push(Node::branch("params:", param_nodes));
+        }
+        if let Some(body) = &self.body {
+            let body_nodes: Vec<Node> = body.iter().map(|b| b.itf_node()).collect();
+            children.push(Node::branch("body:", body_nodes));
+        }
+        Node::branch(cyan("FunDeclaration"), children)
+    }
+}
+
+impl ItfDisplay for Declaration {
+    fn itf_node(&self) -> Node {
+        match self {
+            Declaration::VarDeclaration(var) => var.itf_node(),
+            Declaration::FunDeclaration(fun) => fun.itf_node(),
         }
     }
 }
@@ -931,17 +1088,11 @@ impl ItfDisplay for BlockItem {
         }
     }
 }
-impl ItfDisplay for Function {
-    fn itf_node(&self) -> Node {
-        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
-        let mut body_node = self.body.itf_node();
-        body_node.text = format!("body: {}", body_node.text);
-        Node::branch(cyan("Function"), vec![name_line, body_node])
-    }
-}
+
 impl ItfDisplay for Program {
     fn itf_node(&self) -> Node {
-        Node::branch(cyan("Program"), vec![self.function.itf_node()])
+        let children: Vec<Node> = self.functions.iter().map(|f| f.itf_node()).collect();
+        Node::branch(cyan("Program"), children)
     }
 }
 

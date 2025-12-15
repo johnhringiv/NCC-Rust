@@ -96,6 +96,22 @@ These features help catch common bugs at compile time while providing predictabl
 - Rust (latest stable)
 - GCC (Optional) for linking instead of `libwild`
 
+## Setup
+
+```bash
+# Clone the repository
+gh repo clone johnhringiv/NCC-Rust
+
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Initialize submodules
+git submodule update --init
+
+# Install build essentials (Linux)
+sudo apt install build-essential
+```
+
 ## Building
 
 Clone the repository and build with Cargo:

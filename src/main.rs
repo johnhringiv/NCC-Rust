@@ -20,7 +20,7 @@ use std::path::Path;
 #[command(group(
     ArgGroup::new("mode")
         .required(false)
-        .args(&["lex", "parse", "validate", "codegen", "s", "tacky", "run"])
+        .args(&["lex", "parse", "validate", "codegen", "s", "tacky", "run", "c"])
 ))]
 struct Args {
     /// Run lexer
@@ -50,6 +50,10 @@ struct Args {
     /// Run the compiled program
     #[arg(long, name = "run")]
     run: bool,
+
+    /// Emit object file only (no linking)
+    #[arg(short = 'c')]
+    c: bool,
 
     /// Use GCC for linking
     #[arg(long)]
@@ -188,7 +192,13 @@ fn main() {
 
         fs::remove_file(&asm_file).expect("Failed to delete assembly file");
     } else {
-        let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
+        // Use emit_object_for_linking when creating object files for external linking (-c or gcc)
+        // Use emit_object when creating standalone executables
+        let obj = if args.c || args.gcc {
+            emit_iced::emit_object_for_linking(&code_ast).expect("iced obj")
+        } else {
+            emit_iced::emit_object(&code_ast).expect("iced obj")
+        };
 
         if args.s {
             let (asm, resolver, label_idx) = emit_iced::get_instructions(&code_ast).unwrap();
@@ -216,6 +226,10 @@ fn main() {
 
         let obj_file = format!("{out_file}.o");
         fs::write(&obj_file, &obj).expect("Failed to write object file");
+
+        if args.c {
+            std::process::exit(0);
+        }
 
         if args.gcc {
             let status = std::process::Command::new("gcc")
@@ -246,7 +260,23 @@ fn main() {
         let run_status = std::process::Command::new(&out_file)
             .status()
             .expect("Failed to execute compiled binary");
-        println!("Result: {}", run_status.code().unwrap());
+        match run_status.code() {
+            Some(code) => println!("Result: {}", code),
+            None => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(signal) = run_status.signal() {
+                        eprintln!("Process terminated by signal: {}", signal);
+                    } else {
+                        eprintln!("Process terminated without exit code");
+                    }
+                }
+                #[cfg(not(unix))]
+                eprintln!("Process terminated without exit code");
+            }
+        }
+        fs::remove_file(&out_file).ok();
     }
 }
 

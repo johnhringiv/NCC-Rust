@@ -1,5 +1,5 @@
 use crate::parser;
-use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp};
+use crate::parser::{Block, BlockItem, Declaration, VarDeclaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp};
 use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
 use crate::validate::NameGenerator;
@@ -90,17 +90,19 @@ pub enum Instruction {
     JumpIfZero { condition: Val, target: Identifier },
     JumpIfNotZero { condition: Val, target: Identifier },
     Label(Identifier),
+    FunCall {fun_name: Identifier, args: Vec<Val>, dst: Val}
 }
 
 #[derive(Debug)]
 pub struct FunctionDefinition {
     pub name: String,
+    pub params: Vec<Identifier>,
     pub body: Vec<Instruction>,
 }
 
 #[derive(Debug)]
 pub struct Program {
-    pub function: FunctionDefinition,
+    pub functions: Vec<FunctionDefinition>,
 }
 
 /// Converts AST expressions into TACKY IR instructions.
@@ -311,6 +313,28 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             instructions.push(Instruction::Label(cond_end.clone()));
             result
         }
+        Expr::FunctionCall(fun_name, params, _span) => {
+            let mut tacky_params = vec![];
+            for param in params {
+                let mut tacky_param = tackify_expr(param, instructions, name_generator);
+                if let Val::Var(_) = &tacky_param {
+                    let temp = Val::Var(name_generator.next("arg"));
+                    instructions.push(Instruction::Copy {
+                        src: tacky_param,
+                        dst: temp.clone(),
+                    });
+                    tacky_param = temp;
+                }
+                tacky_params.push(tacky_param);
+            }
+            let dst = Val::Var(name_generator.next("call"));
+            instructions.push(Instruction::FunCall{
+                fun_name: fun_name.clone(),
+                args: tacky_params,
+                dst: dst.clone(),
+            });
+            dst
+        }
     }
 }
 
@@ -393,7 +417,7 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
         }
         parser::Stmt::For(init, condition, post, body, label) => {
             match init {
-                ForInit::InitDecl(dec) => tackify_declaration(dec, instructions, name_generator),
+                ForInit::InitDecl(dec) => tackify_var_declaration(dec, instructions, name_generator),
                 ForInit::InitExp(exp) => {
                     if let Some(e) = exp {
                         tackify_expr(e, instructions, name_generator);
@@ -475,17 +499,20 @@ fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_genera
     for item in block {
         match item {
             BlockItem::Statement(stmt) => tackify_stmt(&stmt.stmt, instructions, name_generator),
-            BlockItem::Declaration(dec) => tackify_declaration(dec, instructions, name_generator),
+            BlockItem::Declaration(dec) => match dec {
+                Declaration::VarDeclaration(var) => tackify_var_declaration(var, instructions, name_generator),
+                Declaration::FunDeclaration(_) => {}
+            },
         }
     }
 }
 
-fn tackify_declaration(
-    declaration: &Declaration,
+fn tackify_var_declaration(
+    declaration: &VarDeclaration,
     instructions: &mut Vec<Instruction>,
     name_generator: &mut NameGenerator,
 ) {
-    if let Declaration {
+    if let VarDeclaration {
         name,
         init: Some(e),
         span,
@@ -496,10 +523,12 @@ fn tackify_declaration(
     }
 }
 
-fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator) -> FunctionDefinition {
+fn tackify_function(func: &parser::FunDeclaration, name_generator: &mut NameGenerator) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let parser::Identifier(name) = &func.name;
-    tackify_block(&func.body, &mut instructions, name_generator);
+    if let Some(body) = &func.body {
+        tackify_block(body, &mut instructions, name_generator);
+    }
 
     // Return 0 if the function has no return statement
     // will not be reached if the function has a return statement
@@ -507,14 +536,19 @@ fn tackify_function(func: &parser::Function, name_generator: &mut NameGenerator)
 
     FunctionDefinition {
         name: name.clone(),
+        params: func.params.clone(),
         body: instructions,
     }
 }
 
 pub fn tackify_program(program: &parser::Program, name_generator: &mut NameGenerator) -> Program {
-    let function = tackify_function(&program.function, name_generator);
-
-    Program { function }
+    let mut functions = Vec::new();
+    for function in &program.functions {
+        if function.body.is_some() {
+            functions.push(tackify_function(function, name_generator));
+        }
+    }
+    Program { functions }
 }
 simple_node!(BinOp);
 
@@ -547,6 +581,12 @@ impl ItfDisplay for Instruction {
                 Node::branch(cyan("JumpIfNotZero"), vec![condition.itf_node(), target.itf_node()])
             }
             Instruction::Label(lbl) => Node::branch(cyan("Label"), vec![lbl.itf_node()]),
+            Instruction::FunCall { fun_name, args, dst } => {
+                let mut children = vec![fun_name.itf_node()];
+                children.extend(args.iter().map(|a| a.itf_node()));
+                children.push(dst.itf_node());
+                Node::branch(cyan("FunCall"), children)
+            }
         }
     }
 }
@@ -562,6 +602,7 @@ impl ItfDisplay for FunctionDefinition {
 
 impl ItfDisplay for Program {
     fn itf_node(&self) -> Node {
-        Node::branch(cyan("Program"), vec![self.function.itf_node()])
+        let children: Vec<Node> = self.functions.iter().map(|f| f.itf_node()).collect();
+        Node::branch(cyan("Program"), children)
     }
 }

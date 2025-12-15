@@ -2,9 +2,9 @@
 use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp};
 use iced_x86::{BlockEncoderOptions, IcedError, SymbolResolver, SymbolResult, code_asm::*};
 use object::write::{
-    Object, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection,
+    Object, Relocation, RelocationFlags, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection, SymbolId,
 };
-use object::{Architecture, BinaryFormat, Endianness, SectionKind};
+use object::{Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationKind, SectionKind};
 use std::collections::HashMap;
 
 // Symbol resolver for displaying labels in assembly output
@@ -44,8 +44,9 @@ pub fn get_instructions(
     // Emit the function
     a.push(gpr64::rbp)?;
     a.mov(gpr64::rbp, gpr64::rsp)?;
-    for ins in &program.function.body {
-        emit_instruction(&mut a, ins, &mut labels, &mut label_idx)?;
+    let mut external_calls = Vec::new();
+    for ins in &program.functions[0].body { //todo
+        emit_instruction(&mut a, ins, &mut labels, &mut label_idx, &HashMap::new(), &mut external_calls)?;
     }
     // Assemble to get real addresses
     let base_address = 0x1000u64;
@@ -70,28 +71,70 @@ pub fn get_instructions(
 }
 
 pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    emit_object_internal(program, true)
+}
+
+pub fn emit_object_for_linking(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    emit_object_internal(program, false)
+}
+
+fn emit_object_internal(program: &codegen::Program, include_start: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut a = CodeAssembler::new(64)?;
-    let mut start_lbl = a.create_label();
-    let mut main_lbl = a.create_label();
-    a.set_label(&mut start_lbl)?;
-    a.call(main_lbl)?;
-    a.mov(gpr64::rdi, gpr64::rax)?;
-    if cfg!(target_os = "macos") {
-        // macOS exit syscall is 0x2000001
-        a.mov(gpr64::rax, 0x2000001i64)?;
-    } else {
-        // Linux exit syscall is 60
-        a.mov(gpr64::rax, 60i64)?;
+
+    // Create labels for all functions upfront
+    let mut fn_labels: HashMap<String, CodeLabel> = HashMap::new();
+    for fun_def in &program.functions {
+        fn_labels.insert(fun_def.name.clone(), a.create_label());
     }
-    a.syscall()?;
-    a.set_label(&mut main_lbl)?;
-    emit_function(&mut a, &program.function)?;
+
+    // Track external function calls (instruction index, function name)
+    let mut external_calls: Vec<(usize, String)> = Vec::new();
+
+    // _start entry point (calls main, then exits) - only for standalone executables
+    let mut start_lbl = a.create_label();
+    if include_start {
+        a.set_label(&mut start_lbl)?;
+        a.call(*fn_labels.get("main").expect("no main function"))?;
+        a.mov(gpr64::rdi, gpr64::rax)?;
+        if cfg!(target_os = "macos") {
+            a.mov(gpr64::rax, 0x2000001i64)?;
+        } else {
+            a.mov(gpr64::rax, 60i64)?;
+        }
+        a.syscall()?;
+    }
+
+    // Emit all functions
+    for fun_def in &program.functions {
+        let lbl = fn_labels.get_mut(&fun_def.name).unwrap();
+        a.set_label(lbl)?;
+        emit_function(&mut a, fun_def, &fn_labels, &mut external_calls)?;
+    }
+
     let result = a.assemble_options(0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
-    let start_off = result.label_ip(&start_lbl)?;
-    let main_off = result.label_ip(&main_lbl)?;
+
+    let main_off = result.label_ip(fn_labels.get("main").unwrap())?;
+
+    let (start_off, start_size) = if include_start {
+        let start_off = result.label_ip(&start_lbl)?;
+        let start_size = main_off - start_off;
+        (start_off, start_size)
+    } else {
+        (0, 0)
+    };
+
+    // Get function offsets before moving the code buffer
+    let mut func_offsets: Vec<(String, u64)> = Vec::new();
+    for fun_def in &program.functions {
+        let func_off = result.label_ip(fn_labels.get(&fun_def.name).unwrap())?;
+        func_offsets.push((fun_def.name.clone(), func_off));
+    }
+
+    // Clone instruction offsets before moving the inner
+    let instruction_offsets = result.inner.new_instruction_offsets.clone();
+
+    // Now move the code buffer
     let code = result.inner.code_buffer;
-    let start_size = main_off - start_off;
-    let main_size = code.len() as u64 - main_off;
 
     let mut obj = if cfg!(target_os = "linux") {
         let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
@@ -110,41 +153,92 @@ pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::e
     obj.add_file_symbol(b"ncc".to_vec());
     let text = obj.section_id(StandardSection::Text);
     obj.append_section_data(text, &code, 1);
-    let symbol_name = if cfg!(target_os = "macos") {
-        b"start".to_vec()
-    } else {
-        b"_start".to_vec()
-    };
-    obj.add_symbol(Symbol {
-        name: symbol_name,
-        value: start_off,
-        size: start_size,
-        kind: SymbolKind::Text,
-        scope: SymbolScope::Linkage,
-        weak: false,
-        section: SymbolSection::Section(text),
-        flags: SymbolFlags::None,
-    });
-    obj.add_symbol(Symbol {
-        name: b"main".to_vec(),
-        value: main_off,
-        size: main_size,
-        kind: SymbolKind::Text,
-        scope: SymbolScope::Linkage,
-        weak: false,
-        section: SymbolSection::Section(text),
-        flags: SymbolFlags::None,
-    });
+
+    if include_start {
+        let symbol_name = if cfg!(target_os = "macos") {
+            b"start".to_vec()
+        } else {
+            b"_start".to_vec()
+        };
+        obj.add_symbol(Symbol {
+            name: symbol_name,
+            value: start_off,
+            size: start_size,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+    }
+
+    // Add all function symbols
+    for (func_name, func_off) in &func_offsets {
+        let func_size = code.len() as u64 - func_off;
+        obj.add_symbol(Symbol {
+            name: func_name.as_bytes().to_vec(),
+            value: *func_off,
+            size: func_size,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+    }
+
+    // Add external function symbols and relocations
+    let mut external_symbols: HashMap<String, SymbolId> = HashMap::new();
+    for (_ins_idx, func_name) in &external_calls {
+        if !external_symbols.contains_key(func_name) {
+            let symbol_id = obj.add_symbol(Symbol {
+                name: func_name.as_bytes().to_vec(),
+                value: 0,
+                size: 0,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Unknown,
+                weak: false,
+                section: SymbolSection::Undefined,
+                flags: SymbolFlags::None,
+            });
+            external_symbols.insert(func_name.clone(), symbol_id);
+        }
+    }
+
+    // Add relocations for external calls
+    // The instruction offsets tell us where each instruction starts in the byte stream
+    if !external_calls.is_empty() {
+        for (ins_idx, func_name) in &external_calls {
+            if let Some(symbol_id) = external_symbols.get(func_name) {
+                // The call instruction is 5 bytes: E8 (opcode) + 4 bytes (offset)
+                // We need to add a relocation at the offset location (1 byte after the instruction start)
+                let ins_offset = instruction_offsets[*ins_idx];
+                let reloc_offset = (ins_offset + 1) as u64;
+
+                obj.add_relocation(text, Relocation {
+                    offset: reloc_offset,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::Relative,
+                        encoding: RelocationEncoding::X86Branch,
+                        size: 32,
+                    },
+                    symbol: *symbol_id,
+                    addend: -4,
+                })?;
+            }
+        }
+    }
+
     Ok(obj.write()?)
 }
 
-fn emit_function(a: &mut CodeAssembler, fun_def: &codegen::FunctionDefinition) -> Result<(), IcedError> {
+fn emit_function(a: &mut CodeAssembler, fun_def: &codegen::FunctionDefinition, fn_labels:  &HashMap<String, CodeLabel>, external_calls: &mut Vec<(usize, String)>) -> Result<(), IcedError> {
     let mut labels: HashMap<String, CodeLabel> = HashMap::new();
     let mut label_idx = HashMap::new();
     a.push(gpr64::rbp)?;
     a.mov(gpr64::rbp, gpr64::rsp)?;
     for ins in &fun_def.body {
-        emit_instruction(a, ins, &mut labels, &mut label_idx)?;
+        emit_instruction(a, ins, &mut labels, &mut label_idx, fn_labels, external_calls)?;
     }
     Ok(())
 }
@@ -157,6 +251,25 @@ fn gpr32(reg: &Reg) -> AsmRegister32 {
         R10 => registers::gpr32::r10d,
         R11 => registers::gpr32::r11d,
         CX => registers::gpr32::ecx,
+        DI => registers::gpr32::edi,
+        SI => registers::gpr32::esi,
+        R8 => registers::gpr32::r8d,
+        R9 => registers::gpr32::r9d,
+    }
+}
+
+fn gpr64_reg(reg: &Reg) -> AsmRegister64 {
+    use codegen::Reg::*;
+    match reg {
+        AX => gpr64::rax,
+        DX => gpr64::rdx,
+        R10 => gpr64::r10,
+        R11 => gpr64::r11,
+        CX => gpr64::rcx,
+        DI => gpr64::rdi,
+        SI => gpr64::rsi,
+        R8 => gpr64::r8,
+        R9 => gpr64::r9,
     }
 }
 
@@ -173,6 +286,8 @@ fn emit_instruction(
     ins: &Instruction,
     labels: &mut HashMap<String, CodeLabel>,
     label_idx: &mut HashMap<usize, String>,
+    fn_labels: &HashMap<String, CodeLabel>,
+    external_calls: &mut Vec<(usize, String)>,
 ) -> Result<(), IcedError> {
     match ins {
         Instruction::Mov { src, dst } => match (src, dst) {
@@ -312,13 +427,33 @@ fn emit_instruction(
         }
         Instruction::AllocateStack(off) => {
             if *off != 0 {
-                a.sub(gpr64::rsp, -*off as i32)?;
+                a.sub(gpr64::rsp, *off as i32)?;
             }
         }
         Instruction::Ret => {
             a.mov(gpr64::rsp, gpr64::rbp)?;
             a.pop(gpr64::rbp)?;
             a.ret()?;
+        },
+        Instruction::DeallocateStack(off)  => {
+            a.add(gpr64::rsp, *off as i32)?;
+        }
+        Instruction::Push(op) => match op{
+            Operand::Imm(c) => a.push(*c as i32)?,
+            Operand::Reg(reg) => a.push(gpr64_reg(reg))?,
+            Operand::Stack(off) => a.push(qword_ptr(gpr64::rbp - (-*off)))?,
+            Operand::Pseudo(_) => unreachable!(),
+        }
+        Instruction::Call(name) => {
+            if let Some(&lbl) = fn_labels.get(&name.0) {
+                // Internal function call
+                a.call(lbl)?;
+            } else {
+                // External function call - emit call to 0 and track for relocation
+                let ins_count = a.instructions().len();
+                external_calls.push((ins_count, name.0.clone()));
+                a.call(0)?;
+            }
         }
     }
     Ok(())

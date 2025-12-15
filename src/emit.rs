@@ -1,4 +1,5 @@
 use crate::codegen;
+use crate::codegen::Reg;
 
 enum RegWidth {
     Byte,
@@ -12,6 +13,7 @@ fn emit_reg(reg: &codegen::Reg, reg_width: &RegWidth) -> String {
             codegen::Reg::R11 => "r11b".to_string(),
             codegen::Reg::DX => "dl".to_string(),
             codegen::Reg::CX => "cl".to_string(),
+            _ => unimplemented!("chapter 9")
         },
         RegWidth::DWord => match reg {
             codegen::Reg::AX => "eax".to_string(),
@@ -19,6 +21,7 @@ fn emit_reg(reg: &codegen::Reg, reg_width: &RegWidth) -> String {
             codegen::Reg::R11 => "r11d".to_string(),
             codegen::Reg::DX => "edx".to_string(),
             codegen::Reg::CX => "ecx".to_string(),
+            _ => unimplemented!("chapter 9")
         },
     }
 }
@@ -125,7 +128,8 @@ fn emit_instruction(ins: &codegen::Instruction) -> String {
                 code.ins_suffix(),
                 emit_operand(op, &RegWidth::Byte)
             ));
-        }
+        },
+        &codegen::Instruction::DeallocateStack(_) | &codegen::Instruction::Push(_) | &codegen::Instruction::Call(_) => unimplemented!("chapter 9")
     }
     output
 }
@@ -149,8 +153,8 @@ fn emit_function(fun_def: &codegen::FunctionDefinition) -> String {
 }
 
 pub fn emit_program(program: &codegen::Program) -> String {
-    let codegen::Program { function } = program;
-    let mut output = emit_function(function);
+    let function = &program.functions[0];
+    let mut output = emit_function(&function);
     if cfg!(target_os = "linux") {
         output.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
     }
