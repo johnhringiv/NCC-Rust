@@ -81,7 +81,7 @@ fn emit_operand(operand: &Operand, reg_width: &RegWidth) -> String {
     output
 }
 
-fn emit_instruction(ins: &Instruction) -> String {
+fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
     fn emit_operand_dw(operand: &Operand) -> String {
         emit_operand(operand, &RegWidth::DWord)
     }
@@ -99,7 +99,7 @@ fn emit_instruction(ins: &Instruction) -> String {
             output.push_str(&format!("{} {}\n", emit_unaryop(op), emit_operand_dw(dst)));
         }
         Instruction::AllocateStack(offset) => {
-            output.push_str(&format!("subq ${}, %rsp", offset * -1));
+            output.push_str(&format!("subq ${}, %rsp", offset));
         }
         Instruction::Binary {
             op: op @ (BinaryOp::BitShl | BinaryOp::BitSar),
@@ -132,13 +132,15 @@ fn emit_instruction(ins: &Instruction) -> String {
             output.push_str(&format!("cmpl {}, {}", emit_operand_dw(v1), emit_operand_dw(v2)));
         }
         Instruction::Jmp(target) => {
-            output.push_str(&format!("jmp {target}"));
+            // Use raw label name with function prefix for uniqueness
+            output.push_str(&format!("jmp {}.{}", fn_name, target.0));
         }
         Instruction::JmpCC { code, label } => {
-            output.push_str(&format!("j{} {}", code.ins_suffix(), label));
+            output.push_str(&format!("j{} {}.{}", code.ins_suffix(), fn_name, label.0));
         }
         Instruction::Label(label) => {
-            output.push_str(&format!("{label}:"));
+            // Use raw label name with function prefix for uniqueness
+            output.push_str(&format!("{}.{}:", fn_name, label.0));
         }
         Instruction::SetCC { code, op } => {
             output.push_str(&format!(
@@ -155,7 +157,12 @@ fn emit_instruction(ins: &Instruction) -> String {
         },
         Instruction::Call(name) => {
             // Use name.0 to get raw function name without .L prefix
-            output.push_str(&format!("call {}", name.0));
+            // On Linux, use @PLT for external function calls
+            if cfg!(target_os = "macos") {
+                output.push_str(&format!("call _{}", name.0));
+            } else {
+                output.push_str(&format!("call {}@PLT", name.0));
+            }
         },
     }
     output
@@ -174,7 +181,7 @@ fn emit_function(fun_def: &FunctionDefinition) -> String {
     output.push_str("\tpushq %rbp\n");
     output.push_str("\tmovq %rsp, %rbp\n");
     for ins in body.iter() {
-        output.push_str(&format!("\t{}\n", emit_instruction(ins)));
+        output.push_str(&format!("\t{}\n", emit_instruction(ins, name)));
     }
     output
 }

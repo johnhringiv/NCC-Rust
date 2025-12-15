@@ -879,32 +879,3 @@ pub fn typecheck_program(program: &Program) -> Result<(), SemanticError> {
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::test_utils::{Stage, get_sandler_dirs, run_tests};
-
-    #[test]
-    fn test_conditional_valid() {
-        let dirs = vec!["c_programs/conditional/valid/".to_string()];
-        let (passed, failed) = run_tests(&dirs, true, &Stage::Validate);
-        assert_eq!(failed.len(), 0, "Failed to validate valid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
-
-    #[test]
-    fn sandler_tests_valid() {
-        let dirs = get_sandler_dirs(true, &Stage::Validate);
-        let (passed, failed) = run_tests(&dirs, true, &Stage::Validate);
-        assert_eq!(failed.len(), 0, "Failed to parse valid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
-
-    #[test]
-    fn sandler_tests_invalid() {
-        let dirs = get_sandler_dirs(false, &Stage::Validate);
-        let (passed, failed) = run_tests(&dirs, false, &Stage::Validate);
-        assert_eq!(failed.len(), 0, "Should have rejected invalid files: {failed:?}");
-        println!("Passed: {passed}");
-    }
-}

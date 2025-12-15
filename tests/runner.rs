@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-static CHAPTER_COMPLETED: i32 = 8;
-static EXTRA_COMPLETED: i32 = 8;
+static CHAPTER_COMPLETED: i32 = 9;
+static EXTRA_COMPLETED: i32 = 9;
 
 #[derive(Debug, PartialEq)]
 enum ProgramOutput {
@@ -15,7 +15,34 @@ enum ProgramOutput {
 #[derive(Debug)]
 struct TestCase {
     c_file: String,
+    extra_files: Vec<String>,  // Library files or assembly files
     output: ProgramOutput,
+}
+
+/// Load assembly_libs from test_properties.json
+fn load_assembly_libs() -> HashMap<String, Vec<String>> {
+    let json_content = fs::read_to_string("writing-a-c-compiler-tests/test_properties.json")
+        .unwrap_or_default();
+    let parsed: serde_json::Value = serde_json::from_str(&json_content).unwrap_or_default();
+
+    let mut result = HashMap::new();
+    if let Some(assembly_libs) = parsed.get("assembly_libs").and_then(|v| v.as_object()) {
+        for (test_path, libs) in assembly_libs {
+            if let Some(libs_arr) = libs.as_array() {
+                let lib_paths: Vec<String> = libs_arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| {
+                        // Add platform-specific suffix
+                        let suffix = if cfg!(target_os = "macos") { "_osx.s" } else { "_linux.s" };
+                        format!("writing-a-c-compiler-tests/tests/{}{}", s, suffix)
+                    })
+                    .collect();
+                result.insert(test_path.clone(), lib_paths);
+            }
+        }
+    }
+    result
 }
 
 // we want a mapping of test path to program output
@@ -23,6 +50,10 @@ fn get_sandler_cases() -> Vec<TestCase> {
     // Load expected results for valid tests
     let expected_results =
         load_expected("writing-a-c-compiler-tests/expected_results.json").unwrap_or_else(|_| HashMap::new());
+
+    // Load assembly libs configuration
+    let assembly_libs = load_assembly_libs();
+
     let mut cases = vec![];
 
     for entry in glob("writing-a-c-compiler-tests/tests/**/*.c")
@@ -39,25 +70,60 @@ fn get_sandler_cases() -> Vec<TestCase> {
 
         let path_str = entry.to_str().unwrap_or("");
 
+        // Skip non-client library files (they get compiled with the _client.c file)
+        if path_str.contains("/libraries/") && !path_str.ends_with("_client.c") {
+            continue;
+        }
+
         // Determine the ProgramOutput based on the test type
         let output = if path_str.contains("invalid_lex") {
             ProgramOutput::Error(10)
         } else if path_str.contains("invalid_parse") {
             ProgramOutput::Error(20)
-        } else if path_str.contains("invalid_semantics") {
+        } else if path_str.contains("invalid_semantics")
+            || path_str.contains("invalid_declarations")
+            || path_str.contains("invalid_types")
+            || path_str.contains("invalid_labels")
+            || path_str.contains("invalid_struct_tags") {
             ProgramOutput::Error(30)
         } else {
             // Valid test - get expected return code from map
             let relative_path = path_str
                 .strip_prefix("writing-a-c-compiler-tests/tests/")
                 .unwrap_or(path_str);
-            let expected_value = *expected_results.get(relative_path).unwrap_or(&0);
+            // For library tests, look up by library name (without _client suffix)
+            let lookup_path = if relative_path.ends_with("_client.c") {
+                relative_path.replace("_client.c", ".c")
+            } else {
+                relative_path.to_string()
+            };
+            let expected_value = *expected_results.get(&lookup_path).unwrap_or(&0);
             ProgramOutput::Result(expected_value)
         };
+
+        // Determine extra files (library files or assembly files)
+        let mut extra_files = Vec::new();
+
+        // Handle library tests - find the corresponding library file
+        if path_str.contains("/libraries/") && path_str.ends_with("_client.c") {
+            let lib_file = path_str.replace("_client.c", ".c");
+            if std::path::Path::new(&lib_file).exists() {
+                extra_files.push(lib_file);
+            }
+        }
+
+        // Handle assembly libs
+        let relative_path = path_str
+            .strip_prefix("writing-a-c-compiler-tests/tests/")
+            .unwrap_or(path_str);
+        if let Some(asm_files) = assembly_libs.get(relative_path) {
+            extra_files.extend(asm_files.clone());
+        }
 
         if chapter <= CHAPTER_COMPLETED && (!extra_credit || (chapter <= EXTRA_COMPLETED)) {
             cases.push(TestCase {
                 c_file: path_str.to_string(),
+                extra_files,
                 output,
             })
         }
@@ -89,6 +155,7 @@ fn get_custom_cases() -> Vec<TestCase> {
 
         cases.push(TestCase {
             c_file: path_str.to_string(),
+            extra_files: vec![],
             output,
         })
     }
@@ -164,7 +231,14 @@ fn run_test(
 
     let ncc_path = get_ncc_binary_path();
     let mut cmd = std::process::Command::new(&ncc_path);
-    cmd.arg(case.c_file.clone()).arg("-o").arg(binary_path_str);
+    cmd.arg(&case.c_file);
+
+    // Add extra files (library files, assembly files)
+    for extra in &case.extra_files {
+        cmd.arg(extra);
+    }
+
+    cmd.arg("-o").arg(binary_path_str);
 
     for arg in extra_args {
         cmd.arg(arg);

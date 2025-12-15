@@ -70,8 +70,9 @@ struct Args {
     #[arg(short = 'o', long)]
     output: Option<String>,
 
-    /// Input file (required)
-    filename: String,
+    /// Input files (required)
+    #[arg(required = true)]
+    filenames: Vec<String>,
 }
 
 // For colored output, we need to implement a custom FormatterOutput
@@ -105,99 +106,77 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
 
 fn main() {
     let mut args = Args::parse();
-    let Ok(input) = fs::read_to_string(&args.filename) else {
-        eprintln!("Failed to read file: {}", args.filename);
-        std::process::exit(1);
-    };
-
-    let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
-        eprintln!("{e:?}");
-        std::process::exit(10)
-    });
 
     if cfg!(target_os = "macos") & !args.gcc {
         println!("Using GCC as libwild does not support MacOS");
         args.gcc = true;
     }
 
-    if args.lex {
-        // stop here if only lexing
-        println!(
-            "Processed tokens: {:?}",
-            tokens.iter().map(|t| t.token.clone()).collect::<Vec<_>>()
-        );
-        std::process::exit(0);
-    }
+    // Separate C files from assembly files
+    let (c_files, asm_files): (Vec<_>, Vec<_>) = args.filenames.iter()
+        .partition(|f| f.ends_with(".c"));
 
-    let mut tokens = tokens;
-    let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
-        eprintln!("{e:?}");
-        std::process::exit(20)
-    });
+    // For single-file debug modes (lex, parse, validate, tacky, codegen, -S),
+    // only process the first C file
+    let first_c_file = c_files.first().map(|s| s.as_str()).unwrap_or("");
 
-    if args.parse {
-        let ast_val = ast;
-        // println!("{ast_val:?}");
-        println!("{}", ast_val.itf_string());
-        std::process::exit(0);
-    }
-
-    let mut ast = ast;
-    let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
-        eprintln!("{e:?}");
-        std::process::exit(30);
-    });
-
-    let mut name_gen = validated_result;
-    if args.validate {
-        println!("Program Valid");
-        std::process::exit(0);
-    }
-
-    let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
-
-    if args.tacky {
-        println!("{tacky_ast:?}");
-        println!("{}", tacky_ast.itf_string());
-        std::process::exit(0);
-    }
-
-    let code_ast = codegen::generate(&tacky_ast);
-    if args.codegen {
-        println!("{}", code_ast.itf_string());
-        std::process::exit(0);
-    }
-
-    let path = Path::new(&args.filename);
-    let out_file = args
-        .output
-        .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
-
-    if args.no_iced {
-        let asm = emit::emit_program(&code_ast);
-        if args.s {
-            print!("Generated asm:\n\n{asm}");
-        }
-        let asm_file = format!("{out_file}.s");
-
-        fs::write(&asm_file, asm).expect("Failed to write assembly file");
-
-        let status = std::process::Command::new("gcc")
-            .arg(&asm_file)
-            .arg("-o")
-            .arg(out_file.clone())
-            .status()
-            .expect("Failed to execute gcc");
-
-        if !status.success() {
-            eprintln!("Compilation failed with status: {status}");
+    if !first_c_file.is_empty() && (args.lex || args.parse || args.validate || args.tacky || args.codegen || args.s) {
+        let Ok(input) = fs::read_to_string(first_c_file) else {
+            eprintln!("Failed to read file: {}", first_c_file);
             std::process::exit(1);
+        };
+
+        let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
+            eprintln!("{e:?}");
+            std::process::exit(10)
+        });
+
+        if args.lex {
+            println!(
+                "Processed tokens: {:?}",
+                tokens.iter().map(|t| t.token.clone()).collect::<Vec<_>>()
+            );
+            std::process::exit(0);
         }
 
-        fs::remove_file(&asm_file).expect("Failed to delete assembly file");
-    } else {
-        let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
+        let mut tokens = tokens;
+        let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
+            eprintln!("{e:?}");
+            std::process::exit(20)
+        });
 
+        if args.parse {
+            println!("{}", ast.itf_string());
+            std::process::exit(0);
+        }
+
+        let mut ast = ast;
+        let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+            eprintln!("{e:?}");
+            std::process::exit(30);
+        });
+
+        if args.validate {
+            println!("Program Valid");
+            std::process::exit(0);
+        }
+
+        let mut name_gen = validated_result;
+        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
+
+        if args.tacky {
+            println!("{tacky_ast:?}");
+            println!("{}", tacky_ast.itf_string());
+            std::process::exit(0);
+        }
+
+        let code_ast = codegen::generate(&tacky_ast);
+        if args.codegen {
+            println!("{}", code_ast.itf_string());
+            std::process::exit(0);
+        }
+
+        // -S flag: emit assembly
         if args.s {
             let (asm, resolver, label_idx) = emit_iced::get_instructions(&code_ast).unwrap();
 
@@ -212,10 +191,9 @@ fn main() {
             let mut current_function = 0;
 
             for ins in asm.iter() {
-                // Check if we've reached a new function based on byte offset
                 if let Some(label_name) = label_idx.get(&current_offset) {
                     if current_function > 0 {
-                        println!(); // blank line between functions
+                        println!();
                     }
                     println!("{}:", label_name.green());
                     current_function += 1;
@@ -233,114 +211,203 @@ fn main() {
 
             std::process::exit(0);
         }
+    }
 
-        let obj_file = format!("{out_file}.o");
-        fs::write(&obj_file, &obj).expect("Failed to write object file");
+    // Multi-file compilation: compile each C file to object, then link all together
+    let mut obj_files: Vec<String> = Vec::new();
 
-        if args.c {
-            std::process::exit(0);
-        }
+    // Compile each C file to an object file
+    for c_file in &c_files {
+        let Ok(input) = fs::read_to_string(c_file) else {
+            eprintln!("Failed to read file: {}", c_file);
+            std::process::exit(1);
+        };
 
-        if args.gcc {
-            let status = std::process::Command::new("gcc")
-                .arg("-nostdlib")
-                .arg("-static")
-                .arg(&obj_file)
+        let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
+            eprintln!("{e:?}");
+            std::process::exit(10)
+        });
+
+        let mut tokens = tokens;
+        let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
+            eprintln!("{e:?}");
+            std::process::exit(20)
+        });
+
+        let mut ast = ast;
+        let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+            eprintln!("{e:?}");
+            std::process::exit(30);
+        });
+
+        let mut name_gen = validated_result;
+        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
+        let code_ast = codegen::generate(&tacky_ast);
+
+        let path = Path::new(c_file);
+        let obj_file = path.with_extension("o").to_string_lossy().to_string();
+
+        if args.no_iced {
+            let asm = emit::emit_program(&code_ast);
+            let asm_file = path.with_extension("s").to_string_lossy().to_string();
+            fs::write(&asm_file, asm).expect("Failed to write assembly file");
+
+            let status = std::process::Command::new("as")
+                .arg(&asm_file)
                 .arg("-o")
-                .arg(&out_file)
-                .arg("-Wl,-e,_start")
+                .arg(&obj_file)
                 .status()
-                .expect("Failed to execute gcc");
+                .expect("Failed to execute as");
 
             if !status.success() {
-                println!("Compilation failed with status: {status}");
+                eprintln!("Assembly failed with status: {status}");
                 std::process::exit(1);
             }
+            fs::remove_file(&asm_file).ok();
         } else {
-            let linker = Linker::new();
-
-            // Library search paths (architecture-specific)
-            let lib_dirs = [
-                "/lib/x86_64-linux-gnu",      // Ubuntu/Debian
-                "/usr/lib/x86_64-linux-gnu",  // Alternative Ubuntu/Debian
-                "/lib64",                      // RHEL/Fedora
-                "/usr/lib64",                  // RHEL/Fedora alt
-                "/usr/lib",                    // Generic
-            ];
-
-            // Find the library directory that has CRT files
-            let lib_dir = lib_dirs.iter()
-                .find(|d| std::path::Path::new(&format!("{}/crt1.o", d)).exists());
-
-            let mut args_vec: Vec<String> = vec!["-o".to_string(), out_file.clone()];
-
-            // Static linking: no dynamic linker needed, links against libc.a
-            if args.static_link {
-                args_vec.push("-static".to_string());
-            } else {
-                // Find dynamic linker for dynamic linking
-                let ld_paths = [
-                    "/lib64/ld-linux-x86-64.so.2",
-                    "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-                ];
-                if let Some(ld) = ld_paths.iter().find(|p| std::path::Path::new(p).exists()) {
-                    args_vec.push(format!("--dynamic-linker={}", ld));
-                }
-            }
-
-            // Add library search paths
-            for dir in &lib_dirs {
-                if std::path::Path::new(dir).exists() {
-                    args_vec.push(format!("-L{}", dir));
-                }
-            }
-
-            // For static linking, we need libgcc for compiler support routines
-            if args.static_link {
-                // Find gcc library directory
-                let gcc_dirs = [
-                    "/usr/lib/gcc/x86_64-linux-gnu/13",
-                    "/usr/lib/gcc/x86_64-linux-gnu/12",
-                    "/usr/lib/gcc/x86_64-linux-gnu/11",
-                    "/usr/lib/gcc/x86_64-linux-gnu/10",
-                    "/usr/lib/gcc/x86_64-linux-gnu/9",
-                    "/usr/lib64/gcc/x86_64-linux-gnu/13",
-                ];
-                if let Some(gcc_dir) = gcc_dirs.iter().find(|d| std::path::Path::new(d).exists()) {
-                    args_vec.push(format!("-L{}", gcc_dir));
-                }
-            }
-
-            // Add CRT startup files and object file in correct order:
-            // crt1.o crti.o <user objects> -lc [-lgcc -lgcc_eh] crtn.o
-            if let Some(dir) = lib_dir {
-                args_vec.push(format!("{}/crt1.o", dir));
-                args_vec.push(format!("{}/crti.o", dir));
-            }
-
-            // User object file
-            args_vec.push(obj_file.clone());
-
-            // Link with libc
-            args_vec.push("-lc".to_string());
-
-            // Static linking needs libgcc for compiler support
-            if args.static_link {
-                args_vec.push("-lgcc".to_string());
-                args_vec.push("-lgcc_eh".to_string());
-            }
-
-            // CRT epilogue
-            if let Some(dir) = lib_dir {
-                args_vec.push(format!("{}/crtn.o", dir));
-            }
-
-            let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
-            let parsed = WildArgs::parse(args_refs.iter()).expect("parse args");
-            let _ = libwild::setup_tracing(&parsed);
-            linker.run(&parsed).expect("link failed");
+            let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
+            fs::write(&obj_file, &obj).expect("Failed to write object file");
         }
-        fs::remove_file(&obj_file).ok();
+
+        obj_files.push(obj_file);
+    }
+
+    // Assemble any .s files
+    for asm_file in &asm_files {
+        let path = Path::new(asm_file);
+        let obj_file = path.with_extension("o").to_string_lossy().to_string();
+
+        let status = std::process::Command::new("as")
+            .arg(asm_file)
+            .arg("-o")
+            .arg(&obj_file)
+            .status()
+            .expect("Failed to execute as");
+
+        if !status.success() {
+            eprintln!("Assembly of {} failed with status: {status}", asm_file);
+            std::process::exit(1);
+        }
+
+        obj_files.push(obj_file);
+    }
+
+    // Determine output file name
+    let first_file = c_files.first().or(asm_files.first()).map(|s| s.as_str()).unwrap_or("a.out");
+    let path = Path::new(first_file);
+    let out_file = args
+        .output
+        .unwrap_or_else(|| path.with_extension("").to_string_lossy().to_string());
+
+    if args.c {
+        // -c flag: just produce object files, don't link
+        std::process::exit(0);
+    }
+
+    // Link all object files together
+    if args.gcc {
+        let mut cmd = std::process::Command::new("gcc");
+        for obj in &obj_files {
+            cmd.arg(obj);
+        }
+        cmd.arg("-o").arg(&out_file);
+
+        let status = cmd.status().expect("Failed to execute gcc");
+
+        if !status.success() {
+            eprintln!("Linking failed with status: {status}");
+            std::process::exit(1);
+        }
+    } else {
+        let linker = Linker::new();
+
+        // Library search paths (architecture-specific)
+        let lib_dirs = [
+            "/lib/x86_64-linux-gnu",      // Ubuntu/Debian
+            "/usr/lib/x86_64-linux-gnu",  // Alternative Ubuntu/Debian
+            "/lib64",                      // RHEL/Fedora
+            "/usr/lib64",                  // RHEL/Fedora alt
+            "/usr/lib",                    // Generic
+        ];
+
+        // Find the library directory that has CRT files
+        let lib_dir = lib_dirs.iter()
+            .find(|d| std::path::Path::new(&format!("{}/crt1.o", d)).exists());
+
+        let mut args_vec: Vec<String> = vec!["-o".to_string(), out_file.clone()];
+
+        // Static linking: no dynamic linker needed, links against libc.a
+        if args.static_link {
+            args_vec.push("-static".to_string());
+        } else {
+            // Find dynamic linker for dynamic linking
+            let ld_paths = [
+                "/lib64/ld-linux-x86-64.so.2",
+                "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            ];
+            if let Some(ld) = ld_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+                args_vec.push(format!("--dynamic-linker={}", ld));
+            }
+        }
+
+        // Add library search paths
+        for dir in &lib_dirs {
+            if std::path::Path::new(dir).exists() {
+                args_vec.push(format!("-L{}", dir));
+            }
+        }
+
+        // For static linking, we need libgcc for compiler support routines
+        if args.static_link {
+            // Find gcc library directory
+            let gcc_dirs = [
+                "/usr/lib/gcc/x86_64-linux-gnu/13",
+                "/usr/lib/gcc/x86_64-linux-gnu/12",
+                "/usr/lib/gcc/x86_64-linux-gnu/11",
+                "/usr/lib/gcc/x86_64-linux-gnu/10",
+                "/usr/lib/gcc/x86_64-linux-gnu/9",
+                "/usr/lib64/gcc/x86_64-linux-gnu/13",
+            ];
+            if let Some(gcc_dir) = gcc_dirs.iter().find(|d| std::path::Path::new(d).exists()) {
+                args_vec.push(format!("-L{}", gcc_dir));
+            }
+        }
+
+        // Add CRT startup files and object files in correct order:
+        // crt1.o crti.o <user objects> -lc [-lgcc -lgcc_eh] crtn.o
+        if let Some(dir) = lib_dir {
+            args_vec.push(format!("{}/crt1.o", dir));
+            args_vec.push(format!("{}/crti.o", dir));
+        }
+
+        // User object files
+        for obj in &obj_files {
+            args_vec.push(obj.clone());
+        }
+
+        // Link with libc
+        args_vec.push("-lc".to_string());
+
+        // Static linking needs libgcc for compiler support
+        if args.static_link {
+            args_vec.push("-lgcc".to_string());
+            args_vec.push("-lgcc_eh".to_string());
+        }
+
+        // CRT epilogue
+        if let Some(dir) = lib_dir {
+            args_vec.push(format!("{}/crtn.o", dir));
+        }
+
+        let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
+        let parsed = WildArgs::parse(args_refs.iter()).expect("parse args");
+        let _ = libwild::setup_tracing(&parsed);
+        linker.run(&parsed).expect("link failed");
+    }
+
+    // Clean up object files
+    for obj in &obj_files {
+        fs::remove_file(obj).ok();
     }
 
     if args.run {
