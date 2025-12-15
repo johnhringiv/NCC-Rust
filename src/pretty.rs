@@ -2,18 +2,16 @@ use std::fmt;
 
 use colored::Colorize;
 
+use crate::codegen::{
+    BinaryOp, CondCode, FunctionDefinition as CodegenFunctionDefinition, Instruction as CodegenInstruction, Operand,
+    Program as CodegenProgram, Reg, UnaryOp,
+};
 use crate::parser::{
-    AssignOp, BinOp as ParserBinOp, BlockItem, Declaration, Expr, ForInit, FunDeclaration,
-    Identifier, IncDec, Program as ParserProgram, SpannedStmt, Stmt, UnaryOp as ParserUnaryOp,
-    VarDeclaration,
+    AssignOp, BinOp as ParserBinOp, BlockItem, Declaration, Expr, ForInit, FunDeclaration, Identifier, IncDec,
+    Program as ParserProgram, SpannedStmt, Stmt, UnaryOp as ParserUnaryOp, VarDeclaration,
 };
 use crate::tacky::{
-    BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction,
-    Program as TackyProgram, Val,
-};
-use crate::codegen::{
-    BinaryOp, CondCode, FunctionDefinition as CodegenFunctionDefinition,
-    Instruction as CodegenInstruction, Operand, Program as CodegenProgram, Reg, UnaryOp,
+    BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction, Program as TackyProgram, Val,
 };
 
 #[derive(Clone)]
@@ -85,9 +83,15 @@ macro_rules! simple_node {
 
 // All simple Debug-based display types
 simple_node!(
-    ParserUnaryOp, ParserBinOp, AssignOp, IncDec,  // Parser
-    BinOp,                                          // Tacky
-    Reg, UnaryOp, BinaryOp, CondCode,              // Codegen
+    ParserUnaryOp,
+    ParserBinOp,
+    AssignOp,
+    IncDec, // Parser
+    BinOp,  // Tacky
+    Reg,
+    UnaryOp,
+    BinaryOp,
+    CondCode, // Codegen
 );
 
 // Macro for types with `name` and `body` fields (FunctionDefinition pattern)
@@ -137,7 +141,10 @@ macro_rules! delegate_variants {
     };
 }
 
-delegate_variants!(Declaration { VarDeclaration, FunDeclaration });
+delegate_variants!(Declaration {
+    VarDeclaration,
+    FunDeclaration
+});
 delegate_variants!(BlockItem { Statement, Declaration });
 
 // Macro for wrapper types that delegate to a single field
@@ -216,16 +223,23 @@ impl ItfDisplay for Expr {
             Expr::Constant(c) => Node::leaf(format!("Constant({c})").yellow().to_string()),
             Expr::Var(id, _span) => id.itf_node(),
             Expr::Unary(op, e) => Node::branch(format!("Unary ({op:?})").cyan().to_string(), vec![e.itf_node()]),
-            Expr::Binary(op, e1, e2) => {
-                Node::branch(format!("Binary ({op:?})").cyan().to_string(), vec![e1.itf_node(), e2.itf_node()])
+            Expr::Binary(op, e1, e2) => Node::branch(
+                format!("Binary ({op:?})").cyan().to_string(),
+                vec![e1.itf_node(), e2.itf_node()],
+            ),
+            Expr::Assignment(lhs, rhs, _span) => {
+                Node::branch("Assignment".cyan().to_string(), vec![lhs.itf_node(), rhs.itf_node()])
             }
-            Expr::Assignment(lhs, rhs, _span) => Node::branch("Assignment".cyan().to_string(), vec![lhs.itf_node(), rhs.itf_node()]),
             Expr::CompoundAssignment(op, lhs, rhs, _span) => Node::branch(
                 format!("CompoundAssignment ({op:?})").cyan().to_string(),
                 vec![lhs.itf_node(), rhs.itf_node()],
             ),
-            Expr::PostFixOp(op, e, _span) => Node::branch(format!("PostFix ({op:?})").cyan().to_string(), vec![e.itf_node()]),
-            Expr::PreFixOp(op, e, _span) => Node::branch(format!("PreFix ({op:?})").cyan().to_string(), vec![e.itf_node()]),
+            Expr::PostFixOp(op, e, _span) => {
+                Node::branch(format!("PostFix ({op:?})").cyan().to_string(), vec![e.itf_node()])
+            }
+            Expr::PreFixOp(op, e, _span) => {
+                Node::branch(format!("PreFix ({op:?})").cyan().to_string(), vec![e.itf_node()])
+            }
             Expr::Conditional(condition, then_expr, else_expr) => Node::branch(
                 "Conditional".cyan().to_string(),
                 vec![
@@ -263,7 +277,10 @@ impl ItfDisplay for Stmt {
             }
             Stmt::Null => Node::leaf("Null".cyan().to_string()),
             Stmt::Goto(label) => Node::branch("Goto".cyan().to_string(), vec![label.itf_node()]),
-            Stmt::Labeled(label, stmt) => Node::branch("Labeled".cyan().to_string(), vec![label.itf_node(), stmt.stmt.itf_node()]),
+            Stmt::Labeled(label, stmt) => Node::branch(
+                "Labeled".cyan().to_string(),
+                vec![label.itf_node(), stmt.stmt.itf_node()],
+            ),
             Stmt::Compound(block) => {
                 let children: Vec<Node> = block.iter().map(|item| item.itf_node()).collect();
                 Node::branch("Compound".cyan().to_string(), children)
@@ -359,21 +376,26 @@ impl ItfDisplay for TackyInstruction {
     fn itf_node(&self) -> Node {
         match self {
             TackyInstruction::Return(v) => Node::branch("Return".cyan().to_string(), vec![v.itf_node()]),
-            TackyInstruction::Unary { op, src, dst } => {
-                Node::branch("Unary".cyan().to_string(), vec![op.itf_node(), src.itf_node(), dst.itf_node()])
-            }
+            TackyInstruction::Unary { op, src, dst } => Node::branch(
+                "Unary".cyan().to_string(),
+                vec![op.itf_node(), src.itf_node(), dst.itf_node()],
+            ),
             TackyInstruction::Binary { op, src1, src2, dst } => Node::branch(
                 "Binary".cyan().to_string(),
                 vec![op.itf_node(), src1.itf_node(), src2.itf_node(), dst.itf_node()],
             ),
-            TackyInstruction::Copy { src, dst } => Node::branch("Copy".cyan().to_string(), vec![src.itf_node(), dst.itf_node()]),
+            TackyInstruction::Copy { src, dst } => {
+                Node::branch("Copy".cyan().to_string(), vec![src.itf_node(), dst.itf_node()])
+            }
             TackyInstruction::Jump { target } => Node::branch("Jump".cyan().to_string(), vec![target.itf_node()]),
-            TackyInstruction::JumpIfZero { condition, target } => {
-                Node::branch("JumpIfZero".cyan().to_string(), vec![condition.itf_node(), target.itf_node()])
-            }
-            TackyInstruction::JumpIfNotZero { condition, target } => {
-                Node::branch("JumpIfNotZero".cyan().to_string(), vec![condition.itf_node(), target.itf_node()])
-            }
+            TackyInstruction::JumpIfZero { condition, target } => Node::branch(
+                "JumpIfZero".cyan().to_string(),
+                vec![condition.itf_node(), target.itf_node()],
+            ),
+            TackyInstruction::JumpIfNotZero { condition, target } => Node::branch(
+                "JumpIfNotZero".cyan().to_string(),
+                vec![condition.itf_node(), target.itf_node()],
+            ),
             TackyInstruction::Label(lbl) => Node::branch("Label".cyan().to_string(), vec![lbl.itf_node()]),
             TackyInstruction::FunCall { fun_name, args, dst } => {
                 let mut children = vec![fun_name.itf_node()];
@@ -403,21 +425,36 @@ impl ItfDisplay for Operand {
 impl ItfDisplay for CodegenInstruction {
     fn itf_node(&self) -> Node {
         match self {
-            CodegenInstruction::Mov { src, dst } => Node::branch("Mov".cyan().to_string(), vec![src.itf_node(), dst.itf_node()]),
-            CodegenInstruction::Unary { op, dst } => Node::branch("Unary".cyan().to_string(), vec![op.itf_node(), dst.itf_node()]),
-            CodegenInstruction::Binary { op, src, dst } => {
-                Node::branch("Binary".cyan().to_string(), vec![op.itf_node(), src.itf_node(), dst.itf_node()])
+            CodegenInstruction::Mov { src, dst } => {
+                Node::branch("Mov".cyan().to_string(), vec![src.itf_node(), dst.itf_node()])
             }
-            CodegenInstruction::Cmp { v1, v2 } => Node::branch("Cmp".cyan().to_string(), vec![v1.itf_node(), v2.itf_node()]),
+            CodegenInstruction::Unary { op, dst } => {
+                Node::branch("Unary".cyan().to_string(), vec![op.itf_node(), dst.itf_node()])
+            }
+            CodegenInstruction::Binary { op, src, dst } => Node::branch(
+                "Binary".cyan().to_string(),
+                vec![op.itf_node(), src.itf_node(), dst.itf_node()],
+            ),
+            CodegenInstruction::Cmp { v1, v2 } => {
+                Node::branch("Cmp".cyan().to_string(), vec![v1.itf_node(), v2.itf_node()])
+            }
             CodegenInstruction::Idiv(op) => Node::branch("Idiv".cyan().to_string(), vec![op.itf_node()]),
             CodegenInstruction::Cdq => Node::leaf("Cdq".cyan().to_string()),
             CodegenInstruction::Jmp(label) => Node::branch("Jmp".cyan().to_string(), vec![label.itf_node()]),
-            CodegenInstruction::JmpCC { code, label } => Node::branch("JmpCC".cyan().to_string(), vec![code.itf_node(), label.itf_node()]),
-            CodegenInstruction::SetCC { code, op } => Node::branch("SetCC".cyan().to_string(), vec![code.itf_node(), op.itf_node()]),
+            CodegenInstruction::JmpCC { code, label } => {
+                Node::branch("JmpCC".cyan().to_string(), vec![code.itf_node(), label.itf_node()])
+            }
+            CodegenInstruction::SetCC { code, op } => {
+                Node::branch("SetCC".cyan().to_string(), vec![code.itf_node(), op.itf_node()])
+            }
             CodegenInstruction::Label(l) => Node::branch("Label".cyan().to_string(), vec![l.itf_node()]),
-            CodegenInstruction::AllocateStack(off) => Node::branch("AllocateStack".cyan().to_string(), vec![off.itf_node()]),
+            CodegenInstruction::AllocateStack(off) => {
+                Node::branch("AllocateStack".cyan().to_string(), vec![off.itf_node()])
+            }
             CodegenInstruction::Ret => Node::leaf("Ret".cyan().to_string()),
-            CodegenInstruction::DeallocateStack(off) => Node::branch("DeallocateStack".cyan().to_string(), vec![off.itf_node()]),
+            CodegenInstruction::DeallocateStack(off) => {
+                Node::branch("DeallocateStack".cyan().to_string(), vec![off.itf_node()])
+            }
             CodegenInstruction::Push(op) => Node::branch("Push".cyan().to_string(), vec![op.itf_node()]),
             CodegenInstruction::Call(name) => Node::branch("Call".cyan().to_string(), vec![name.itf_node()]),
         }

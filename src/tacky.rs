@@ -1,5 +1,5 @@
 use crate::parser;
-use crate::parser::{Block, BlockItem, Declaration, VarDeclaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp};
+use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp, VarDeclaration};
 use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
 use crate::validate::NameGenerator;
 
@@ -82,14 +82,38 @@ impl From<&parser::AssignOp> for BinOp {
 #[derive(Clone, Debug)]
 pub enum Instruction {
     Return(Val),
-    Unary { op: UnaryOp, src: Val, dst: Val },
-    Binary { op: BinOp, src1: Val, src2: Val, dst: Val },
-    Copy { src: Val, dst: Val },
-    Jump { target: Identifier },
-    JumpIfZero { condition: Val, target: Identifier },
-    JumpIfNotZero { condition: Val, target: Identifier },
+    Unary {
+        op: UnaryOp,
+        src: Val,
+        dst: Val,
+    },
+    Binary {
+        op: BinOp,
+        src1: Val,
+        src2: Val,
+        dst: Val,
+    },
+    Copy {
+        src: Val,
+        dst: Val,
+    },
+    Jump {
+        target: Identifier,
+    },
+    JumpIfZero {
+        condition: Val,
+        target: Identifier,
+    },
+    JumpIfNotZero {
+        condition: Val,
+        target: Identifier,
+    },
     Label(Identifier),
-    FunCall {fun_name: Identifier, args: Vec<Val>, dst: Val}
+    FunCall {
+        fun_name: Identifier,
+        args: Vec<Val>,
+        dst: Val,
+    },
 }
 
 #[derive(Debug)]
@@ -327,7 +351,7 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
                 tacky_params.push(tacky_param);
             }
             let dst = Val::Var(name_generator.next("call"));
-            instructions.push(Instruction::FunCall{
+            instructions.push(Instruction::FunCall {
                 fun_name: fun_name.clone(),
                 args: tacky_params,
                 dst: dst.clone(),

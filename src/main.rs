@@ -113,8 +113,7 @@ fn main() {
     }
 
     // Separate C files from assembly files
-    let (c_files, asm_files): (Vec<_>, Vec<_>) = args.filenames.iter()
-        .partition(|f| f.ends_with(".c"));
+    let (c_files, asm_files): (Vec<_>, Vec<_>) = args.filenames.iter().partition(|f| f.ends_with(".c"));
 
     // For single-file debug modes (lex, parse, validate, tacky, codegen, -S),
     // only process the first C file
@@ -293,7 +292,11 @@ fn main() {
     }
 
     // Determine output file name
-    let first_file = c_files.first().or(asm_files.first()).map(|s| s.as_str()).unwrap_or("a.out");
+    let first_file = c_files
+        .first()
+        .or(asm_files.first())
+        .map(|s| s.as_str())
+        .unwrap_or("a.out");
     let path = Path::new(first_file);
     let out_file = args
         .output
@@ -323,15 +326,16 @@ fn main() {
 
         // Library search paths (architecture-specific)
         let lib_dirs = [
-            "/lib/x86_64-linux-gnu",      // Ubuntu/Debian
-            "/usr/lib/x86_64-linux-gnu",  // Alternative Ubuntu/Debian
-            "/lib64",                      // RHEL/Fedora
-            "/usr/lib64",                  // RHEL/Fedora alt
-            "/usr/lib",                    // Generic
+            "/lib/x86_64-linux-gnu",     // Ubuntu/Debian
+            "/usr/lib/x86_64-linux-gnu", // Alternative Ubuntu/Debian
+            "/lib64",                    // RHEL/Fedora
+            "/usr/lib64",                // RHEL/Fedora alt
+            "/usr/lib",                  // Generic
         ];
 
         // Find the library directory that has CRT files
-        let lib_dir = lib_dirs.iter()
+        let lib_dir = lib_dirs
+            .iter()
             .find(|d| std::path::Path::new(&format!("{}/crt1.o", d)).exists());
 
         let mut args_vec: Vec<String> = vec!["-o".to_string(), out_file.clone()];

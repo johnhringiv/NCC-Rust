@@ -15,14 +15,13 @@ enum ProgramOutput {
 #[derive(Debug)]
 struct TestCase {
     c_file: String,
-    extra_files: Vec<String>,  // Library files or assembly files
+    extra_files: Vec<String>, // Library files or assembly files
     output: ProgramOutput,
 }
 
 /// Load assembly_libs from test_properties.json
 fn load_assembly_libs() -> HashMap<String, Vec<String>> {
-    let json_content = fs::read_to_string("writing-a-c-compiler-tests/test_properties.json")
-        .unwrap_or_default();
+    let json_content = fs::read_to_string("writing-a-c-compiler-tests/test_properties.json").unwrap_or_default();
     let parsed: serde_json::Value = serde_json::from_str(&json_content).unwrap_or_default();
 
     let mut result = HashMap::new();
@@ -34,7 +33,11 @@ fn load_assembly_libs() -> HashMap<String, Vec<String>> {
                     .filter_map(|v| v.as_str())
                     .map(|s| {
                         // Add platform-specific suffix
-                        let suffix = if cfg!(target_os = "macos") { "_osx.s" } else { "_linux.s" };
+                        let suffix = if cfg!(target_os = "macos") {
+                            "_osx.s"
+                        } else {
+                            "_linux.s"
+                        };
                         format!("writing-a-c-compiler-tests/tests/{}{}", s, suffix)
                     })
                     .collect();
@@ -84,7 +87,8 @@ fn get_sandler_cases() -> Vec<TestCase> {
             || path_str.contains("invalid_declarations")
             || path_str.contains("invalid_types")
             || path_str.contains("invalid_labels")
-            || path_str.contains("invalid_struct_tags") {
+            || path_str.contains("invalid_struct_tags")
+        {
             ProgramOutput::Error(30)
         } else {
             // Valid test - get expected return code from map

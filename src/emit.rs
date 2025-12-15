@@ -1,4 +1,4 @@
-use crate::codegen::{Reg, UnaryOp, BinaryOp, Operand, Instruction, FunctionDefinition, Program};
+use crate::codegen::{BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, UnaryOp};
 
 enum RegWidth {
     Byte,
@@ -148,13 +148,13 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
                 code.ins_suffix(),
                 emit_operand(op, &RegWidth::Byte)
             ));
-        },
+        }
         Instruction::DeallocateStack(offset) => {
             output.push_str(&format!("addq ${}, %rsp", offset));
-        },
+        }
         Instruction::Push(op) => {
             output.push_str(&format!("pushq {}", emit_operand(op, &RegWidth::QWord)));
-        },
+        }
         Instruction::Call(name) => {
             // Use name.0 to get raw function name without .L prefix
             // On Linux, use @PLT for external function calls
@@ -163,7 +163,7 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
             } else {
                 output.push_str(&format!("call {}@PLT", name.0));
             }
-        },
+        }
     }
     output
 }

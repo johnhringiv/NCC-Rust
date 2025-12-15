@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use crate::parser;
 use crate::parser::Identifier;
 use crate::tacky;
 use crate::tacky::{BinOp, Val};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {
@@ -96,24 +96,32 @@ pub struct Program {
     pub functions: Vec<FunctionDefinition>,
 }
 
-fn convert_function_call(fun_name: &Identifier, args: &Vec<Val>, dst: &Val) -> Vec<Instruction> {
-    let arg_registers = [ Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9 ];
+fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val) -> Vec<Instruction> {
+    let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
     let (register_args, stack_args) = args.split_at(args.len().min(6));
     let mut instructions = Vec::new();
     let stack_padding = if stack_args.len() % 2 != 0 {
         instructions.push(Instruction::AllocateStack(8));
         8
-    } else { 0 };
+    } else {
+        0
+    };
     for (tacky_arg, reg) in register_args.iter().zip(arg_registers) {
         let assembly_arg = convert_val(tacky_arg);
-        instructions.push(Instruction::Mov { src: assembly_arg, dst: Operand::Reg(reg) });
+        instructions.push(Instruction::Mov {
+            src: assembly_arg,
+            dst: Operand::Reg(reg),
+        });
     }
     for tacky_arg in stack_args.iter().rev() {
         let assembly_arg = convert_val(tacky_arg);
         match assembly_arg {
             Operand::Imm(_) | Operand::Reg(_) => instructions.push(Instruction::Push(assembly_arg)),
             Operand::Stack(_) | Operand::Pseudo(_) => {
-                instructions.push(Instruction::Mov {src: assembly_arg, dst: Operand::Reg(Reg::AX) });
+                instructions.push(Instruction::Mov {
+                    src: assembly_arg,
+                    dst: Operand::Reg(Reg::AX),
+                });
                 instructions.push(Instruction::Push(Operand::Reg(Reg::AX)))
             }
         }
@@ -125,7 +133,10 @@ fn convert_function_call(fun_name: &Identifier, args: &Vec<Val>, dst: &Val) -> V
         instructions.push(Instruction::DeallocateStack(bytes_to_remove));
     }
     let assembly_dst = convert_val(dst);
-    instructions.push(Instruction::Mov { src: Operand::Reg(Reg::AX), dst: assembly_dst });
+    instructions.push(Instruction::Mov {
+        src: Operand::Reg(Reg::AX),
+        dst: assembly_dst,
+    });
 
     instructions
 }
@@ -286,8 +297,8 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
             let src = convert_val(src);
             let dst = convert_val(dst);
             vec![Instruction::Mov { src, dst }]
-        },
-        tacky::Instruction::FunCall { fun_name, args, dst, } => convert_function_call(&fun_name, &args, &dst)
+        }
+        tacky::Instruction::FunCall { fun_name, args, dst } => convert_function_call(fun_name, args, dst),
     }
 }
 
@@ -331,7 +342,10 @@ fn convert_function(ast: &tacky::FunctionDefinition) -> FunctionDefinition {
     let mut instructions = vec![];
 
     for (Identifier(param), reg) in params.iter().zip(arg_registers) {
-        instructions.push(Instruction::Mov {src: Operand::Reg(reg), dst: Operand::Pseudo(param.clone())});
+        instructions.push(Instruction::Mov {
+            src: Operand::Reg(reg),
+            dst: Operand::Pseudo(param.clone()),
+        });
     }
 
     for (i, Identifier(param)) in params.iter().skip(6).enumerate() {
@@ -354,11 +368,9 @@ fn convert_function(ast: &tacky::FunctionDefinition) -> FunctionDefinition {
 pub fn generate(ast: &tacky::Program) -> Program {
     let mut functions = vec![];
     for function in ast.functions.as_slice() {
-        functions.push(convert_function(&function))
+        functions.push(convert_function(function))
     }
-    let mut p = Program {
-        functions,
-    };
+    let mut p = Program { functions };
     let stack_offsets = replace_pseudo_registers(&mut p);
     fix_invalid(&mut p, &stack_offsets);
     coalesce_labels(&mut p);
@@ -433,7 +445,7 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) 
     for FunctionDefinition { name, body } in program.functions.iter_mut() {
         // stack_offset is negative, so convert to positive, round up to 16, then negate for AllocateStack
         let mut positive_offset = -stack_offsets[name];
-        if positive_offset % 16 != 0{
+        if positive_offset % 16 != 0 {
             positive_offset = ((positive_offset / 16) + 1) * 16;
         }
         let mut new_ins = vec![Instruction::AllocateStack(positive_offset)];
@@ -543,7 +555,7 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) 
 
 /// Coalesces consecutive labels by mapping subsequent labels to the first one
 pub fn coalesce_labels(program: &mut Program) {
-    for FunctionDefinition{name: _name, body} in program.functions.iter_mut() {
+    for FunctionDefinition { name: _name, body } in program.functions.iter_mut() {
         let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut new_ins = Vec::new();
         let mut current_label: Option<String> = None;

@@ -598,12 +598,10 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
                 })
             }
         }
-        Token::OpenBrace => {
-            Ok(SpannedStmt {
-                stmt: Stmt::Compound(parse_block(tokens)?),
-                span: next_token.span,
-            })
-        }
+        Token::OpenBrace => Ok(SpannedStmt {
+            stmt: Stmt::Compound(parse_block(tokens)?),
+            span: next_token.span,
+        }),
         Token::BreakKeyword => {
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Semicolon, tokens)?;
@@ -647,7 +645,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
                 match dec {
                     Declaration::VarDeclaration(var) => ForInit::InitDecl(var),
                     Declaration::FunDeclaration(_) => {
-                        return  Err(SyntaxError::with_span(
+                        return Err(SyntaxError::with_span(
                             "function declaration not allowed in for init".to_string(),
                             Some(err_span),
                         ));
@@ -766,7 +764,8 @@ fn parse_declaration(
             tokens.pop_front();
             let (name, span) = parse_identifier(tokens)?;
             if let Some(front) = tokens.front() {
-                if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) { // function declaration
+                if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) {
+                    // function declaration
                     tokens.pop_front();
                     let params = parse_function_params(tokens, &Some(span))?;
 
@@ -778,7 +777,6 @@ fn parse_declaration(
                         body,
                         span,
                     })))
-
                 } else {
                     let mut init = None;
                     if front.token == Token::Assignment {
@@ -788,8 +786,6 @@ fn parse_declaration(
                     expect(&Token::Semicolon, tokens)?;
                     Ok(Some(Declaration::VarDeclaration(VarDeclaration { name, init, span })))
                 }
-
-
             } else {
                 Err(SyntaxError::with_span(
                     "EOF when parsing declaration".to_string(),
@@ -805,6 +801,21 @@ fn parse_declaration(
             *err_span,
         ))
     }
+}
+
+fn parse_arg_comma(tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
+    if let Some(next_token) = tokens.front().cloned()
+        && next_token.token == Token::Comma
+    {
+        tokens.pop_front();
+        if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+            return Err(SyntaxError::with_span(
+                "Trailing comma not allowed.".to_string(),
+                Some(next_token.span),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_function_params(
@@ -823,15 +834,7 @@ fn parse_function_params(
                 expect(&Token::IntKeyword, tokens)?;
                 let (name, _span) = parse_identifier(tokens)?;
                 params.push(name.clone());
-                // we expect comma or close
-                if let Some(next_token) = tokens.front().cloned() {
-                    if next_token.token == Token::Comma {
-                        tokens.pop_front();
-                        if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
-                            return Err(SyntaxError::with_span("Trailing comma not allowed.".to_string(), Some(next_token.span)));
-                        }
-                    }
-                }
+                parse_arg_comma(tokens)?;
             }
         }
         expect(&Token::CloseParen, tokens)?;
@@ -844,10 +847,7 @@ fn parse_function_params(
     }
 }
 
-fn parse_function_args(
-    tokens: &mut VecDeque<SpannedToken>,
-    err_span: &Option<Span>,
-) -> Result<Vec<Expr>, SyntaxError> {
+fn parse_function_args(tokens: &mut VecDeque<SpannedToken>, err_span: &Option<Span>) -> Result<Vec<Expr>, SyntaxError> {
     let mut params = vec![];
     if let Some(front) = tokens.front().cloned() {
         if front.token == Token::VoidKeyword {
@@ -858,15 +858,7 @@ fn parse_function_args(
                     break;
                 }
                 params.push(parse_exp(tokens, 0)?);
-                // we expect comma or close
-                if let Some(next_token) = tokens.front().cloned() {
-                    if next_token.token == Token::Comma {
-                        tokens.pop_front();
-                        if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
-                            return Err(SyntaxError::with_span("Trailing comma not allowed.".to_string(), Some(next_token.span)));
-                        }
-                    }
-                }
+                parse_arg_comma(tokens)?;
             }
         }
         expect(&Token::CloseParen, tokens)?;
@@ -908,5 +900,5 @@ pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, Syn
     while !tokens.is_empty() {
         functions.push(parse_function_definition(tokens)?)
     }
-    Ok(Program{ functions })
+    Ok(Program { functions })
 }
