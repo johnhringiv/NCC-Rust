@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use crate::parser;
 use crate::parser::Identifier;
-use crate::pretty::{ItfDisplay, Node, cyan, simple_node};
 use crate::tacky;
 use crate::tacky::{BinOp, Val};
 
@@ -598,62 +597,5 @@ pub fn coalesce_labels(program: &mut Program) {
             }
         }
         *body = new_ins;
-    }
-}
-
-// Implementing ItfDisplay for the enums and structs
-simple_node!(Reg);
-simple_node!(UnaryOp);
-simple_node!(BinaryOp);
-simple_node!(CondCode);
-
-impl ItfDisplay for Operand {
-    fn itf_node(&self) -> Node {
-        match self {
-            Operand::Imm(i) => Node::branch(cyan("Imm"), vec![i.itf_node()]),
-            Operand::Reg(r) => Node::branch(cyan("Reg"), vec![r.itf_node()]),
-            Operand::Pseudo(s) => Node::branch(cyan("Pseudo"), vec![s.itf_node()]),
-            Operand::Stack(o) => Node::branch(cyan("Stack"), vec![o.itf_node()]),
-        }
-    }
-}
-
-impl ItfDisplay for Instruction {
-    fn itf_node(&self) -> Node {
-        match self {
-            Instruction::Mov { src, dst } => Node::branch(cyan("Mov"), vec![src.itf_node(), dst.itf_node()]),
-            Instruction::Unary { op, dst } => Node::branch(cyan("Unary"), vec![op.itf_node(), dst.itf_node()]),
-            Instruction::Binary { op, src, dst } => {
-                Node::branch(cyan("Binary"), vec![op.itf_node(), src.itf_node(), dst.itf_node()])
-            }
-            Instruction::Cmp { v1, v2 } => Node::branch(cyan("Cmp"), vec![v1.itf_node(), v2.itf_node()]),
-            Instruction::Idiv(op) => Node::branch(cyan("Idiv"), vec![op.itf_node()]),
-            Instruction::Cdq => Node::leaf(cyan("Cdq")),
-            Instruction::Jmp(label) => Node::branch(cyan("Jmp"), vec![label.itf_node()]),
-            Instruction::JmpCC { code, label } => Node::branch(cyan("JmpCC"), vec![code.itf_node(), label.itf_node()]),
-            Instruction::SetCC { code, op } => Node::branch(cyan("SetCC"), vec![code.itf_node(), op.itf_node()]),
-            Instruction::Label(l) => Node::branch(cyan("Label"), vec![l.itf_node()]),
-            Instruction::AllocateStack(off) => Node::branch(cyan("AllocateStack"), vec![off.itf_node()]),
-            Instruction::Ret => Node::leaf(cyan("Ret")),
-            Instruction::DeallocateStack(off) => Node::branch(cyan("DeallocateStack"), vec![off.itf_node()]),
-            Instruction::Push(op) => Node::branch(cyan("Push"), vec![op.itf_node()]),
-            Instruction::Call(name) => Node::branch(cyan("Call"), vec![name.itf_node()]),
-        }
-    }
-}
-
-impl ItfDisplay for FunctionDefinition {
-    fn itf_node(&self) -> Node {
-        let name_line = Node::leaf(format!("name: {}", self.name.itf_node().text));
-        let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
-        let body_node = Node::branch(cyan("body"), body_children);
-        Node::branch(cyan("FunctionDefinition"), vec![name_line, body_node])
-    }
-}
-
-impl ItfDisplay for Program {
-    fn itf_node(&self) -> Node {
-        let children: Vec<Node> = self.functions.iter().map(|f| f.itf_node()).collect();
-        Node::branch(cyan("Program"), children)
     }
 }

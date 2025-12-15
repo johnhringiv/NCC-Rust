@@ -400,9 +400,10 @@ fn main() {
         }
 
         let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
-        let parsed = WildArgs::parse(args_refs.iter()).expect("parse args");
+        let parsed = WildArgs::parse(|| args_refs.iter()).expect("parse args");
         let _ = libwild::setup_tracing(&parsed);
-        linker.run(&parsed).expect("link failed");
+        let activated = parsed.activate_thread_pool().expect("activate args");
+        linker.run(&activated).expect("link failed");
     }
 
     // Clean up object files
