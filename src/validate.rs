@@ -52,7 +52,7 @@ type SymbolTable = HashMap<String, Symbol>;
 struct VarInfo {
     renamed: String,
     span: Span,
-    ext_link: bool
+    ext_link: bool,
 }
 
 pub struct NameGenerator {
@@ -246,12 +246,12 @@ fn typecheck_stmt(stmt: &Stmt, symbols: &mut SymbolTable) -> Result<(), Semantic
     }
 }
 
-fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Result<(), SemanticError> {
+fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>, used_vars: &mut HashSet<String>) -> Result<(), SemanticError> {
     match exp {
         Expr::Assignment(e1, e2, span) | Expr::CompoundAssignment(_, e1, e2, span) => match &**e1 {
             Expr::Var(_, _) => {
-                resolve_exp(e1, variable_map)?;
-                resolve_exp(e2, variable_map)?;
+                resolve_exp(e1, variable_map, used_vars)?;
+                resolve_exp(e2, variable_map, used_vars)?;
                 Ok(())
             }
             _ => Err(SemanticError::with_span(
@@ -262,6 +262,7 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
         Expr::Var(Identifier(name), span) => match variable_map.get(name) {
             Some(var_info) => {
                 *name = var_info.renamed.clone();
+                used_vars.insert(name.clone());
                 Ok(())
             }
             None => Err(SemanticError::with_span(
@@ -269,15 +270,15 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
                 *span,
             )),
         },
-        Expr::Unary(_, e) => resolve_exp(e, variable_map),
+        Expr::Unary(_, e) => resolve_exp(e, variable_map, used_vars),
         Expr::Binary(_, left, right) => {
-            resolve_exp(left, variable_map)?;
-            resolve_exp(right, variable_map)
+            resolve_exp(left, variable_map, used_vars)?;
+            resolve_exp(right, variable_map, used_vars)
         }
         Expr::Constant(_) => Ok(()),
         Expr::PostFixOp(_op, e, span) | Expr::PreFixOp(_op, e, span) => match &**e {
             Expr::Var(_, _) => {
-                resolve_exp(e, variable_map)?;
+                resolve_exp(e, variable_map, used_vars)?;
                 Ok(())
             }
             _ => Err(SemanticError::with_span(
@@ -286,9 +287,9 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
             )),
         },
         Expr::Conditional(e, then_exp, else_exp) => {
-            resolve_exp(e, variable_map)?;
-            resolve_exp(then_exp, variable_map)?;
-            resolve_exp(else_exp, variable_map)?;
+            resolve_exp(e, variable_map, used_vars)?;
+            resolve_exp(then_exp, variable_map, used_vars)?;
+            resolve_exp(else_exp, variable_map, used_vars)?;
             Ok(())
         },
         Expr::FunctionCall(Identifier(name), args, span) => match variable_map.get(name) {
@@ -296,10 +297,10 @@ fn resolve_exp(exp: &mut Expr, variable_map: &HashMap<String, VarInfo>) -> Resul
                 // checking if new name matches old tells us if we have a variable shadowing
                 if name == &var_info.renamed {
                     for arg in args {
-                        resolve_exp(arg, variable_map)?;
+                        resolve_exp(arg, variable_map, used_vars)?;
                     }
                     Ok(())
-                } else { //todo create test case hitting this
+                } else {
                     Err(SemanticError::with_span(
                         format!(
                             "cannot call '{}' as a function: identifier is shadowed by variable declared at {}",
@@ -327,6 +328,7 @@ fn resolve_fun_decoration(
     labels: &mut HashSet<String>,
     jumps: &mut HashMap<String, Span>,
     name_gen: &mut NameGenerator,
+    used_vars: &mut HashSet<String>
 ) -> Result<(), SemanticError> {
     let Identifier(name) = &dec.name;
 
@@ -336,16 +338,16 @@ fn resolve_fun_decoration(
         VarInfo {
             renamed: name.clone(),
             span: dec.span,
-            ext_link: true
+            ext_link: true,
         },
     );
     if let Some(shadow) = shadow && !shadow.ext_link && block_vars.contains(name) { // declared in current scope and not externally linked
         return Err(SemanticError::with_span(
             format!(
-                "function {} already declared\n{}: {}: previous decoration was here",
-                name.bold(), // todo check
+                "cannot declare function '{}': conflicts with non-function identifier\n{}: {}: previous declaration was here",
+                name.bold(),
                 shadow.span,
-                "note".to_string().cyan(),
+                "note".cyan(),
             ),
             dec.span,
         ))
@@ -354,15 +356,24 @@ fn resolve_fun_decoration(
 
     let mut inner_map = variable_map.clone();
     let mut inner_block_vars = HashSet::new();
+    let original_params: Vec<String> = dec.params.iter()
+        .map(|Identifier(name)| name.clone())
+        .collect();
+
     for param in &mut dec.params {
         resolve_param(param, &mut inner_map, name_gen, &mut inner_block_vars, dec.span)?;
     }
 
     if let Some(block) = &mut dec.body {
-        resolve_block(block, &mut inner_block_vars, &mut inner_map, labels, jumps, name_gen)
-    } else {
-        Ok(())
+        resolve_block(block, &mut inner_block_vars, &mut inner_map, labels, jumps, name_gen, used_vars)?;
     }
+    for (Identifier(param), org_name) in dec.params.iter().zip(original_params) {
+        if !used_vars.contains(param) {
+            eprintln!("{}: {}: unused parameter '{}' {}",
+                      dec.span, "warning".purple(), org_name.bold(), "[-Wunused-parameter]".purple());
+        }
+    }
+    Ok(())
 }
 
 fn resolve_param(
@@ -382,7 +393,7 @@ fn resolve_param(
             VarInfo {
                 renamed: unique_name.clone(),
                 span,
-                ext_link: false
+                ext_link: false,
             },
         );
         if let Some(shadow) = shadow {
@@ -421,6 +432,7 @@ fn resolve_var_decoration(
     variable_map: &mut HashMap<String, VarInfo>,
     name_gen: &mut NameGenerator,
     block_vars: &mut HashSet<String>,
+    used_vars: &mut HashSet<String>
 ) -> Result<(), SemanticError> {
     let Identifier(name) = &dec.name;
 
@@ -432,7 +444,7 @@ fn resolve_var_decoration(
             VarInfo {
                 renamed: unique_name.clone(),
                 span: dec.span,
-                ext_link: false
+                ext_link: false,
             },
         );
         if let Some(shadow) = shadow {
@@ -454,7 +466,7 @@ fn resolve_var_decoration(
 
         // Resolve the initializer if present
         if let Some(init_expr) = &mut dec.init {
-            resolve_exp(init_expr, variable_map)?;
+            resolve_exp(init_expr, variable_map, used_vars)?;
         }
         Ok(())
     } else {
@@ -477,16 +489,17 @@ fn resolve_statement(
     labels: &mut HashSet<String>,
     jumps: &mut HashMap<String, Span>,
     name_gen: &mut NameGenerator,
+    used_vars: &mut HashSet<String>
 ) -> Result<(), SemanticError> {
     match &mut statement.stmt {
-        Stmt::Return(e) => resolve_exp(e, variable_map),
-        Stmt::Expression(e) => resolve_exp(e, variable_map),
+        Stmt::Return(e) => resolve_exp(e, variable_map, used_vars),
+        Stmt::Expression(e) => resolve_exp(e, variable_map, used_vars),
         Stmt::Null => Ok(()),
         Stmt::If(e, then_stmt, else_stmt) => {
-            resolve_exp(e, variable_map)?;
-            resolve_statement(then_stmt, variable_map, labels, jumps, name_gen)?;
+            resolve_exp(e, variable_map, used_vars)?;
+            resolve_statement(then_stmt, variable_map, labels, jumps, name_gen, used_vars)?;
             match else_stmt.as_mut() {
-                Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps, name_gen),
+                Some(else_stmt) => resolve_statement(else_stmt, variable_map, labels, jumps, name_gen, used_vars),
                 None => Ok(()),
             }
         }
@@ -497,7 +510,7 @@ fn resolve_statement(
                     span: None,
                 });
             }
-            resolve_statement(stmt, variable_map, labels, jumps, name_gen)
+            resolve_statement(stmt, variable_map, labels, jumps, name_gen, used_vars)
         }
         Stmt::Goto(label_name) => {
             jumps.insert(label_name.0.clone(), statement.span);
@@ -505,36 +518,38 @@ fn resolve_statement(
         }
         Stmt::Compound(block) => {
             let mut shadow_map = variable_map.clone();
-            resolve_block(block, &mut HashSet::new(), &mut shadow_map, labels, jumps, name_gen)
+            Ok(resolve_block(block, &mut HashSet::new(), &mut shadow_map, labels, jumps, name_gen, used_vars)?)
         }
         Stmt::While(exp, stmt, _) | Stmt::Switch(exp, stmt, ..) | Stmt::Case(exp, stmt, ..) => {
-            resolve_exp(exp, variable_map)?;
-            resolve_statement(stmt, variable_map, labels, jumps, name_gen)
+            resolve_exp(exp, variable_map, used_vars)?;
+            resolve_statement(stmt, variable_map, labels, jumps, name_gen, used_vars)
         }
         Stmt::DoWhile(stmt, exp, _) => {
-            resolve_statement(stmt, variable_map, labels, jumps, name_gen)?;
-            resolve_exp(exp, variable_map)
+            resolve_statement(stmt, variable_map, labels, jumps, name_gen, used_vars)?;
+            resolve_exp(exp, variable_map, used_vars)?;
+            Ok(())
         }
         Stmt::For(init, e1, e2, stmt, _) => {
             let mut shadow_map = variable_map.clone();
             match init {
                 ForInit::InitExp(exp) => {
                     if let Some(e) = exp {
-                        resolve_exp(e, &shadow_map)?;
+                        resolve_exp(e, &shadow_map, used_vars)?;
                     }
                 }
-                ForInit::InitDecl(dec) => resolve_var_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new())?,
+                ForInit::InitDecl(dec) => resolve_var_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new(), used_vars)?,
             }
             if let Some(e1) = e1 {
-                resolve_exp(e1, &shadow_map)?;
+                resolve_exp(e1, &shadow_map, used_vars)?;
             }
             if let Some(e2) = e2 {
-                resolve_exp(e2, &shadow_map)?;
+                resolve_exp(e2, &shadow_map, used_vars)?;
             }
-            resolve_statement(stmt, &mut shadow_map, labels, jumps, name_gen)
+            resolve_statement(stmt, &mut shadow_map, labels, jumps, name_gen, used_vars)?;
+            Ok(())
         }
         Stmt::Break(..) | Stmt::Continue(..) => Ok(()),
-        Stmt::Default(stmt, ..) => resolve_statement(stmt, variable_map, labels, jumps, name_gen),
+        Stmt::Default(stmt, ..) => resolve_statement(stmt, variable_map, labels, jumps, name_gen, used_vars),
     }
 }
 
@@ -809,16 +824,17 @@ fn resolve_block(
     labels: &mut HashSet<String>,
     jumps: &mut HashMap<String, Span>,
     name_gen: &mut NameGenerator,
+    used_vars: &mut HashSet<String>
 ) -> Result<(), SemanticError> {
 
     for bi in block.iter_mut() {
         match bi {
             BlockItem::Statement(stmt) => {
-                resolve_statement(stmt, variable_map, labels, jumps, name_gen)?;
+                resolve_statement(stmt, variable_map, labels, jumps, name_gen, used_vars)?;
             }
             BlockItem::Declaration(d) => match d {
                 Declaration::VarDeclaration(var) => {
-                    resolve_var_decoration(var, variable_map, name_gen, block_vars)?;
+                    resolve_var_decoration(var, variable_map, name_gen, block_vars, used_vars)?;
                 }
                 Declaration::FunDeclaration(fun) => {
                     if fun.body.is_some() {
@@ -827,7 +843,7 @@ fn resolve_block(
                             fun.span,
                         ));
                     }
-                    resolve_fun_decoration(fun, variable_map, block_vars, labels, jumps, name_gen)?
+                    resolve_fun_decoration(fun, variable_map, block_vars, labels, jumps, name_gen, used_vars)?;
                 },
             }
         }
@@ -842,13 +858,14 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
 
     let mut label_tracker = LabelTracker::new();
     for function in program.functions.iter_mut() {
+        let mut used_vars = HashSet::new();
         let mut labels = HashSet::new();
         let mut jumps: HashMap<String, Span> = HashMap::new();
         if let Some(body) = &mut function.body {
             label_block(body, &mut label_tracker)?;
         }
         let mut block_vars = HashSet::new();
-        resolve_fun_decoration(function, &mut variable_map, &mut block_vars, &mut labels, &mut jumps, &mut name_gen)?;
+        resolve_fun_decoration(function, &mut variable_map, &mut block_vars, &mut labels, &mut jumps, &mut name_gen, &mut used_vars)?;
 
         // Find jumps to non-existent labels and report with spans
         for (label, span) in jumps.iter() {

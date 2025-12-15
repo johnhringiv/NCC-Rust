@@ -770,12 +770,7 @@ fn parse_declaration(
                     tokens.pop_front();
                     let params = parse_function_params(tokens, &Some(span))?;
 
-                    let body = if tokens.front().map(|t| &t.token) == Some(&Token::OpenBrace) {
-                        Some(parse_block(tokens)?)
-                    } else {
-                        expect(&Token::Semicolon, tokens)?;
-                        None
-                    };
+                    let body = parse_function_body(tokens)?;
 
                     Ok(Some(Declaration::FunDeclaration(FunDeclaration {
                         name,
@@ -884,18 +879,21 @@ fn parse_function_args(
     }
 }
 
+fn parse_function_body(tokens: &mut VecDeque<SpannedToken>) -> Result<Option<Block>, SyntaxError> {
+    if tokens.front().map(|t| &t.token) == Some(&Token::OpenBrace) {
+        Ok(Some(parse_block(tokens)?))
+    } else {
+        expect(&Token::Semicolon, tokens)?;
+        Ok(None)
+    }
+}
+
 fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<FunDeclaration, SyntaxError> {
     expect(&Token::IntKeyword, tokens)?;
     let (name, span) = parse_identifier(tokens)?;
     expect(&Token::OpenParen, tokens)?;
     let params = parse_function_params(tokens, &Some(span))?;
-
-    let body = if tokens.front().map(|t| &t.token) == Some(&Token::OpenBrace) {
-        Some(parse_block(tokens)?)
-    } else {
-        expect(&Token::Semicolon, tokens)?;
-        None
-    };
+    let body = parse_function_body(tokens)?;
 
     Ok(FunDeclaration {
         name,

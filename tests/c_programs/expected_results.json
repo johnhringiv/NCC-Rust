@@ -58,5 +58,8 @@
   },
   "int_wrapping/overflow_tests.c": {
     "return_code": 6
+  },
+  "warnings/unused_parameter.c": {
+    "return_code": 1
   }
 }

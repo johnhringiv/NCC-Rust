@@ -405,17 +405,12 @@ pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
         let mut stack_mapping = StackMapping::new();
 
         for ins in body.iter_mut() {
-            //todo fold cases
             match ins {
-                Instruction::Mov { src, dst } => {
+                Instruction::Mov { src, dst } | Instruction::Binary { op: _, src, dst } => {
                     *src = stack_mapping.replace_pseudo(src);
                     *dst = stack_mapping.replace_pseudo(dst);
                 }
                 Instruction::Unary { op: _, dst } => *dst = stack_mapping.replace_pseudo(dst),
-                Instruction::Binary { op: _, src, dst } => {
-                    *src = stack_mapping.replace_pseudo(src);
-                    *dst = stack_mapping.replace_pseudo(dst);
-                }
                 Instruction::Idiv(src) => {
                     *src = stack_mapping.replace_pseudo(src);
                 }
@@ -423,10 +418,7 @@ pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
                     *v1 = stack_mapping.replace_pseudo(v1);
                     *v2 = stack_mapping.replace_pseudo(v2);
                 }
-                Instruction::SetCC { op, .. } => {
-                    *op = stack_mapping.replace_pseudo(op);
-                }
-                Instruction::Push(op) => {
+                Instruction::SetCC { op, .. } | Instruction::Push(op) => {
                     *op = stack_mapping.replace_pseudo(op);
                 }
                 _ => {}

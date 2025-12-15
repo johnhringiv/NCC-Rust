@@ -500,3 +500,39 @@ fn test_switch_unreachable() {
         test_warning(file, "-Wswitch-unreachable")
     }
 }
+
+#[test]
+fn test_unused_parameter_warning() {
+    let test_file = "tests/c_programs/warnings/unused_parameter.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr_output.contains("-Wunused-parameter"),
+        "Expected -Wunused-parameter warning, but stderr was: {}",
+        stderr_output
+    );
+
+    assert!(
+        stderr_output.contains("unused parameter 'y'"),
+        "Warning should mention the unused parameter 'y', but stderr was: {}",
+        stderr_output
+    );
+
+    // Ensure we don't warn about 'x' which IS used
+    assert!(
+        !stderr_output.contains("unused parameter 'x'"),
+        "Should not warn about parameter 'x' which is used, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Unused parameter warning test passed");
+}

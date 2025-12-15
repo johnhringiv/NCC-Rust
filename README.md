@@ -5,7 +5,7 @@
 A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
-So far chapter 8, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with local variables, compound statements, loops, and switch statements.
+So far chapter 9, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with functions, local variables, compound statements, loops, and switch statements.
 This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on Linux).
 All provided tests pass.
 
@@ -14,12 +14,14 @@ All provided tests pass.
 The compiler currently implements a subset of C with the following grammar:
 
 ```ebnf
-<program> ::= <function>
-<function> ::= "int" <identifier> "(" "void" ")" <block>
+<program> ::= { <function-declaration> }
+<declaration> ::= <variable-declaration> | <function-declaration>
+<variable-declaration> ::= "int" <identifier> [ "=" <exp> ] ";"
+<function-declaration> ::= "int" <identifier> "(" <param-list> ")" ( <block> | ";" )
+<param-list> ::= "void" | "int" <identifier> { "," "int" <identifier> }
 <block> ::= "{" { <block-item> } "}"
 <block-item> ::= <statement> | <declaration>
-<declaration> ::= "int" <identifier> [ "=" <exp> ] ";"
-<for-init> ::= <declaration> | [ <exp> ] ";"
+<for-init> ::= <variable-declaration> | [ <exp> ] ";"
 <statement> ::= "return" <exp> ";"
             | <exp> ";"
             | "if" "(" <exp> ")" <statement> [ "else" <statement> ]
@@ -35,9 +37,11 @@ The compiler currently implements a subset of C with the following grammar:
             | "case" <exp> ":" <statement>
             | "default" ":" <statement>
             | ";"
-<exp> ::= <factor> | <exp> <binop> <exp> | <exp> <assign-op> <exp> 
+<exp> ::= <factor> | <exp> <binop> <exp> | <exp> <assign-op> <exp>
        | <exp> "?" <exp> ":" <exp> | <exp> "++" | <exp> "--"
 <factor> ::= <int> | <identifier> | <unop> <factor> | "++" <factor> | "--" <factor> | "(" <exp> ")"
+          | <identifier> "(" [ <argument-list> ] ")"
+<argument-list> ::= <exp> { "," <exp> }
 <unop> ::= "-" | "~" | "!"
 <binop> ::= "-" | "+" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" | "&&" | "||"
          | "==" | "!=" | "<" | "<=" | ">" | ">="
@@ -49,7 +53,8 @@ The compiler currently implements a subset of C with the following grammar:
 ### Supported Features
 
 The compiler supports:
-- **Single function programs** with `int main(void)` signature
+- **Multiple functions**: Function definitions and forward declarations
+- **Function calls**: Call functions with arguments using the x86-64 System V ABI (first 6 integer arguments in registers RDI, RSI, RDX, RCX, R8, R9; additional arguments on the stack)
 - **Local variable declarations** with optional initialization
 - **Compound statements (blocks)**: `{ ... }` with proper scoping
 - **Variable scoping**: Block-local variables with shadowing support
@@ -81,8 +86,9 @@ NCC provides several safety features and guarantees to help developers write mor
 - **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from evaluation order.
 
 #### Compile-Time Warnings
-- **Variable shadowing** (`Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer scope
-- **Duplicate switch cases** (` Wswitch-unreachable`): Detects and reports duplicate case values in switch statements, including those from constant expressions
+- **Variable shadowing** (`-Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer scope
+- **Duplicate switch cases** (`-Wswitch-unreachable`): Detects and reports duplicate case values in switch statements, including those from constant expressions
+- **Unused parameters** (`-Wunused-parameter`): Warns when a function parameter is declared but never used in the function body
 
 #### Developer Experience
 - **Precise error locations**: All errors and warnings include exact line and column numbers with file:line:column format, making it easy to locate problematic code
