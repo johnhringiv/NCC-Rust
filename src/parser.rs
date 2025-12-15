@@ -252,27 +252,30 @@ impl SyntaxError {
             .as_ref()
             .map(|t| format!("{}", t).bold().to_string())
             .unwrap_or("end of file".to_string());
-        let found_str = found
-            .as_ref()
-            .map(|t| format!("{}", t.token).bold().to_string())
-            .unwrap_or("end of file".bold().to_string());
         let span = found.as_ref().map(|t| t.span);
 
         SyntaxError {
-            message: format!("expected {}, found {}", expected_str, found_str),
+            message: format!(
+                "expected {}, found {}",
+                expected_str,
+                SyntaxError::get_found_str(&found)
+            ),
             span,
         }
     }
 
-    pub fn expression(found: Option<SpannedToken>) -> Self {
-        let found_str = found
+    fn get_found_str(found: &Option<SpannedToken>) -> String {
+        found
             .as_ref()
             .map(|t| format!("{}", t.token).bold().to_string())
-            .unwrap_or("end of file".bold().to_string());
+            .unwrap_or_else(|| "end of file".bold().to_string())
+    }
+
+    pub fn expression(found: Option<SpannedToken>) -> Self {
         let span = found.as_ref().map(|t| t.span);
 
         SyntaxError {
-            message: format!("expected an expression, found {}", found_str),
+            message: format!("expected an expression, found {}", SyntaxError::get_found_str(&found)),
             span,
         }
     }
