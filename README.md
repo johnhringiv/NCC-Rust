@@ -133,28 +133,30 @@ cargo test
 
 ## Usage
 
-Usage: ncc [OPTIONS] `FILENAME`
+Usage: ncc [OPTIONS] `<FILENAMES>...`
 
 ### Arguments
-`FILENAME` Input file (required)
+`<FILENAMES>...` Input files (required). Supports multiple C and assembly files.
 
 ### Options
-| Option                    | Description                           |
-|---------------------------|---------------------------------------|
-| `--lex`                   | Run lexer                             |
-| `--parse`                 | Run lexer and parser                  |
-| `--validate`              | Run lexer, parser, and validator      |
-| `--codegen`               | Run lexer, parser, and code generator |
-| `--tacky`                 | Emit TACKY IR                         |
-| `--run`                   | Run Compiled Program and print result |
-| `--gcc`                   | Use GCC for linking (instead of wild) |
-| `-S`                      | Emits assembly                        |
-| `-o`, `--output <OUTPUT>` | Override output file location         |
-| `-h`, `--help`            | Print help                            |
-| `-V`, `--version`         | Print version                         |
+| Option                    | Description                                        |
+|---------------------------|----------------------------------------------------|
+| `--lex`                   | Run lexer                                          |
+| `--parse`                 | Run lexer and parser                               |
+| `--validate`              | Run lexer, parser, and validator                   |
+| `--codegen`               | Run lexer, parser, and code generator              |
+| `--tacky`                 | Emit TACKY IR                                      |
+| `-S`                      | Emit assembly                                      |
+| `--run`                   | Run compiled program and print result              |
+| `-c`                      | Emit object file only (no linking)                 |
+| `--gcc`                   | Use GCC for linking (instead of wild)              |
+| `--static`                | Link statically (no runtime dependencies)          |
+| `--no-iced`               | Use text-based asm building instead of iced (deprecated) |
+| `-o`, `--output <OUTPUT>` | Override output file location                      |
+| `-h`, `--help`            | Print help                                         |
+| `-V`, `--version`         | Print version                                      |
 
-
-Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `--run` are mutually exclusive options.
+Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `-S`, `--run`, `-c` are mutually exclusive options.
 
 ### Exit Codes
 
