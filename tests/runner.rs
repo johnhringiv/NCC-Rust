@@ -6,10 +6,10 @@ use std::path::PathBuf;
 static CHAPTER_COMPLETED: i32 = 9;
 static EXTRA_COMPLETED: i32 = 9;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum ProgramOutput {
     Error(i32),
-    Result(i32),
+    Result { code: i32, stdout: Option<String> },
 }
 
 #[derive(Debug)]
@@ -101,8 +101,11 @@ fn get_sandler_cases() -> Vec<TestCase> {
             } else {
                 relative_path.to_string()
             };
-            let expected_value = *expected_results.get(&lookup_path).unwrap_or(&0);
-            ProgramOutput::Result(expected_value)
+            let expected = expected_results.get(&lookup_path);
+            ProgramOutput::Result {
+                code: expected.map(|e| e.return_code).unwrap_or(0),
+                stdout: expected.and_then(|e| e.stdout.clone()),
+            }
         };
 
         // Determine extra files (library files or assembly files)
@@ -153,8 +156,11 @@ fn get_custom_cases() -> Vec<TestCase> {
         } else {
             // Valid test - get expected return code from map
             let relative_path = path_str.strip_prefix("tests/c_programs/").unwrap_or(path_str);
-            let expected_value = *expected_results.get(relative_path).unwrap_or(&0);
-            ProgramOutput::Result(expected_value)
+            let expected = expected_results.get(relative_path);
+            ProgramOutput::Result {
+                code: expected.map(|e| e.return_code).unwrap_or(0),
+                stdout: expected.and_then(|e| e.stdout.clone()),
+            }
         };
 
         cases.push(TestCase {
@@ -206,7 +212,12 @@ fn get_ncc_binary_path() -> PathBuf {
     best_path
 }
 
-fn load_expected(json_path: &str) -> Result<HashMap<String, i32>, Box<dyn std::error::Error>> {
+struct ExpectedResult {
+    return_code: i32,
+    stdout: Option<String>,
+}
+
+fn load_expected(json_path: &str) -> Result<HashMap<String, ExpectedResult>, Box<dyn std::error::Error>> {
     let json_content = fs::read_to_string(json_path)?;
 
     let parsed: serde_json::Value = serde_json::from_str(&json_content)?;
@@ -215,7 +226,11 @@ fn load_expected(json_path: &str) -> Result<HashMap<String, i32>, Box<dyn std::e
     if let serde_json::Value::Object(obj) = parsed {
         for (file_path, value) in obj {
             if let Some(return_code) = value.get("return_code").and_then(|v| v.as_i64()) {
-                results.insert(file_path, return_code as i32);
+                let stdout = value.get("stdout").and_then(|v| v.as_str()).map(|s| s.to_string());
+                results.insert(file_path, ExpectedResult {
+                    return_code: return_code as i32,
+                    stdout,
+                });
             }
         }
     }
@@ -228,6 +243,7 @@ fn run_test(
     total_failed: &mut usize,
     failed_tests: &mut Vec<String>,
     extra_args: &[String],
+    test_label: &str,
 ) {
     let path = std::path::Path::new(&case.c_file);
     let binary_path = path.with_extension("");
@@ -255,19 +271,173 @@ fn run_test(
         let run_output = std::process::Command::new(binary_path_str).output().unwrap();
 
         let return_code = run_output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
         std::fs::remove_file(&binary_path).ok();
-        ProgramOutput::Result(return_code)
+        ProgramOutput::Result {
+            code: return_code,
+            stdout: if stdout.is_empty() { None } else { Some(stdout) },
+        }
     } else {
         ProgramOutput::Error(compile_output.status.code().unwrap_or(-1))
     };
 
-    if actual == case.output {
+    let passed = match (&actual, &case.output) {
+        (ProgramOutput::Error(a), ProgramOutput::Error(b)) => a == b,
+        (
+            ProgramOutput::Result { code: a_code, stdout: a_stdout },
+            ProgramOutput::Result { code: b_code, stdout: b_stdout },
+        ) => {
+            let code_match = a_code == b_code;
+            let stdout_match = match (a_stdout, b_stdout) {
+                (_, None) => true, // No expected stdout means we don't check
+                (Some(a), Some(b)) => a == b,
+                (None, Some(_)) => false,
+            };
+            code_match && stdout_match
+        }
+        _ => false,
+    };
+
+    if passed {
+        *total_passed += 1;
+    } else {
+        *total_failed += 1;
+        let label = if test_label.is_empty() {
+            case.c_file.clone()
+        } else {
+            format!("{} [{}]", case.c_file, test_label)
+        };
+        failed_tests.push(format!(
+            "{} (expected {:?}, got {:?})",
+            label, case.output, actual
+        ));
+    }
+}
+
+/// Runs a cross-compilation test for library files
+/// Compiles client with one compiler and library with the other, then links
+fn run_library_cross_test(
+    client_file: &str,
+    library_file: &str,
+    expected: &ProgramOutput,
+    total_passed: &mut usize,
+    total_failed: &mut usize,
+    failed_tests: &mut Vec<String>,
+    ncc_compiles_client: bool,
+) {
+    let ncc_path = get_ncc_binary_path();
+    let path = std::path::Path::new(client_file);
+    let binary_path = path.with_extension("");
+    let binary_path_str = binary_path.to_str().unwrap();
+
+    let client_obj = path.with_extension("o");
+    let lib_path = std::path::Path::new(library_file);
+    let library_obj = lib_path.with_extension("o");
+
+    let test_label = if ncc_compiles_client {
+        "ncc client + gcc lib"
+    } else {
+        "gcc client + ncc lib"
+    };
+
+    // Compile client
+    let client_status = if ncc_compiles_client {
+        std::process::Command::new(&ncc_path)
+            .arg("-c")
+            .arg(client_file)
+            .arg("-o")
+            .arg(&client_obj)
+            .status()
+    } else {
+        std::process::Command::new("gcc")
+            .arg("-c")
+            .arg(client_file)
+            .arg("-o")
+            .arg(&client_obj)
+            .status()
+    };
+
+    if client_status.is_err() || !client_status.unwrap().success() {
+        *total_failed += 1;
+        failed_tests.push(format!("{} [{}] (client compilation failed)", client_file, test_label));
+        return;
+    }
+
+    // Compile library
+    let library_status = if ncc_compiles_client {
+        std::process::Command::new("gcc")
+            .arg("-c")
+            .arg(library_file)
+            .arg("-o")
+            .arg(&library_obj)
+            .status()
+    } else {
+        std::process::Command::new(&ncc_path)
+            .arg("-c")
+            .arg(library_file)
+            .arg("-o")
+            .arg(&library_obj)
+            .status()
+    };
+
+    if library_status.is_err() || !library_status.unwrap().success() {
+        std::fs::remove_file(&client_obj).ok();
+        *total_failed += 1;
+        failed_tests.push(format!("{} [{}] (library compilation failed)", client_file, test_label));
+        return;
+    }
+
+    // Link with gcc
+    let link_status = std::process::Command::new("gcc")
+        .arg(&client_obj)
+        .arg(&library_obj)
+        .arg("-o")
+        .arg(binary_path_str)
+        .status();
+
+    std::fs::remove_file(&client_obj).ok();
+    std::fs::remove_file(&library_obj).ok();
+
+    if link_status.is_err() || !link_status.unwrap().success() {
+        *total_failed += 1;
+        failed_tests.push(format!("{} [{}] (linking failed)", client_file, test_label));
+        return;
+    }
+
+    // Run the binary
+    let run_output = std::process::Command::new(binary_path_str).output().unwrap();
+    std::fs::remove_file(&binary_path).ok();
+
+    let return_code = run_output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+    let actual = ProgramOutput::Result {
+        code: return_code,
+        stdout: if stdout.is_empty() { None } else { Some(stdout) },
+    };
+
+    let passed = match (&actual, expected) {
+        (
+            ProgramOutput::Result { code: a_code, stdout: a_stdout },
+            ProgramOutput::Result { code: b_code, stdout: b_stdout },
+        ) => {
+            let code_match = a_code == b_code;
+            let stdout_match = match (a_stdout, b_stdout) {
+                (_, None) => true,
+                (Some(a), Some(b)) => a == b,
+                (None, Some(_)) => false,
+            };
+            code_match && stdout_match
+        }
+        _ => false,
+    };
+
+    if passed {
         *total_passed += 1;
     } else {
         *total_failed += 1;
         failed_tests.push(format!(
-            "{} (expected {:?}, got {:?})",
-            case.c_file, case.output, actual
+            "{} [{}] (expected {:?}, got {:?})",
+            client_file, test_label, expected, actual
         ));
     }
 }
@@ -278,17 +448,49 @@ fn run_cases(cases: Vec<TestCase>) {
     let mut failed_tests = Vec::new();
 
     for case in &cases {
-        match case.output {
-            ProgramOutput::Error(_) => run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[]),
-            ProgramOutput::Result(_) => {
-                run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[]);
-                run_test(
-                    case,
-                    &mut total_passed,
-                    &mut total_failed,
-                    &mut failed_tests,
-                    &["--no-iced".to_string()],
-                );
+        let is_library_test = case.c_file.contains("/libraries/") && case.c_file.ends_with("_client.c");
+
+        match &case.output {
+            ProgramOutput::Error(_) => {
+                run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[], "");
+            }
+            ProgramOutput::Result { .. } => {
+                // For library tests, use cross-compilation to validate ABI compliance
+                if is_library_test {
+                    if let Some(library_file) = case.extra_files.first() {
+                        // Test 1: ncc compiles client, gcc compiles library (validates ncc as caller)
+                        run_library_cross_test(
+                            &case.c_file,
+                            library_file,
+                            &case.output,
+                            &mut total_passed,
+                            &mut total_failed,
+                            &mut failed_tests,
+                            true,
+                        );
+                        // Test 2: gcc compiles client, ncc compiles library (validates ncc as callee)
+                        run_library_cross_test(
+                            &case.c_file,
+                            library_file,
+                            &case.output,
+                            &mut total_passed,
+                            &mut total_failed,
+                            &mut failed_tests,
+                            false,
+                        );
+                    }
+                } else {
+                    // Standard test: compile everything with ncc
+                    run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[], "");
+                    run_test(
+                        case,
+                        &mut total_passed,
+                        &mut total_failed,
+                        &mut failed_tests,
+                        &["--no-iced".to_string()],
+                        "no-iced",
+                    );
+                }
             }
         }
     }
@@ -299,6 +501,7 @@ fn run_cases(cases: Vec<TestCase>) {
         &mut total_failed,
         &mut failed_tests,
         &["--gcc".to_string()],
+        "gcc-link",
     );
 
     println!("\n=== C Programs Test Results ===");
