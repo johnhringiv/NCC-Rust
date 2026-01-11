@@ -182,6 +182,7 @@ fn main() {
             let mut formatter = iced_x86::GasFormatter::with_options(Some(Box::new(resolver)), None);
             let ops = formatter.options_mut();
             ops.set_number_base(iced_x86::NumberBase::Decimal);
+            ops.set_rip_relative_addresses(true);
             let mut output = MyFormatterOutput::new();
 
             println!("Generated ASM\n");
@@ -206,6 +207,24 @@ fn main() {
                 }
                 println!();
                 current_offset += ins.len();
+            }
+
+            // Print static variables
+            if !code_ast.static_vars.is_empty() {
+                println!();
+                for sv in &code_ast.static_vars {
+                    let section = if sv.init == 0 { ".bss" } else { ".data" };
+                    println!("{}", section.cyan());
+                    if sv.global {
+                        println!("  {}", format!(".globl {}", sv.name).dimmed());
+                    }
+                    println!("{}:", sv.name.green());
+                    if sv.init == 0 {
+                        println!("  {}", ".zero 4".yellow());
+                    } else {
+                        println!("  {} {}", ".long".yellow(), sv.init.to_string().cyan());
+                    }
+                }
             }
 
             std::process::exit(0);

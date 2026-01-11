@@ -622,6 +622,68 @@ fn test_label_printing_with_iced() {
 }
 
 #[test]
+fn test_data_symbol_resolution_with_iced() {
+    // Test that -S output shows data symbol names for RIP-relative accesses
+    let test_file = "writing-a-c-compiler-tests/tests/chapter_10/valid/multiple_static_file_scope_vars.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("-S")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    let asm_output = String::from_utf8_lossy(&output.stdout);
+
+    // Check that data symbol names appear in RIP-relative addressing (e.g., "foo(%rip)")
+    let has_data_symbol = asm_output
+        .lines()
+        .any(|line| line.contains("(%rip)") && !line.trim().starts_with('.'));
+
+    assert!(
+        has_data_symbol,
+        "No data symbol references found in assembly output. Expected symbol(%rip) format.\nOutput:\n{}",
+        asm_output
+    );
+
+    // Verify the symbol name is used, not just a numeric displacement
+    // Look for pattern like "foo(%rip)" where foo is an identifier
+    let has_named_symbol = asm_output.lines().any(|line| {
+        if let Some(idx) = line.find("(%rip)") {
+            // Get the part before (%rip)
+            let before = &line[..idx];
+            // Check if it ends with an identifier (letters, digits, underscore, dot)
+            if let Some(last_word) = before.split_whitespace().last() {
+                // Should contain at least one letter (not just numbers like "-8")
+                last_word.chars().any(|c| c.is_alphabetic())
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    });
+
+    assert!(
+        has_named_symbol,
+        "Data references use numeric displacements instead of symbol names.\nOutput:\n{}",
+        asm_output
+    );
+
+    // Check that static variables are shown in .data or .bss section
+    let has_data_section = asm_output.contains(".data") || asm_output.contains(".bss");
+    assert!(
+        has_data_section,
+        "No .data or .bss section found in assembly output"
+    );
+
+    println!("✓ Data symbol resolution test passed");
+}
+
+#[test]
 fn test_parser_printing() {
     // Test with a file that should generate labels
     let test_file = "writing-a-c-compiler-tests/tests/chapter_6/valid/extra_credit/compound_if_expression.c";

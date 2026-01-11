@@ -12,29 +12,40 @@ use object::{
 };
 use std::collections::HashMap;
 
-// Symbol resolver for displaying labels in assembly output
+/// Symbol resolver for displaying labels in assembly output.
+///
+/// Handles two types of symbol resolution:
+/// - `symbols`: Direct address-to-name mapping for functions and internal labels
+/// - `reloc_symbols`: Instruction IP to symbol name for RIP-relative data references
 pub struct MySymbolResolver {
     symbols: HashMap<u64, String>,
+    reloc_symbols: HashMap<u64, String>,
 }
 
 impl MySymbolResolver {
-    fn new(symbols: HashMap<u64, String>) -> Self {
-        Self { symbols }
+    fn new(symbols: HashMap<u64, String>, reloc_symbols: HashMap<u64, String>) -> Self {
+        Self { symbols, reloc_symbols }
     }
 }
 
 impl SymbolResolver for MySymbolResolver {
     fn symbol(
         &'_ mut self,
-        _instruction: &iced_x86::Instruction,
+        instruction: &iced_x86::Instruction,
         _operand: u32,
         _instruction_operand: Option<u32>,
         address: u64,
         _address_size: u32,
     ) -> Option<SymbolResult<'_>> {
-        self.symbols
-            .get(&address)
-            .map(|name| SymbolResult::with_str(address, name.as_str()))
+        // First check direct address mapping (functions, internal labels)
+        if let Some(name) = self.symbols.get(&address) {
+            return Some(SymbolResult::with_str(address, name.as_str()));
+        }
+        // Then check relocation-based symbols (data references)
+        if let Some(name) = self.reloc_symbols.get(&instruction.ip()) {
+            return Some(SymbolResult::with_str(address, name.as_str()));
+        }
+        None
     }
 }
 
@@ -42,6 +53,8 @@ impl SymbolResolver for MySymbolResolver {
 pub fn get_instructions(
     program: &codegen::Program,
 ) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, String>), Box<dyn std::error::Error>> {
+    use object::read::RelocationTarget;
+
     let (obj_bytes, internal_labels) = emit_object_with_labels(program)?;
 
     // Parse the object file
@@ -50,6 +63,14 @@ pub fn get_instructions(
     // Extract .text section
     let text_section = obj.section_by_name(".text").ok_or("No .text section found")?;
     let code = text_section.data()?;
+
+    // Build symbol index to name map
+    let mut symbol_names: HashMap<object::SymbolIndex, String> = HashMap::new();
+    for symbol in obj.symbols() {
+        if let Ok(name) = symbol.name() {
+            symbol_names.insert(symbol.index(), name.to_string());
+        }
+    }
 
     // Build symbol resolver from object file symbols
     let mut address_map = HashMap::new();
@@ -79,6 +100,14 @@ pub fn get_instructions(
     decoder.set_ip(0);
     let instructions: Vec<iced_x86::Instruction> = decoder.into_iter().collect();
 
+    // Build instruction offset ranges: (start, end) for each instruction
+    let mut ins_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut offset = 0;
+    for ins in &instructions {
+        ins_ranges.push((offset, offset + ins.len()));
+        offset += ins.len();
+    }
+
     // Map instruction indices from internal_labels to byte offsets
     let mut current_offset = 0;
     for (ins_idx, ins) in instructions.iter().enumerate() {
@@ -90,7 +119,24 @@ pub fn get_instructions(
         current_offset += ins.len();
     }
 
-    Ok((instructions, MySymbolResolver::new(address_map), label_idx))
+    // Build relocation-based symbol map: instruction IP -> symbol name
+    // This allows the symbol resolver to show data symbol names for RIP-relative accesses
+    let mut reloc_symbols: HashMap<u64, String> = HashMap::new();
+    for (reloc_offset, reloc) in text_section.relocations() {
+        if let RelocationTarget::Symbol(sym_idx) = reloc.target() {
+            if let Some(symbol_name) = symbol_names.get(&sym_idx) {
+                // Find which instruction contains this relocation
+                for (_ins_idx, (start, end)) in ins_ranges.iter().enumerate() {
+                    if reloc_offset as usize >= *start && (reloc_offset as usize) < *end {
+                        reloc_symbols.insert(*start as u64, symbol_name.clone());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((instructions, MySymbolResolver::new(address_map, reloc_symbols), label_idx))
 }
 
 pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
