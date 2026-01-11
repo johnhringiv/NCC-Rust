@@ -675,10 +675,7 @@ fn test_data_symbol_resolution_with_iced() {
 
     // Check that static variables are shown in .data or .bss section
     let has_data_section = asm_output.contains(".data") || asm_output.contains(".bss");
-    assert!(
-        has_data_section,
-        "No .data or .bss section found in assembly output"
-    );
+    assert!(has_data_section, "No .data or .bss section found in assembly output");
 
     println!("✓ Data symbol resolution test passed");
 }

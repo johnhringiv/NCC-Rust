@@ -5,7 +5,7 @@
 A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
-So far chapter 9, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with functions, local variables, compound statements, loops, and switch statements.
+So far chapter 10, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with functions, local and file-scope variables, storage-class specifiers, compound statements, loops, and switch statements.
 This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on Linux).
 All provided tests pass.
 
@@ -57,6 +57,8 @@ The compiler supports:
 - **Multiple functions**: Function definitions and forward declarations
 - **Function calls**: Call functions with arguments using the x86-64 System V ABI (first 6 integer arguments in registers RDI, RSI, RDX, RCX, R8, R9; additional arguments on the stack)
 - **Local variable declarations** with optional initialization
+- **File-scope (global) variables**: Defined at file scope with optional initializers (must be constant expressions)
+- **Storage-class specifiers**: `static` (internal linkage) and `extern` (external linkage) for both variables and functions
 - **Compound statements (blocks)**: `{ ... }` with proper scoping
 - **Variable scoping**: Block-local variables with shadowing support
 - **Integer arithmetic**: addition, subtraction, multiplication, division, modulo

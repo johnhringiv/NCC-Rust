@@ -124,11 +124,20 @@ pub struct FunctionDefinition {
     pub global: bool,
 }
 
+/// Storage initialization for static variables.
+#[derive(Debug, Clone)]
+pub enum VarInit {
+    /// Variable defined here with initial value (0 = .bss, non-zero = .data)
+    Defined(i32),
+    /// Extern variable - no storage allocated, resolved by linker
+    Extern,
+}
+
 #[derive(Debug, Clone)]
 pub struct StaticVariable {
     pub name: String,
     pub global: bool,
-    pub init: i32,
+    pub init: VarInit,
 }
 
 #[derive(Debug)]
@@ -140,9 +149,6 @@ pub enum TopLevel {
 #[derive(Debug)]
 pub struct Program {
     pub top_level: Vec<TopLevel>,
-    /// Names of extern variables declared but not defined in this translation unit.
-    /// These need Data operands in codegen but won't have StaticVariable definitions.
-    pub extern_vars: Vec<String>,
 }
 
 /// Converts AST expressions into TACKY IR instructions.
@@ -594,39 +600,42 @@ fn tackify_function(
 /// Converts static variables from the symbol table into TACKY IR definitions.
 ///
 /// Iterates through all symbols and emits `StaticVariable` entries for variables
-/// with static storage duration. Variables with `NoInitializer` (extern declarations
-/// without definitions) are collected separately for proper code generation.
-/// Tentative definitions are initialized to 0.
+/// with static storage duration:
+/// - `VarInit::Defined(value)` for defined variables (Initial or Tentative)
+/// - `VarInit::Extern` for extern declarations (defined elsewhere)
 ///
-/// Returns (static_variable_defs, extern_var_names)
-fn convert_symbols_to_tacky(symbols: &SymbolTable) -> (Vec<TopLevel>, Vec<String>) {
+/// Tentative definitions are initialized to 0.
+fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<TopLevel> {
     let mut tacky_defs = vec![];
-    let mut extern_vars = vec![];
     for (name, entry) in symbols.iter() {
         if let SymbolType::Int(init) = &entry.symbol_type {
             match init {
                 InitialValue::Initial(i) => tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
                     name: name.clone(),
                     global: entry.global,
-                    init: *i,
+                    init: VarInit::Defined(*i),
                 })),
                 InitialValue::Tentative => tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
                     name: name.clone(),
                     global: entry.global,
-                    init: 0,
+                    init: VarInit::Defined(0),
                 })),
                 InitialValue::NoInitializer => {
-                    // Only add to extern_vars if it's not a renamed local variable.
+                    // Only add extern vars if it's not a renamed local variable.
                     // Renamed locals have dots in their names (e.g., "i.1").
                     // File-scope extern declarations keep their original names.
                     if !name.contains('.') {
-                        extern_vars.push(name.clone());
+                        tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
+                            name: name.clone(),
+                            global: entry.global,
+                            init: VarInit::Extern,
+                        }));
                     }
                 }
             }
         }
     }
-    (tacky_defs, extern_vars)
+    tacky_defs
 }
 
 /// Converts a parsed C program into TACKY IR.
@@ -640,14 +649,14 @@ pub fn tackify_program(
 ) -> Program {
     let mut top_level = Vec::new();
     for decl in &program.declarations {
-        if let Declaration::FunDeclaration(func) = decl {
-            if func.body.is_some() {
-                top_level.push(TopLevel::Function(tackify_function(func, name_generator, symbols)));
-            }
+        if let Declaration::FunDeclaration(func) = decl
+            && func.body.is_some()
+        {
+            top_level.push(TopLevel::Function(tackify_function(func, name_generator, symbols)));
         }
     }
 
-    let (static_var_defs, extern_vars) = convert_symbols_to_tacky(symbols);
+    let static_var_defs = convert_symbols_to_tacky(symbols);
     top_level.extend(static_var_defs);
-    Program { top_level, extern_vars }
+    Program { top_level }
 }

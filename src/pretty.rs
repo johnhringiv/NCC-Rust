@@ -11,8 +11,8 @@ use crate::parser::{
     Program as ParserProgram, SpannedStmt, Stmt, UnaryOp as ParserUnaryOp, VarDeclaration,
 };
 use crate::tacky::{
-    BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction,
-    Program as TackyProgram, StaticVariable, TopLevel, Val,
+    BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction, Program as TackyProgram,
+    StaticVariable, TopLevel, Val, VarInit,
 };
 
 #[derive(Clone)]
@@ -162,7 +162,10 @@ delegate_variants!(Declaration {
     FunDeclaration
 });
 delegate_variants!(BlockItem { Statement, Declaration });
-delegate_variants!(TopLevel { Function, StaticVariable });
+delegate_variants!(TopLevel {
+    Function,
+    StaticVariable
+});
 
 // Macro for wrapper types that delegate to a single field
 macro_rules! delegate_field {
@@ -426,12 +429,16 @@ impl ItfDisplay for TackyInstruction {
 
 impl ItfDisplay for StaticVariable {
     fn itf_node(&self) -> Node {
+        let init_str = match &self.init {
+            VarInit::Defined(v) => v.to_string(),
+            VarInit::Extern => "extern".to_string(),
+        };
         Node::branch(
             "StaticVariable".cyan().to_string(),
             vec![
                 Node::leaf(format!("name: {}", self.name.green())),
                 Node::leaf(format!("global: {}", self.global)),
-                Node::leaf(format!("init: {}", self.init.to_string().magenta())),
+                Node::leaf(format!("init: {}", init_str.magenta())),
             ],
         )
     }

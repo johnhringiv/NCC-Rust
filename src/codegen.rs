@@ -103,8 +103,6 @@ pub struct FunctionDefinition {
 pub struct Program {
     pub functions: Vec<FunctionDefinition>,
     pub static_vars: Vec<StaticVariable>,
-    /// Names of extern variables declared but not defined in this translation unit.
-    pub extern_vars: Vec<String>,
 }
 
 fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val) -> Vec<Instruction> {
@@ -384,12 +382,7 @@ pub fn generate(ast: &tacky::Program) -> Program {
             tacky::TopLevel::StaticVariable(s) => static_vars.push(s.clone()),
         }
     }
-    let extern_vars = ast.extern_vars.clone();
-    let mut p = Program {
-        functions,
-        static_vars,
-        extern_vars,
-    };
+    let mut p = Program { functions, static_vars };
     let stack_offsets = replace_pseudo_registers(&mut p);
     fix_invalid(&mut p, &stack_offsets);
     coalesce_labels(&mut p);
@@ -450,9 +443,8 @@ impl StackMapping {
 /// static variable references to Data operands. Returns a map of function
 /// names to their total stack space used (as negative offsets from RBP).
 pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
-    // Collect data vars upfront to avoid borrow conflict in the loop
-    let mut data_vars: HashSet<String> = program.static_vars.iter().map(|v| v.name.clone()).collect();
-    data_vars.extend(program.extern_vars.iter().cloned());
+    // Collect data vars (static + extern) upfront to avoid borrow conflict in the loop
+    let data_vars: HashSet<String> = program.static_vars.iter().map(|v| v.name.clone()).collect();
 
     let mut offsets = HashMap::new();
     for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {

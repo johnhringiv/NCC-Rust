@@ -1,5 +1,5 @@
 use crate::codegen::{BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, UnaryOp};
-use crate::tacky::StaticVariable;
+use crate::tacky::{StaticVariable, VarInit};
 
 enum RegWidth {
     Byte,
@@ -206,22 +206,27 @@ fn emit_static_variable(sv: &StaticVariable) -> String {
         name.to_string()
     };
 
+    // Extern variables don't need any output - they're resolved by the linker
+    let VarInit::Defined(init_val) = init else {
+        return output;
+    };
+
     if *global {
         output.push_str(&format!("\t.globl {processed_name}\n"));
     }
 
-    if *init == 0 {
+    if *init_val == 0 {
         // BSS section for zero-initialized data
         output.push_str("\t.bss\n");
-        output.push_str(&format!("\t.align 4\n"));
+        output.push_str("\t.align 4\n");
         output.push_str(&format!("{processed_name}:\n"));
         output.push_str("\t.zero 4\n");
     } else {
         // Data section for initialized data
         output.push_str("\t.data\n");
-        output.push_str(&format!("\t.align 4\n"));
+        output.push_str("\t.align 4\n");
         output.push_str(&format!("{processed_name}:\n"));
-        output.push_str(&format!("\t.long {init}\n"));
+        output.push_str(&format!("\t.long {init_val}\n"));
     }
 
     output

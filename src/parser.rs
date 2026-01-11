@@ -190,11 +190,11 @@ pub enum ForInit {
 #[derive(PartialEq, Clone, Debug)]
 pub enum StorageClass {
     Static,
-    Extern
+    Extern,
 }
 
 pub enum TypeClass {
-    Int
+    Int,
 }
 
 #[derive(PartialEq, Clone)]
@@ -488,7 +488,9 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
     Ok(left)
 }
 
-fn parse_type_and_storage_class(specifier_list: &Vec<SpannedToken>) -> Result<(TypeClass, Option<StorageClass>), SyntaxError> {
+fn parse_type_and_storage_class(
+    specifier_list: &Vec<SpannedToken>,
+) -> Result<(TypeClass, Option<StorageClass>), SyntaxError> {
     let mut type_specifier = None;
     let mut storage_class = None;
     for token in specifier_list {
@@ -497,7 +499,10 @@ fn parse_type_and_storage_class(specifier_list: &Vec<SpannedToken>) -> Result<(T
                 if type_specifier.is_none() {
                     type_specifier = Some(TypeClass::Int);
                 } else {
-                    return Err(SyntaxError::with_span("Duplicate type specifier".to_string(), Option::from(token.span)))
+                    return Err(SyntaxError::with_span(
+                        "Duplicate type specifier".to_string(),
+                        Option::from(token.span),
+                    ));
                 }
             }
             Token::StaticKeyword | Token::ExternKeyword => {
@@ -509,7 +514,10 @@ fn parse_type_and_storage_class(specifier_list: &Vec<SpannedToken>) -> Result<(T
                 if storage_class.is_none() {
                     storage_class = Some(sc);
                 } else {
-                    return Err(SyntaxError::with_span("Duplicate storage class".to_string(), Option::from(token.span)));
+                    return Err(SyntaxError::with_span(
+                        "Duplicate storage class".to_string(),
+                        Option::from(token.span),
+                    ));
                 }
             }
             _ => unreachable!("Already matched on type specifier"),
@@ -821,7 +829,7 @@ fn parse_declaration(
         }
     }
     if specifier_list.is_empty() {
-        return Ok(None);  // no declaration
+        return Ok(None); // no declaration
     }
     let (_type_class, storage_class) = parse_type_and_storage_class(&specifier_list)?;
 
@@ -848,7 +856,12 @@ fn parse_declaration(
                 init = Some(parse_exp(tokens, 0)?);
             }
             expect(&Token::Semicolon, tokens)?;
-            Ok(Some(Declaration::VarDeclaration(VarDeclaration { name, init, storage_class, span })))
+            Ok(Some(Declaration::VarDeclaration(VarDeclaration {
+                name,
+                init,
+                storage_class,
+                span,
+            })))
         }
     } else {
         Err(SyntaxError::with_span(

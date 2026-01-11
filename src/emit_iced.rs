@@ -1,6 +1,6 @@
 // Simple emitter using iced-x86 to generate machine code at runtime
 use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp};
-use crate::tacky::StaticVariable;
+use crate::tacky::{StaticVariable, VarInit};
 use iced_x86::{BlockEncoderOptions, IcedError, SymbolResolver, SymbolResult, code_asm::*};
 use object::write::{
     Object, Relocation, RelocationFlags, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolId, SymbolKind,
@@ -11,6 +11,20 @@ use object::{
     RelocationKind, SectionKind,
 };
 use std::collections::HashMap;
+
+/// Creates an undefined symbol (resolved by linker at link time).
+fn undefined_symbol(name: &str, kind: SymbolKind) -> Symbol {
+    Symbol {
+        name: name.as_bytes().to_vec(),
+        value: 0,
+        size: 0,
+        kind,
+        scope: SymbolScope::Unknown,
+        weak: false,
+        section: SymbolSection::Undefined,
+        flags: SymbolFlags::None,
+    }
+}
 
 /// Symbol resolver for displaying labels in assembly output.
 ///
@@ -123,20 +137,24 @@ pub fn get_instructions(
     // This allows the symbol resolver to show data symbol names for RIP-relative accesses
     let mut reloc_symbols: HashMap<u64, String> = HashMap::new();
     for (reloc_offset, reloc) in text_section.relocations() {
-        if let RelocationTarget::Symbol(sym_idx) = reloc.target() {
-            if let Some(symbol_name) = symbol_names.get(&sym_idx) {
-                // Find which instruction contains this relocation
-                for (_ins_idx, (start, end)) in ins_ranges.iter().enumerate() {
-                    if reloc_offset as usize >= *start && (reloc_offset as usize) < *end {
-                        reloc_symbols.insert(*start as u64, symbol_name.clone());
-                        break;
-                    }
+        if let RelocationTarget::Symbol(sym_idx) = reloc.target()
+            && let Some(symbol_name) = symbol_names.get(&sym_idx)
+        {
+            // Find which instruction contains this relocation
+            for (start, end) in ins_ranges.iter() {
+                if reloc_offset as usize >= *start && (reloc_offset as usize) < *end {
+                    reloc_symbols.insert(*start as u64, symbol_name.clone());
+                    break;
                 }
             }
         }
     }
 
-    Ok((instructions, MySymbolResolver::new(address_map, reloc_symbols), label_idx))
+    Ok((
+        instructions,
+        MySymbolResolver::new(address_map, reloc_symbols),
+        label_idx,
+    ))
 }
 
 pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -177,14 +195,10 @@ fn emit_object_with_labels(
         fn_labels.insert(fun_def.name.clone(), a.create_label());
     }
 
-    // Create labels for static variables to get RIP-relative addressing
+    // Create labels for static variables (including extern) to get RIP-relative addressing
     let mut data_labels: HashMap<String, CodeLabel> = HashMap::new();
     for sv in &program.static_vars {
         data_labels.insert(sv.name.clone(), a.create_label());
-    }
-    // Also create labels for extern variables (defined elsewhere)
-    for ext_name in &program.extern_vars {
-        data_labels.insert(ext_name.clone(), a.create_label());
     }
 
     // Track external function calls (instruction index, function name)
@@ -279,35 +293,40 @@ fn emit_object_with_labels(
     let mut bss_offset: u64 = 0;
     let mut static_var_symbols: HashMap<String, SymbolId> = HashMap::new();
     for StaticVariable { name, global, init } in &program.static_vars {
-        let (offset, section) = if *init == 0 {
-            obj.append_section_bss(bss, 4, 4);
-            let offset = bss_offset;
-            bss_offset += 4;
-            (offset, &bss)
-        } else {
-            let init_bytes = init.to_le_bytes();
-            obj.append_section_data(data, &init_bytes, 4);
-            let offset = data_offset;
-            data_offset += 4;
-            (offset, &data)
-        };
+        let sym_id = match init {
+            // Defined variable - allocate storage in .data or .bss
+            VarInit::Defined(init_val) => {
+                let (offset, section) = if *init_val == 0 {
+                    obj.append_section_bss(bss, 4, 4);
+                    let offset = bss_offset;
+                    bss_offset += 4;
+                    (offset, &bss)
+                } else {
+                    let init_bytes = init_val.to_le_bytes();
+                    obj.append_section_data(data, &init_bytes, 4);
+                    let offset = data_offset;
+                    data_offset += 4;
+                    (offset, &data)
+                };
 
-        let sym_id = obj.add_symbol(Symbol {
-            name: name.as_bytes().to_vec(),
-            value: offset,
-            size: 4,
-            kind: SymbolKind::Data,
-            // Use Dynamic for global symbols (DEFAULT visibility) to allow linking across object files
-            // Use Compilation for static symbols (LOCAL binding)
-            scope: if *global {
-                SymbolScope::Dynamic
-            } else {
-                SymbolScope::Compilation
-            },
-            weak: false,
-            section: SymbolSection::Section(*section),
-            flags: SymbolFlags::None,
-        });
+                obj.add_symbol(Symbol {
+                    name: name.as_bytes().to_vec(),
+                    value: offset,
+                    size: 4,
+                    kind: SymbolKind::Data,
+                    scope: if *global {
+                        SymbolScope::Dynamic
+                    } else {
+                        SymbolScope::Compilation
+                    },
+                    weak: false,
+                    section: SymbolSection::Section(*section),
+                    flags: SymbolFlags::None,
+                })
+            }
+            // Extern variable - undefined symbol resolved by linker
+            VarInit::Extern => obj.add_symbol(undefined_symbol(name, SymbolKind::Data)),
+        };
         static_var_symbols.insert(name.clone(), sym_id);
     }
 
@@ -315,16 +334,7 @@ fn emit_object_with_labels(
     let mut external_symbols: HashMap<String, SymbolId> = HashMap::new();
     for (_ins_idx, func_name) in &external_calls {
         if !external_symbols.contains_key(func_name) {
-            let symbol_id = obj.add_symbol(Symbol {
-                name: func_name.as_bytes().to_vec(),
-                value: 0,
-                size: 0,
-                kind: SymbolKind::Text,
-                scope: SymbolScope::Unknown,
-                weak: false,
-                section: SymbolSection::Undefined,
-                flags: SymbolFlags::None,
-            });
+            let symbol_id = obj.add_symbol(undefined_symbol(func_name, SymbolKind::Text));
             external_symbols.insert(func_name.clone(), symbol_id);
         }
     }
@@ -354,21 +364,6 @@ fn emit_object_with_labels(
                 )?;
             }
         }
-    }
-
-    // Add undefined symbols for extern variables (defined elsewhere)
-    for ext_name in &program.extern_vars {
-        let sym_id = obj.add_symbol(Symbol {
-            name: ext_name.as_bytes().to_vec(),
-            value: 0,
-            size: 0,
-            kind: SymbolKind::Data,
-            scope: SymbolScope::Unknown,
-            weak: false,
-            section: SymbolSection::Undefined,
-            flags: SymbolFlags::None,
-        });
-        static_var_symbols.insert(ext_name.clone(), sym_id);
     }
 
     if !static_var_symbols.is_empty() {
@@ -420,6 +415,7 @@ fn emit_object_with_labels(
 /// - `data_relocs`: Output vec tracking data reference sites for relocation
 /// - `labels`: Working map of jump label names to iced-x86 labels (within this function)
 /// - `label_idx`: Output map from instruction index to label name (for disassembly)
+#[allow(clippy::too_many_arguments)]
 fn emit_function_body(
     a: &mut CodeAssembler,
     fun_def: &codegen::FunctionDefinition,
@@ -487,6 +483,7 @@ fn mem_rbp(offset: i32) -> AsmMemoryOperand {
 
 // Data operands (static variables) - RIP-relative with relocation
 // Using labels creates RIP-relative addressing; the displacement will be patched by linker
+#[allow(clippy::too_many_arguments)]
 fn emit_instruction(
     a: &mut CodeAssembler,
     ins: &Instruction,

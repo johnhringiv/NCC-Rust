@@ -209,20 +209,28 @@ fn main() {
                 current_offset += ins.len();
             }
 
-            // Print static variables
-            if !code_ast.static_vars.is_empty() {
+            // Print static variables (skip extern vars)
+            let defined_vars: Vec<_> = code_ast
+                .static_vars
+                .iter()
+                .filter_map(|sv| match sv.init {
+                    tacky::VarInit::Defined(v) => Some((sv, v)),
+                    tacky::VarInit::Extern => None,
+                })
+                .collect();
+            if !defined_vars.is_empty() {
                 println!();
-                for sv in &code_ast.static_vars {
-                    let section = if sv.init == 0 { ".bss" } else { ".data" };
+                for (sv, init_val) in defined_vars {
+                    let section = if init_val == 0 { ".bss" } else { ".data" };
                     println!("{}", section.cyan());
                     if sv.global {
                         println!("  {}", format!(".globl {}", sv.name).dimmed());
                     }
                     println!("{}:", sv.name.green());
-                    if sv.init == 0 {
+                    if init_val == 0 {
                         println!("  {}", ".zero 4".yellow());
                     } else {
-                        println!("  {} {}", ".long".yellow(), sv.init.to_string().cyan());
+                        println!("  {} {}", ".long".yellow(), init_val.to_string().cyan());
                     }
                 }
             }
