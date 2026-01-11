@@ -187,10 +187,21 @@ pub enum ForInit {
     InitExp(Option<Expr>),
 }
 
+#[derive(PartialEq, Clone, Debug)]
+pub enum StorageClass {
+    Static,
+    Extern
+}
+
+pub enum TypeClass {
+    Int
+}
+
 #[derive(PartialEq, Clone)]
 pub struct VarDeclaration {
     pub name: Identifier,
     pub init: Option<Expr>,
+    pub storage_class: Option<StorageClass>,
     pub span: Span,
 }
 
@@ -199,6 +210,7 @@ pub struct FunDeclaration {
     pub name: Identifier,
     pub params: Vec<Identifier>,
     pub body: Option<Block>,
+    pub storage_class: Option<StorageClass>,
     pub span: Span,
 }
 
@@ -225,6 +237,9 @@ fn parse_block(tokens: &mut VecDeque<SpannedToken>) -> Result<Block, SyntaxError
     expect(&Token::OpenBrace, tokens)?;
     let mut body = vec![];
     while tokens.front().map(|t| &t.token) != Some(&Token::CloseBrace) {
+        if tokens.is_empty() {
+            return Err(SyntaxError::new(Some(Token::CloseBrace), None));
+        }
         body.push(parse_block_item(tokens)?);
     }
     expect(&Token::CloseBrace, tokens)?;
@@ -238,7 +253,7 @@ pub enum BlockItem {
 }
 
 pub struct Program {
-    pub functions: Vec<FunDeclaration>,
+    pub declarations: Vec<Declaration>,
 }
 
 pub struct SyntaxError {
@@ -471,6 +486,40 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
         }
     }
     Ok(left)
+}
+
+fn parse_type_and_storage_class(specifier_list: &Vec<SpannedToken>) -> Result<(TypeClass, Option<StorageClass>), SyntaxError> {
+    let mut type_specifier = None;
+    let mut storage_class = None;
+    for token in specifier_list {
+        match token.token {
+            Token::IntKeyword => {
+                if type_specifier.is_none() {
+                    type_specifier = Some(TypeClass::Int);
+                } else {
+                    return Err(SyntaxError::with_span("Duplicate type specifier".to_string(), Option::from(token.span)))
+                }
+            }
+            Token::StaticKeyword | Token::ExternKeyword => {
+                let sc = if token.token == Token::StaticKeyword {
+                    StorageClass::Static
+                } else {
+                    StorageClass::Extern
+                };
+                if storage_class.is_none() {
+                    storage_class = Some(sc);
+                } else {
+                    return Err(SyntaxError::with_span("Duplicate storage class".to_string(), Option::from(token.span)));
+                }
+            }
+            _ => unreachable!("Already matched on type specifier"),
+        }
+    }
+    if let Some(type_specifier) = type_specifier {
+        Ok((type_specifier, storage_class))
+    } else {
+        Err(SyntaxError::with_span("Missing type specifier".to_string(), None))
+    }
 }
 
 fn parse_conditional_middle(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
@@ -762,41 +811,44 @@ fn parse_declaration(
     tokens: &mut VecDeque<SpannedToken>,
     err_span: &Option<Span>,
 ) -> Result<Option<Declaration>, SyntaxError> {
-    if let Some(front) = tokens.front() {
-        if front.token == Token::IntKeyword {
-            tokens.pop_front();
-            let (name, span) = parse_identifier(tokens)?;
-            if let Some(front) = tokens.front() {
-                if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) {
-                    // function declaration
-                    tokens.pop_front();
-                    let params = parse_function_params(tokens, &Some(span))?;
-
-                    let body = parse_function_body(tokens)?;
-
-                    Ok(Some(Declaration::FunDeclaration(FunDeclaration {
-                        name,
-                        params,
-                        body,
-                        span,
-                    })))
-                } else {
-                    let mut init = None;
-                    if front.token == Token::Assignment {
-                        tokens.pop_front();
-                        init = Some(parse_exp(tokens, 0)?);
-                    }
-                    expect(&Token::Semicolon, tokens)?;
-                    Ok(Some(Declaration::VarDeclaration(VarDeclaration { name, init, span })))
-                }
-            } else {
-                Err(SyntaxError::with_span(
-                    "EOF when parsing declaration".to_string(),
-                    Some(span),
-                ))
+    let mut specifier_list = Vec::new();
+    while let Some(front) = tokens.front() {
+        match front.token {
+            Token::IntKeyword | Token::StaticKeyword | Token::ExternKeyword => {
+                specifier_list.push(tokens.pop_front().unwrap());
             }
+            _ => break,
+        }
+    }
+    if specifier_list.is_empty() {
+        return Ok(None);  // no declaration
+    }
+    let (_type_class, storage_class) = parse_type_and_storage_class(&specifier_list)?;
+
+    let (name, span) = parse_identifier(tokens)?;
+    if let Some(front) = tokens.front() {
+        if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) {
+            // function declaration
+            tokens.pop_front();
+            let params = parse_function_params(tokens, &Some(span))?;
+
+            let body = parse_function_body(tokens)?;
+
+            Ok(Some(Declaration::FunDeclaration(FunDeclaration {
+                name,
+                params,
+                body,
+                storage_class,
+                span,
+            })))
         } else {
-            Ok(None)
+            let mut init = None;
+            if front.token == Token::Assignment {
+                tokens.pop_front();
+                init = Some(parse_exp(tokens, 0)?);
+            }
+            expect(&Token::Semicolon, tokens)?;
+            Ok(Some(Declaration::VarDeclaration(VarDeclaration { name, init, storage_class, span })))
         }
     } else {
         Err(SyntaxError::with_span(
@@ -883,25 +935,23 @@ fn parse_function_body(tokens: &mut VecDeque<SpannedToken>) -> Result<Option<Blo
     }
 }
 
-fn parse_function_definition(tokens: &mut VecDeque<SpannedToken>) -> Result<FunDeclaration, SyntaxError> {
-    expect(&Token::IntKeyword, tokens)?;
-    let (name, span) = parse_identifier(tokens)?;
-    expect(&Token::OpenParen, tokens)?;
-    let params = parse_function_params(tokens, &Some(span))?;
-    let body = parse_function_body(tokens)?;
-
-    Ok(FunDeclaration {
-        name,
-        params,
-        body,
-        span,
-    })
-}
-
 pub fn parse_program(tokens: &mut VecDeque<SpannedToken>) -> Result<Program, SyntaxError> {
-    let mut functions = vec![parse_function_definition(tokens)?];
+    let mut declarations = vec![];
     while !tokens.is_empty() {
-        functions.push(parse_function_definition(tokens)?)
+        // None is ok here as we never hit the err_span case
+        if let Some(dec) = parse_declaration(tokens, &None)? {
+            declarations.push(dec);
+        } else {
+            let bad_token = tokens.front().unwrap();
+            return Err(SyntaxError::with_span(
+                format!("Unexpected token {:?}", bad_token.token),
+                Some(bad_token.span),
+            ));
+        }
     }
-    Ok(Program { functions })
+    if declarations.is_empty() {
+        Err(SyntaxError::with_span("EOF when parsing program".to_string(), None))
+    } else {
+        Ok(Program { declarations })
+    }
 }

@@ -1,4 +1,5 @@
 use crate::codegen::{BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, UnaryOp};
+use crate::tacky::StaticVariable;
 
 enum RegWidth {
     Byte,
@@ -77,6 +78,14 @@ fn emit_operand(operand: &Operand, reg_width: &RegWidth) -> String {
             output.push_str(&format!("{offset}(%rbp)"));
         }
         &Operand::Pseudo(_) => unreachable!("Must be eliminated before emission"),
+        Operand::Data(name) => {
+            // RIP-relative addressing for static/extern variables
+            if cfg!(target_os = "macos") {
+                output.push_str(&format!("_{name}(%rip)"));
+            } else {
+                output.push_str(&format!("{name}(%rip)"));
+            }
+        }
     }
     output
 }
@@ -170,13 +179,15 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
 
 fn emit_function(fun_def: &FunctionDefinition) -> String {
     let mut output = String::new();
-    let FunctionDefinition { name, body } = fun_def;
+    let FunctionDefinition { name, body, global } = fun_def;
     let processed_name = if cfg!(target_os = "macos") {
         format!("_{name}")
     } else {
         name.to_string()
     };
-    output.push_str(&format!("\t.global {processed_name}\n"));
+    if *global {
+        output.push_str(&format!("\t.globl {processed_name}\n"));
+    }
     output.push_str(&format!("{processed_name}:\n"));
     output.push_str("\tpushq %rbp\n");
     output.push_str("\tmovq %rsp, %rbp\n");
@@ -186,11 +197,52 @@ fn emit_function(fun_def: &FunctionDefinition) -> String {
     output
 }
 
+fn emit_static_variable(sv: &StaticVariable) -> String {
+    let mut output = String::new();
+    let StaticVariable { name, global, init } = sv;
+    let processed_name = if cfg!(target_os = "macos") {
+        format!("_{name}")
+    } else {
+        name.to_string()
+    };
+
+    if *global {
+        output.push_str(&format!("\t.globl {processed_name}\n"));
+    }
+
+    if *init == 0 {
+        // BSS section for zero-initialized data
+        output.push_str("\t.bss\n");
+        output.push_str(&format!("\t.align 4\n"));
+        output.push_str(&format!("{processed_name}:\n"));
+        output.push_str("\t.zero 4\n");
+    } else {
+        // Data section for initialized data
+        output.push_str("\t.data\n");
+        output.push_str(&format!("\t.align 4\n"));
+        output.push_str(&format!("{processed_name}:\n"));
+        output.push_str(&format!("\t.long {init}\n"));
+    }
+
+    output
+}
+
 pub fn emit_program(program: &Program) -> String {
     let mut output = String::new();
-    for function in &program.functions {
-        output.push_str(&emit_function(function));
+
+    // Emit functions in text section
+    if !program.functions.is_empty() {
+        output.push_str("\t.text\n");
+        for function in &program.functions {
+            output.push_str(&emit_function(function));
+        }
     }
+
+    // Emit static variables
+    for sv in &program.static_vars {
+        output.push_str(&emit_static_variable(sv));
+    }
+
     if cfg!(target_os = "linux") {
         output.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
     }

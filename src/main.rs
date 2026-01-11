@@ -160,8 +160,8 @@ fn main() {
             std::process::exit(0);
         }
 
-        let mut name_gen = validated_result;
-        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
+        let (mut name_gen, symbols) = validated_result;
+        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen, &symbols);
 
         if args.tacky {
             println!("{tacky_ast:?}");
@@ -239,8 +239,8 @@ fn main() {
             std::process::exit(30);
         });
 
-        let mut name_gen = validated_result;
-        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
+        let (mut name_gen, symbols) = validated_result;
+        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen, &symbols);
         let code_ast = codegen::generate(&tacky_ast);
 
         let path = Path::new(c_file);

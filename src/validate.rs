@@ -1,14 +1,5 @@
-/*
-   We allow undefined behavior that is valid c like int foo = foo + 1;
-   We can add a warning for this in the future.
-
-   We also don't do scope validation another case that deserves a warning
-*/
 use crate::lexer::Span;
-use crate::parser::{
-    BinOp, Block, BlockItem, Declaration, Expr, ForInit, FunDeclaration, Identifier, Program, SpannedStmt, Stmt,
-    SwitchIntType, UnaryOp, VarDeclaration,
-};
+use crate::parser::{BinOp, Block, BlockItem, Declaration, Expr, ForInit, FunDeclaration, Identifier, Program, SpannedStmt, Stmt, StorageClass, SwitchIntType, UnaryOp, VarDeclaration};
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -36,20 +27,25 @@ impl fmt::Debug for SemanticError {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
-pub enum SymbolType {
-    Int,
-    FunType(u64 /*param count*/),
+#[derive(Clone)]
+pub enum InitialValue {
+    Tentative,
+    Initial(i32),
+    NoInitializer
 }
 
-#[derive(Clone)]
-struct Symbol {
-    symbol_type: SymbolType,
-    initialized: bool,
+pub enum SymbolType {
+    Int(InitialValue),
+    FunType{param_cnt: usize, defined: bool},
+}
+
+pub struct Symbol {
+    pub(crate) symbol_type: SymbolType,
+    pub(crate) global: bool,
     span: Span,
 }
 
-type SymbolTable = HashMap<String, Symbol>;
+pub type SymbolTable = HashMap<String, Symbol>;
 
 #[derive(Clone)]
 struct VarInfo {
@@ -74,18 +70,171 @@ impl NameGenerator {
     }
 }
 
-fn typecheck_variable_declaration(decl: &VarDeclaration, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
-    let sym = Symbol {
-        symbol_type: SymbolType::Int,
-        initialized: decl.init.is_some(),
-        span: decl.span,
-    };
-    symbols.insert(decl.name.0.clone(), sym);
-    if let Some(init) = &decl.init {
-        typecheck_exp(init, symbols)
+/// Validates a local (block-scope) variable declaration and updates the symbol table.
+///
+/// Handles three cases based on storage class:
+///
+/// **extern**: References an external variable
+/// - Cannot have an initializer
+/// - If not already in symbol table, adds with `NoInitializer` and `global: true`
+/// - If already exists, must be a variable (not a function)
+///
+/// **static**: Local variable with static storage duration
+/// - Initializer must be a constant expression (or defaults to 0)
+/// - Added to symbol table with `global: false`
+///
+/// **none (automatic)**: Regular local variable
+/// - Added to symbol table, initializer typechecked if present
+fn typecheck_local_variable_declaration(decl: &VarDeclaration, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
+    if decl.storage_class == Some(StorageClass::Extern) {
+        if decl.init.is_some() {
+            return Err(SemanticError::with_span(
+                format!("'{}' has both 'extern' and initializer", decl.name.0.bold()),
+                decl.span,
+            ));
+        }
+        if let Some(old_dec) = symbols.get(&decl.name.0) {
+            if !matches!(old_dec.symbol_type, SymbolType::Int(_)) {
+                return Err(SemanticError::with_span(
+                    format!(
+                        "'{}' redeclared as different kind of symbol\n{}: {}: previous declaration was here",
+                        decl.name.0.bold(),
+                        old_dec.span,
+                        "note".cyan()
+                    ),
+                    decl.span,
+                ));
+            }
+        } else {
+            symbols.insert(decl.name.0.clone(), Symbol {
+                symbol_type: SymbolType::Int(InitialValue::NoInitializer),
+                global: true,
+                span: decl.span,
+            });
+        }
+    } else if decl.storage_class == Some(StorageClass::Static) {
+        let initial_value = if let Some(expr) = decl.init.as_ref() {
+            match eval_constant_expr(expr) {
+                None => {
+                    return Err(SemanticError::with_span(
+                        format!("initializer for static variable '{}' is not a constant expression", decl.name.0.bold()),
+                        decl.span,
+                    ));
+                }
+                Some(c) => InitialValue::Initial(c),
+            }
+        } else {
+            InitialValue::Initial(0)
+        };
+        symbols.insert(decl.name.0.clone(), Symbol {
+            symbol_type: SymbolType::Int(initial_value),
+            global: false,
+            span: decl.span,
+        });
     } else {
-        Ok(())
+        // Automatic storage (no storage class specifier)
+        symbols.insert(decl.name.0.clone(), Symbol {
+            symbol_type: SymbolType::Int(InitialValue::NoInitializer),
+            global: false,
+            span: decl.span,
+        });
+        if let Some(init) = &decl.init {
+            typecheck_exp(init, symbols)?;
+        }
     }
+    Ok(())
+}
+
+/// Validates a file-scope variable declaration and updates the symbol table.
+///
+/// Enforces the following rules:
+/// - Initializers must be constant expressions
+/// - A function cannot be redeclared as a variable
+/// - Variable linkage (static vs non-static) must be consistent across declarations
+/// - Only one definition (with initializer) is allowed per variable
+///
+/// Initial value resolution:
+/// - Explicit constant initializer → `Initial(value)`
+/// - No initializer + `extern` → `NoInitializer`
+/// - No initializer + not `extern` → `Tentative`
+///
+/// The span stored is the location of the definition, or most recent declaration if never defined.
+fn typecheck_file_variable_declaration(decl: &VarDeclaration, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
+    let mut initial_value = if let Some(expr) = &decl.init {
+        match eval_constant_expr(expr) {
+            None => {
+                return Err(SemanticError::with_span(
+                    format!("initializer for '{}' is not a constant expression", decl.name.0.bold()),
+                    decl.span,
+                ));
+            }
+            Some(c) => InitialValue::Initial(c),
+        }
+    } else if decl.storage_class == Some(StorageClass::Extern) {
+        InitialValue::NoInitializer
+    } else {
+        InitialValue::Tentative
+    };
+
+    let mut global = decl.storage_class != Some(StorageClass::Static);
+    let mut saved_span = decl.span;
+
+    if let Some(old_dec) = symbols.get(&decl.name.0) {
+        let old_init = match &old_dec.symbol_type {
+            SymbolType::FunType { .. } => {
+                return Err(SemanticError::with_span(
+                    format!(
+                        "'{}' redeclared as different kind of symbol\n{}: {}: previous declaration was here",
+                        decl.name.0.bold(),
+                        old_dec.span,
+                        "note".cyan()
+                    ),
+                    decl.span,
+                ));
+            }
+            SymbolType::Int(old_init) => old_init.clone(),
+        };
+
+        if decl.storage_class == Some(StorageClass::Extern) {
+            global = old_dec.global;
+        } else if old_dec.global != global {
+            return Err(SemanticError::with_span(
+                format!(
+                    "conflicting linkage for '{}'\n{}: {}: previous declaration was here",
+                    decl.name.0.bold(),
+                    old_dec.span,
+                    "note".cyan()
+                ),
+                decl.span,
+            ));
+        }
+
+        if matches!(old_init, InitialValue::Initial(_)) {
+            if matches!(initial_value, InitialValue::Initial(_)) {
+                return Err(SemanticError::with_span(
+                    format!(
+                        "redefinition of '{}'\n{}: {}: previous definition was here",
+                        decl.name.0.bold(),
+                        old_dec.span,
+                        "note".cyan()
+                    ),
+                    decl.span,
+                ));
+            } else {
+                initial_value = old_init;
+                saved_span = old_dec.span;
+            }
+        } else if !matches!(initial_value, InitialValue::Initial(_)) && matches!(old_init, InitialValue::Tentative) {
+            initial_value = InitialValue::Tentative;
+        }
+    }
+
+    symbols.insert(decl.name.0.clone(), Symbol {
+        symbol_type: SymbolType::Int(initial_value),
+        global,
+        span: saved_span,
+    });
+    Ok(())
 }
 
 fn typecheck_exp(exp: &Expr, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
@@ -94,11 +243,11 @@ fn typecheck_exp(exp: &Expr, symbols: &mut SymbolTable) -> Result<(), SemanticEr
         Expr::Var(Identifier(name), span) => {
             if let Some(expected) = symbols.get(name) {
                 match expected.symbol_type {
-                    SymbolType::FunType(_) => Err(SemanticError::with_span(
+                    SymbolType::FunType { .. } => Err(SemanticError::with_span(
                         format!("cannot use function '{}' as a variable", name.bold()),
                         *span,
                     )),
-                    SymbolType::Int => Ok(()),
+                    SymbolType::Int(_) => Ok(()),
                 }
             } else {
                 unreachable!("Undefined variable in typechecking")
@@ -117,8 +266,8 @@ fn typecheck_exp(exp: &Expr, symbols: &mut SymbolTable) -> Result<(), SemanticEr
         Expr::FunctionCall(Identifier(name), args, span) => {
             if let Some(expected) = symbols.get(name) {
                 match expected.symbol_type {
-                    SymbolType::FunType(param_cnt) => {
-                        if param_cnt != args.len() as u64 {
+                    SymbolType::FunType { param_cnt, defined: _ } => {
+                        if param_cnt != args.len() {
                             Err(SemanticError::with_span(
                                 format!(
                                     "function '{}' expects {} argument{} but {} {} provided",
@@ -137,7 +286,7 @@ fn typecheck_exp(exp: &Expr, symbols: &mut SymbolTable) -> Result<(), SemanticEr
                             Ok(())
                         }
                     }
-                    SymbolType::Int => Err(SemanticError::with_span(
+                    SymbolType::Int(_) => Err(SemanticError::with_span(
                         format!("cannot call '{}' as a function: identifier is a variable", name.bold()),
                         *span,
                     )),
@@ -149,50 +298,82 @@ fn typecheck_exp(exp: &Expr, symbols: &mut SymbolTable) -> Result<(), SemanticEr
     }
 }
 
+/// Validates a function declaration and updates the symbol table.
+///
+/// Enforces the following rules:
+/// - Parameter count must match any prior declaration
+/// - A function can only be defined once (have a body)
+/// - A `static` declaration cannot follow a non-static declaration
+/// - Global linkage is inherited from the first declaration
+///
+/// The span stored in the symbol table is the location of the function's
+/// definition (body), or the most recent declaration if never defined.
 fn typecheck_function_declaration(decl: &FunDeclaration, symbols: &mut SymbolTable) -> Result<(), SemanticError> {
-    let mut insert = true;
-    let sym = Symbol {
-        symbol_type: SymbolType::FunType(decl.params.len() as u64),
-        initialized: decl.body.is_some(),
-        span: decl.span,
-    };
+    let param_cnt = decl.params.len();
+    let mut global = decl.storage_class != Some(StorageClass::Static);
+    let mut defined = decl.body.is_some();
+    let mut saved_span = decl.span;
     if let Some(old_dec) = symbols.get(&decl.name.0) {
-        if old_dec.symbol_type != sym.symbol_type {
-            return Err(SemanticError::with_span(
-                format!(
-                    "incompatible declaration of function '{}'\n{}: {}: previous declaration was here",
-                    decl.name.0.bold(),
-                    old_dec.span,
-                    "note".cyan()
-                ),
-                decl.span,
-            ));
+        match old_dec.symbol_type {
+            SymbolType::FunType{param_cnt: old_param_cnt, defined: old_defined} => {
+                if old_param_cnt != param_cnt {
+                    return Err(SemanticError::with_span(
+                        format!(
+                            "incompatible declaration of function '{}'\n{}: {}: previous declaration was here",
+                            decl.name.0.bold(),
+                            old_dec.span,
+                            "note".cyan()
+                        ),
+                        decl.span,
+                    ));
+                }
+                if old_defined {
+                    if decl.body.is_some() {
+                        return Err(SemanticError::with_span(
+                            format!(
+                                "redefinition of function '{}'\n{}: {}: previous definition was here",
+                                decl.name.0.bold(),
+                                old_dec.span,
+                                "note".cyan()
+                            ),
+                            decl.span,
+                        ));
+                    }
+                    saved_span = old_dec.span;
+                }
+                if old_dec.global && decl.storage_class == Some(StorageClass::Static) {
+                    return Err(SemanticError::with_span("Static function declaration follows non-static".to_string(), decl.span));
+                }
+                global = old_dec.global;
+                defined = defined || old_defined;
+            },
+            SymbolType::Int(_) => {
+                return Err(SemanticError::with_span(
+                    format!(
+                        "redeclaration of '{}' as a function\n{}: {}: previous declaration was here",
+                        decl.name.0.bold(),
+                        old_dec.span,
+                        "note".cyan()
+                    ),
+                    decl.span,
+                ));
+            }
         }
-        if old_dec.initialized && decl.body.is_some() {
-            return Err(SemanticError::with_span(
-                format!(
-                    "redefinition of function '{}'\n{}: {}: previous definition was here",
-                    decl.name.0.bold(),
-                    old_dec.span,
-                    "note".cyan()
-                ),
-                decl.span,
-            ));
-        }
-        insert = !old_dec.initialized && sym.initialized;
     }
 
-    if insert {
-        symbols.insert(decl.name.0.clone(), sym);
-    }
+    symbols.insert(decl.name.0.clone(), Symbol {
+        symbol_type: SymbolType::FunType { param_cnt, defined },
+        global,
+        span: saved_span,
+    });
 
     if let Some(body) = decl.body.as_ref() {
         for Identifier(name) in &decl.params {
             symbols.insert(
                 name.clone(),
                 Symbol {
-                    symbol_type: SymbolType::Int,
-                    initialized: true,
+                    symbol_type: SymbolType::Int(InitialValue::NoInitializer),
+                    global: false,
                     span: decl.span,
                 },
             );
@@ -207,7 +388,7 @@ fn typecheck_block(block: &Block, symbols: &mut SymbolTable) -> Result<(), Seman
     for item in block {
         match item {
             BlockItem::Declaration(Declaration::VarDeclaration(var)) => {
-                typecheck_variable_declaration(var, symbols)?;
+                typecheck_local_variable_declaration(var, symbols)?;
             }
             BlockItem::Declaration(Declaration::FunDeclaration(fun)) => {
                 typecheck_function_declaration(fun, symbols)?;
@@ -242,7 +423,15 @@ fn typecheck_stmt(stmt: &Stmt, symbols: &mut SymbolTable) -> Result<(), Semantic
             match init {
                 ForInit::InitExp(Some(e)) => typecheck_exp(e, symbols)?,
                 ForInit::InitExp(None) => {}
-                ForInit::InitDecl(decl) => typecheck_variable_declaration(decl, symbols)?,
+                ForInit::InitDecl(decl) => {
+                    if decl.storage_class.is_some() {
+                        return Err(SemanticError::with_span(
+                            "declaration in for loop initializer cannot have storage class".to_string(),
+                            decl.span,
+                        ));
+                    }
+                    typecheck_local_variable_declaration(decl, symbols)?
+                },
             }
             if let Some(cond) = cond {
                 typecheck_exp(cond, symbols)?;
@@ -455,27 +644,87 @@ fn resolve_param(
     }
 }
 
-fn resolve_var_decoration(
+/// Registers a file-scope variable declaration in the variable map.
+///
+/// File-scope variables:
+/// - Keep their original name (no renaming needed - no shadowing at file scope)
+/// - Are marked with `ext_link: true` (external linkage by default)
+///
+/// This is the resolve pass counterpart to `typecheck_file_variable_declaration`.
+fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut HashMap<String, VarInfo>) {
+    let Identifier(name) = &dec.name;
+    variable_map.insert(
+        name.clone(),
+        VarInfo {
+            renamed: name.clone(),
+            span: dec.span,
+            ext_link: true,
+        },
+    );
+}
+
+/// Resolves a local (block-scope) variable declaration.
+///
+/// Handles three cases based on storage class:
+///
+/// **Conflict detection**: If a variable with the same name exists in the current
+/// block scope, it's an error unless both have external linkage (extern).
+///
+/// **extern**: References an external variable
+/// - Keeps original name (no renaming)
+/// - Marked with `ext_link: true`
+///
+/// **static or automatic**: Local variable
+/// - Gets a unique renamed identifier (e.g., `x` → `x.1`)
+/// - Marked with `ext_link: false`
+/// - Emits `-Wshadow` warning if shadowing an outer scope variable
+/// - Initializer expression is resolved if present
+///
+/// This is the resolve pass counterpart to `typecheck_local_variable_declaration`.
+fn resolve_local_var_decoration(
     dec: &mut VarDeclaration,
     variable_map: &mut HashMap<String, VarInfo>,
     name_gen: &mut NameGenerator,
     block_vars: &mut HashSet<String>,
     used_vars: &mut HashSet<String>,
 ) -> Result<(), SemanticError> {
-    let Identifier(name) = &dec.name;
+    let Identifier(name) = &dec.name.clone();
 
-    // if the value doesn't exist in block_vars we want to insert or update
-    if block_vars.insert(name.clone()) {
+    if let Some(original_def) = variable_map.get(name) {
+        if block_vars.contains(name) {
+            if !(original_def.ext_link && (dec.storage_class == Some(StorageClass::Extern))) {
+                return Err(SemanticError::with_span(
+                    format!(
+                        "Conflicting local declarations for variable {}\n{}: {}: previous decoration was here",
+                        format!("'{}'", name).bold(),
+                        original_def.span,
+                        "note".to_string().cyan(),
+                    ),
+                    dec.span,
+                ))
+            };
+        }
+    }
+    if dec.storage_class == Some(StorageClass::Extern) {
+        variable_map.insert(
+            name.clone(),
+            VarInfo {
+                renamed: name.clone(),
+                span: dec.span,
+                ext_link: true,
+            },
+        );
+    } else {
         let unique_name = name_gen.next(name);
-        let shadow = variable_map.insert(
+        dec.name = Identifier(unique_name.clone());
+        if let Some(shadow) = variable_map.insert(
             name.clone(),
             VarInfo {
                 renamed: unique_name.clone(),
                 span: dec.span,
                 ext_link: false,
             },
-        );
-        if let Some(shadow) = shadow {
+        ) {
             eprintln!(
                 "{}: {}: variable {} shadows previous declaration {}",
                 dec.span,
@@ -490,25 +739,12 @@ fn resolve_var_decoration(
                 format!("'{}'", name).bold()
             );
         }
-        dec.name = Identifier(unique_name);
-
-        // Resolve the initializer if present
         if let Some(init_expr) = &mut dec.init {
             resolve_exp(init_expr, variable_map, used_vars)?;
         }
-        Ok(())
-    } else {
-        let original_def = variable_map.get(name).unwrap();
-        Err(SemanticError::with_span(
-            format!(
-                "variable {} already declared\n{}: {}: previous decoration was here",
-                format!("'{}'", name).bold(),
-                original_def.span,
-                "note".to_string().cyan(),
-            ),
-            dec.span,
-        ))
     }
+    block_vars.insert(name.clone());
+    Ok(())
 }
 
 fn resolve_statement(
@@ -574,7 +810,7 @@ fn resolve_statement(
                     }
                 }
                 ForInit::InitDecl(dec) => {
-                    resolve_var_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new(), used_vars)?
+                    resolve_local_var_decoration(dec, &mut shadow_map, name_gen, &mut HashSet::new(), used_vars)?
                 }
             }
             if let Some(e1) = e1 {
@@ -871,7 +1107,7 @@ fn resolve_block(
             }
             BlockItem::Declaration(d) => match d {
                 Declaration::VarDeclaration(var) => {
-                    resolve_var_decoration(var, variable_map, name_gen, block_vars, used_vars)?;
+                    resolve_local_var_decoration(var, variable_map, name_gen, block_vars, used_vars)?;
                 }
                 Declaration::FunDeclaration(fun) => {
                     if fun.body.is_some() {
@@ -879,6 +1115,9 @@ fn resolve_block(
                             "function definition is not allowed here".to_string(),
                             fun.span,
                         ));
+                    }
+                    if fun.storage_class == Some(StorageClass::Static) {
+                        return Err(SemanticError::with_span("static function decloration not allowed in block scope".to_string(), fun.span));
                     }
                     resolve_fun_decoration(fun, variable_map, block_vars, labels, jumps, name_gen, used_vars)?;
                 }
@@ -888,41 +1127,48 @@ fn resolve_block(
     Ok(())
 }
 
-pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticError> {
+pub fn resolve_program(program: &mut Program) -> Result<(NameGenerator, SymbolTable), SemanticError> {
     let mut variable_map = HashMap::new();
     let mut name_gen = NameGenerator::new();
     let mut undefined_jumps = Vec::new();
 
     let mut label_tracker = LabelTracker::new();
-    for function in program.functions.iter_mut() {
-        let mut used_vars = HashSet::new();
-        let mut labels = HashSet::new();
-        let mut jumps: HashMap<String, Span> = HashMap::new();
-        if let Some(body) = &mut function.body {
-            label_block(body, &mut label_tracker)?;
-        }
-        let mut block_vars = HashSet::new();
-        resolve_fun_decoration(
-            function,
-            &mut variable_map,
-            &mut block_vars,
-            &mut labels,
-            &mut jumps,
-            &mut name_gen,
-            &mut used_vars,
-        )?;
+    for decl in program.declarations.iter_mut() {
+        match decl {
+            Declaration::VarDeclaration(var) => {
+                resolve_file_var_declaration(var, &mut variable_map)
+            }
+            Declaration::FunDeclaration(function) => {
+                let mut used_vars = HashSet::new();
+                let mut labels = HashSet::new();
+                let mut jumps: HashMap<String, Span> = HashMap::new();
+                if let Some(body) = &mut function.body {
+                    label_block(body, &mut label_tracker)?;
+                }
+                let mut block_vars = HashSet::new();
+                resolve_fun_decoration(
+                    function,
+                    &mut variable_map,
+                    &mut block_vars,
+                    &mut labels,
+                    &mut jumps,
+                    &mut name_gen,
+                    &mut used_vars,
+                )?;
 
-        // Find jumps to non-existent labels and report with spans
-        for (label, span) in jumps.iter() {
-            if !labels.contains(label) {
-                undefined_jumps.push((label.clone(), *span));
+                // Find jumps to non-existent labels and report with spans
+                for (label, span) in jumps.iter() {
+                    if !labels.contains(label) {
+                        undefined_jumps.push((label.clone(), *span));
+                    }
+                }
             }
         }
     }
 
     if undefined_jumps.is_empty() {
-        typecheck_program(program)?;
-        Ok(name_gen)
+        let symbols = typecheck_program(program)?;
+        Ok((name_gen, symbols))
     } else {
         let (label, span) = &undefined_jumps[0];
         Err(SemanticError::with_span(
@@ -932,12 +1178,14 @@ pub fn resolve_program(program: &mut Program) -> Result<NameGenerator, SemanticE
     }
 }
 
-pub fn typecheck_program(program: &Program) -> Result<(), SemanticError> {
+pub fn typecheck_program(program: &Program) -> Result<SymbolTable, SemanticError> {
     let mut symbols = SymbolTable::new();
 
-    for decl in &program.functions {
-        typecheck_function_declaration(decl, &mut symbols)?;
+    for decl in &program.declarations {
+        match decl {
+            Declaration::VarDeclaration(dec) => typecheck_file_variable_declaration(dec, &mut symbols)?,
+            Declaration::FunDeclaration(func) => typecheck_function_declaration(func, &mut symbols)?,
+        };
     }
-
-    Ok(())
+    Ok(symbols)
 }

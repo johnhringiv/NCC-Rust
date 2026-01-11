@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-static CHAPTER_COMPLETED: i32 = 9;
-static EXTRA_COMPLETED: i32 = 9;
+static CHAPTER_COMPLETED: i32 = 10;
+static EXTRA_COMPLETED: i32 = 10;
 
 #[derive(Debug, PartialEq, Clone)]
 enum ProgramOutput {
@@ -227,10 +227,13 @@ fn load_expected(json_path: &str) -> Result<HashMap<String, ExpectedResult>, Box
         for (file_path, value) in obj {
             if let Some(return_code) = value.get("return_code").and_then(|v| v.as_i64()) {
                 let stdout = value.get("stdout").and_then(|v| v.as_str()).map(|s| s.to_string());
-                results.insert(file_path, ExpectedResult {
-                    return_code: return_code as i32,
-                    stdout,
-                });
+                results.insert(
+                    file_path,
+                    ExpectedResult {
+                        return_code: return_code as i32,
+                        stdout,
+                    },
+                );
             }
         }
     }
@@ -284,8 +287,14 @@ fn run_test(
     let passed = match (&actual, &case.output) {
         (ProgramOutput::Error(a), ProgramOutput::Error(b)) => a == b,
         (
-            ProgramOutput::Result { code: a_code, stdout: a_stdout },
-            ProgramOutput::Result { code: b_code, stdout: b_stdout },
+            ProgramOutput::Result {
+                code: a_code,
+                stdout: a_stdout,
+            },
+            ProgramOutput::Result {
+                code: b_code,
+                stdout: b_stdout,
+            },
         ) => {
             let code_match = a_code == b_code;
             let stdout_match = match (a_stdout, b_stdout) {
@@ -307,10 +316,7 @@ fn run_test(
         } else {
             format!("{} [{}]", case.c_file, test_label)
         };
-        failed_tests.push(format!(
-            "{} (expected {:?}, got {:?})",
-            label, case.output, actual
-        ));
+        failed_tests.push(format!("{} (expected {:?}, got {:?})", label, case.output, actual));
     }
 }
 
@@ -417,8 +423,14 @@ fn run_library_cross_test(
 
     let passed = match (&actual, expected) {
         (
-            ProgramOutput::Result { code: a_code, stdout: a_stdout },
-            ProgramOutput::Result { code: b_code, stdout: b_stdout },
+            ProgramOutput::Result {
+                code: a_code,
+                stdout: a_stdout,
+            },
+            ProgramOutput::Result {
+                code: b_code,
+                stdout: b_stdout,
+            },
         ) => {
             let code_match = a_code == b_code;
             let stdout_match = match (a_stdout, b_stdout) {

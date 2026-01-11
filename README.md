@@ -14,11 +14,12 @@ All provided tests pass.
 The compiler currently implements a subset of C with the following grammar:
 
 ```ebnf
-<program> ::= { <function-declaration> }
+<program> ::= { <declaration> }
 <declaration> ::= <variable-declaration> | <function-declaration>
-<variable-declaration> ::= "int" <identifier> [ "=" <exp> ] ";"
-<function-declaration> ::= "int" <identifier> "(" <param-list> ")" ( <block> | ";" )
+<variable-declaration> ::= { <specifier> }+ <identifier> [ "=" <exp> ] ";"
+<function-declaration> ::= { <specifier> }+ <identifier> "(" <param-list> ")" ( <block> | ";" )
 <param-list> ::= "void" | "int" <identifier> { "," "int" <identifier> }
+<specifier> ::= "int" | "static" | "extern"
 <block> ::= "{" { <block-item> } "}"
 <block-item> ::= <statement> | <declaration>
 <for-init> ::= <variable-declaration> | [ <exp> ] ";"
