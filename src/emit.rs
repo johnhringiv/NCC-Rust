@@ -7,61 +7,61 @@ enum RegWidth {
     QWord,
 }
 
-fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> String {
+fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
     match reg_width {
         RegWidth::Byte => match reg {
-            Reg::AX => "al".to_string(),
-            Reg::DX => "dl".to_string(),
-            Reg::CX => "cl".to_string(),
-            Reg::DI => "dil".to_string(),
-            Reg::SI => "sil".to_string(),
-            Reg::R8 => "r8b".to_string(),
-            Reg::R9 => "r9b".to_string(),
-            Reg::R10 => "r10b".to_string(),
-            Reg::R11 => "r11b".to_string(),
+            Reg::AX => "al",
+            Reg::DX => "dl",
+            Reg::CX => "cl",
+            Reg::DI => "dil",
+            Reg::SI => "sil",
+            Reg::R8 => "r8b",
+            Reg::R9 => "r9b",
+            Reg::R10 => "r10b",
+            Reg::R11 => "r11b",
         },
         RegWidth::DWord => match reg {
-            Reg::AX => "eax".to_string(),
-            Reg::DX => "edx".to_string(),
-            Reg::CX => "ecx".to_string(),
-            Reg::DI => "edi".to_string(),
-            Reg::SI => "esi".to_string(),
-            Reg::R8 => "r8d".to_string(),
-            Reg::R9 => "r9d".to_string(),
-            Reg::R10 => "r10d".to_string(),
-            Reg::R11 => "r11d".to_string(),
+            Reg::AX => "eax",
+            Reg::DX => "edx",
+            Reg::CX => "ecx",
+            Reg::DI => "edi",
+            Reg::SI => "esi",
+            Reg::R8 => "r8d",
+            Reg::R9 => "r9d",
+            Reg::R10 => "r10d",
+            Reg::R11 => "r11d",
         },
         RegWidth::QWord => match reg {
-            Reg::AX => "rax".to_string(),
-            Reg::DX => "rdx".to_string(),
-            Reg::CX => "rcx".to_string(),
-            Reg::DI => "rdi".to_string(),
-            Reg::SI => "rsi".to_string(),
-            Reg::R8 => "r8".to_string(),
-            Reg::R9 => "r9".to_string(),
-            Reg::R10 => "r10".to_string(),
-            Reg::R11 => "r11".to_string(),
+            Reg::AX => "rax",
+            Reg::DX => "rdx",
+            Reg::CX => "rcx",
+            Reg::DI => "rdi",
+            Reg::SI => "rsi",
+            Reg::R8 => "r8",
+            Reg::R9 => "r9",
+            Reg::R10 => "r10",
+            Reg::R11 => "r11",
         },
     }
 }
 
-fn emit_unaryop(op: &UnaryOp) -> String {
+fn emit_unaryop(op: &UnaryOp) -> &'static str {
     match op {
-        UnaryOp::Neg => "negl".to_string(),
-        UnaryOp::Not => "notl".to_string(),
+        UnaryOp::Neg => "negl",
+        UnaryOp::Not => "notl",
     }
 }
 
-fn emit_binaryop(op: &BinaryOp) -> String {
+fn emit_binaryop(op: &BinaryOp) -> &'static str {
     match op {
-        BinaryOp::Add => "addl".to_string(),
-        BinaryOp::Sub => "subl".to_string(),
-        BinaryOp::Mult => "imull".to_string(),
-        BinaryOp::BitAnd => "andl".to_string(),
-        BinaryOp::BitOr => "orl".to_string(),
-        BinaryOp::BitXOr => "xorl".to_string(),
-        BinaryOp::BitShl => "shll".to_string(),
-        BinaryOp::BitSar => "sarl".to_string(),
+        BinaryOp::Add => "addl",
+        BinaryOp::Sub => "subl",
+        BinaryOp::Mult => "imull",
+        BinaryOp::BitAnd => "andl",
+        BinaryOp::BitOr => "orl",
+        BinaryOp::BitXOr => "xorl",
+        BinaryOp::BitShl => "shll",
+        BinaryOp::BitSar => "sarl",
     }
 }
 

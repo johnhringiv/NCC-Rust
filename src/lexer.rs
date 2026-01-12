@@ -188,7 +188,7 @@ impl fmt::Display for Span {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct SpannedToken {
     pub token: Token,
     pub span: Span,

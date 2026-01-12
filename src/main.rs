@@ -210,15 +210,15 @@ fn main() {
             }
 
             // Print static variables (skip extern vars)
-            let defined_vars: Vec<_> = code_ast
+            let mut defined_vars = code_ast
                 .static_vars
                 .iter()
                 .filter_map(|sv| match sv.init {
                     tacky::VarInit::Defined(v) => Some((sv, v)),
                     tacky::VarInit::Extern => None,
                 })
-                .collect();
-            if !defined_vars.is_empty() {
+                .peekable();
+            if defined_vars.peek().is_some() {
                 println!();
                 for (sv, init_val) in defined_vars {
                     let section = if init_val == 0 { ".bss" } else { ".data" };
@@ -249,12 +249,11 @@ fn main() {
             std::process::exit(1);
         };
 
-        let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
+        let mut tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(10)
         });
 
-        let mut tokens = tokens;
         let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(20)

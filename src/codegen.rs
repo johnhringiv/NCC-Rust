@@ -80,19 +80,19 @@ pub enum CondCode {
 }
 
 impl CondCode {
-    pub fn ins_suffix(&self) -> String {
+    pub fn ins_suffix(&self) -> &'static str {
         match self {
-            CondCode::E => "e".to_string(),
-            CondCode::NE => "ne".to_string(),
-            CondCode::G => "g".to_string(),
-            CondCode::GE => "ge".to_string(),
-            CondCode::L => "l".to_string(),
-            CondCode::LE => "le".to_string(),
+            CondCode::E => "e",
+            CondCode::NE => "ne",
+            CondCode::G => "g",
+            CondCode::GE => "ge",
+            CondCode::L => "l",
+            CondCode::LE => "le",
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct FunctionDefinition {
     pub name: String,
     pub body: Vec<Instruction>,
@@ -312,7 +312,12 @@ impl From<&BinOp> for BinaryOp {
             BinOp::BitwiseXOr => BinaryOp::BitXOr,
             BinOp::BitwiseLeftShift => BinaryOp::BitShl,
             BinOp::BitwiseRightShift => BinaryOp::BitSar,
-            _ => unimplemented!("Binary operation not implemented: {:?}", op),
+            BinOp::Equal
+            | BinOp::NotEqual
+            | BinOp::LessThan
+            | BinOp::LessOrEqual
+            | BinOp::GreaterThan
+            | BinOp::GreaterOrEqual => unreachable!("Removed in convert_instruction"),
         }
     }
 }
@@ -389,16 +394,16 @@ pub fn generate(ast: &tacky::Program) -> Program {
     p
 }
 
-struct StackMapping {
+struct StackMapping<'a> {
     stack_mapping: HashMap<String, i32>,
     offset: i32,
     /// Names of variables that should use Data operands (RIP-relative addressing).
     /// Includes both static variables defined in this file and extern variables.
-    data_vars: HashSet<String>,
+    data_vars: &'a HashSet<String>,
 }
 
-impl StackMapping {
-    pub fn from_data_vars(data_vars: HashSet<String>) -> Self {
+impl<'a> StackMapping<'a> {
+    fn from_data_vars(data_vars: &'a HashSet<String>) -> Self {
         StackMapping {
             stack_mapping: HashMap::new(),
             offset: 0,
@@ -406,7 +411,7 @@ impl StackMapping {
         }
     }
 
-    pub fn get_stack_location(&mut self, pseudo: &str) -> Operand {
+    fn get_stack_location(&mut self, pseudo: &str) -> Operand {
         let offset_option = self.stack_mapping.get(pseudo);
         let offset = match offset_option {
             Some(offset) => offset,
@@ -423,7 +428,7 @@ impl StackMapping {
     ///
     /// Static/extern variables become `Data` operands (RIP-relative addressing).
     /// Local variables become `Stack` operands (RBP-relative addressing).
-    pub fn replace_pseudo(&mut self, operand: &Operand) -> Operand {
+    fn replace_pseudo(&mut self, operand: &Operand) -> Operand {
         match operand {
             Operand::Pseudo(pseudo) => {
                 if self.data_vars.contains(pseudo) {
@@ -448,7 +453,7 @@ pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
 
     let mut offsets = HashMap::new();
     for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {
-        let mut stack_mapping = StackMapping::from_data_vars(data_vars.clone());
+        let mut stack_mapping = StackMapping::from_data_vars(&data_vars);
 
         for ins in body.iter_mut() {
             match ins {

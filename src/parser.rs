@@ -193,7 +193,7 @@ pub enum StorageClass {
     Extern,
 }
 
-pub enum TypeClass {
+enum TypeClass {
     Int,
 }
 
