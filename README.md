@@ -1,24 +1,84 @@
 # NCC - Not Completely C
+
 [![Lint](https://github.com/johnhringiv/NCC-Rust/actions/workflows/lint.yml/badge.svg)](https://github.com/johnhringiv/NCC-Rust/actions/workflows/lint.yml)
 [![codecov](https://codecov.io/gh/johnhringiv/NCC-Rust/graph/badge.svg?token=GJJCD2Z8Y6)](https://codecov.io/gh/johnhringiv/NCC-Rust)
 
 A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
 Some design decisions are informed by the book but the implementation is my own.
 
-So far chapter 9, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code generator for C code with functions, local variables, compound statements, loops, and switch statements.
-This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on Linux).
+So far chapter 10, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code
+generator for C code with functions, local and file-scope variables, storage-class specifiers, compound statements,
+loops, and switch statements.
+This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on
+Linux).
 All provided tests pass.
+
+## Example
+
+NCC supports a substantial subset of C, including functions, static variables, all control flow statements, and bitwise
+operations. Here's a [Collatz Conjecture](https://en.wikipedia.org/wiki/Collatz_conjecture) example showcasing some of
+these capabilities:
+
+```c
+// Collatz Conjecture Explorer
+//
+// For any positive integer n:
+//   - If n is even: n = n / 2
+//   - If n is odd:  n = 3n + 1
+// The conjecture states this always reaches 1.
+//
+// Which number under 100 takes the most steps?
+
+static int total_steps = 0;
+
+int collatz(int n) {
+    int steps = 0;
+    while (n != 1) {
+        if (n & 1) {
+            n = 3 * n + 1;    // odd
+        } else {
+            n = n >> 1;       // even: divide by 2
+        }
+        steps++;
+    }
+    total_steps += steps;
+    return steps;
+}
+
+int main(void) {
+    int champion = 1;
+    int max_steps = 0;
+
+    for (int i = 1; i < 100; i++) {
+        int steps = collatz(i);
+        if (steps > max_steps) {
+            max_steps = steps;
+            champion = i;
+        }
+    }
+
+    // Returns 97: takes 118 steps to reach 1!
+    // 97 -> 292 -> 146 -> 73 -> 220 -> 110 -> 55 -> ... -> 1
+    return champion;
+}
+```
+
+```sh
+$ ncc collatz.c --run
+97
+```
 
 ## Language Grammar
 
 The compiler currently implements a subset of C with the following grammar:
 
 ```ebnf
-<program> ::= { <function-declaration> }
+<program> ::= { <declaration> }
 <declaration> ::= <variable-declaration> | <function-declaration>
-<variable-declaration> ::= "int" <identifier> [ "=" <exp> ] ";"
-<function-declaration> ::= "int" <identifier> "(" <param-list> ")" ( <block> | ";" )
+<variable-declaration> ::= { <specifier> }+ <identifier> [ "=" <exp> ] ";"
+<function-declaration> ::= { <specifier> }+ <identifier> "(" <param-list> ")" ( <block> | ";" )
 <param-list> ::= "void" | "int" <identifier> { "," "int" <identifier> }
+<specifier> ::= "int" | "static" | "extern"
 <block> ::= "{" { <block-item> } "}"
 <block-item> ::= <statement> | <declaration>
 <for-init> ::= <variable-declaration> | [ <exp> ] ";"
@@ -53,9 +113,14 @@ The compiler currently implements a subset of C with the following grammar:
 ### Supported Features
 
 The compiler supports:
+
 - **Multiple functions**: Function definitions and forward declarations
-- **Function calls**: Call functions with arguments using the x86-64 System V ABI (first 6 integer arguments in registers RDI, RSI, RDX, RCX, R8, R9; additional arguments on the stack)
+- **Function calls**: Call functions with arguments using the x86-64 System V ABI (first 6 integer arguments in
+  registers RDI, RSI, RDX, RCX, R8, R9; additional arguments on the stack)
 - **Local variable declarations** with optional initialization
+- **File-scope (global) variables**: Defined at file scope with optional initializers (must be constant expressions)
+- **Storage-class specifiers**: `static` (internal linkage) and `extern` (external linkage) for both variables and
+  functions
 - **Compound statements (blocks)**: `{ ... }` with proper scoping
 - **Variable scoping**: Block-local variables with shadowing support
 - **Integer arithmetic**: addition, subtraction, multiplication, division, modulo
@@ -66,15 +131,15 @@ The compiler supports:
 - **Increment/decrement**: prefix (`++x`, `--x`) and postfix (`x++`, `x--`)
 - **Conditional (ternary) operator**: `condition ? true_expr : false_expr`
 - **Control flow**:
-  - `if`/`else` statements
-  - `switch` statements with `case` and `default` labels
-  - `while` loops
-  - `do-while` loops
-  - `for` loops with all three components (init, condition, update)
-  - `break` and `continue` statements
-  - Compound statements/blocks
-  - `goto` and labeled statements
-  - `return` statements
+    - `if`/`else` statements
+    - `switch` statements with `case` and `default` labels
+    - `while` loops
+    - `do-while` loops
+    - `for` loops with all three components (init, condition, update)
+    - `break` and `continue` statements
+    - Compound statements/blocks
+    - `goto` and labeled statements
+    - `return` statements
 - **Expression statements** and **null statements**
 
 ### Safer C
@@ -82,18 +147,29 @@ The compiler supports:
 NCC provides several safety features and guarantees to help developers write more reliable code:
 
 #### Guaranteed Behaviors
-- **Deterministic integer overflow**: Integer arithmetic uses two's complement wrapping (32-bit). For example, `INT_MAX + 1` reliably wraps to `INT_MIN`.
-- **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from evaluation order.
+
+- **Deterministic integer overflow**: Integer arithmetic uses two's complement wrapping (32-bit). For example,
+  `INT_MAX + 1` reliably wraps to `INT_MIN`.
+- **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from
+  evaluation order.
 
 #### Compile-Time Warnings
-- **Variable shadowing** (`-Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer scope
-- **Duplicate switch cases** (`-Wswitch-unreachable`): Detects and reports duplicate case values in switch statements, including those from constant expressions
-- **Unused parameters** (`-Wunused-parameter`): Warns when a function parameter is declared but never used in the function body
+
+- **Variable shadowing** (`-Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer
+  scope
+- **Duplicate switch cases** (`-Wswitch-unreachable`): Detects and reports duplicate case values in switch statements,
+  including those from constant expressions
+- **Unused parameters** (`-Wunused-parameter`): Warns when a function parameter is declared but never used in the
+  function body
 
 #### Developer Experience
-- **Precise error locations**: All errors and warnings include exact line and column numbers with file:line:column format, making it easy to locate problematic code
-- **Contextual error messages**: Semantic errors reference related code locations (e.g., showing both the shadowing variable and the original declaration)
-- **Pretty-printed ASTs**: Visual tree representations of parsed code (`--parse`), intermediate representations (`--tacky`), and generated code (`--codegen`) for debugging and understanding compilation stages
+
+- **Precise error locations**: All errors and warnings include exact line and column numbers with file:line:column
+  format, making it easy to locate problematic code
+- **Contextual error messages**: Semantic errors reference related code locations (e.g., showing both the shadowing
+  variable and the original declaration)
+- **Pretty-printed ASTs**: Visual tree representations of parsed code (`--parse`), intermediate representations (
+  `--tacky`), and generated code (`--codegen`) for debugging and understanding compilation stages
 
 These features help catch common bugs at compile time while providing predictable runtime behavior.
 
@@ -127,6 +203,7 @@ cargo build --release
 ```
 
 ### Running Tests
+
 ```sh
 cargo test
 ```
@@ -136,25 +213,27 @@ cargo test
 Usage: ncc [OPTIONS] `<FILENAMES>...`
 
 ### Arguments
+
 `<FILENAMES>...` Input files (required). Supports multiple C and assembly files.
 
 ### Options
-| Option                    | Description                                        |
-|---------------------------|----------------------------------------------------|
-| `--lex`                   | Run lexer                                          |
-| `--parse`                 | Run lexer and parser                               |
-| `--validate`              | Run lexer, parser, and validator                   |
-| `--codegen`               | Run lexer, parser, and code generator              |
-| `--tacky`                 | Emit TACKY IR                                      |
-| `-S`                      | Emit assembly                                      |
-| `--run`                   | Run compiled program and print result              |
-| `-c`                      | Emit object file only (no linking)                 |
-| `--gcc`                   | Use GCC for linking (instead of wild)              |
-| `--static`                | Link statically (no runtime dependencies)          |
+
+| Option                    | Description                                              |
+|---------------------------|----------------------------------------------------------|
+| `--lex`                   | Run lexer                                                |
+| `--parse`                 | Run lexer and parser                                     |
+| `--validate`              | Run lexer, parser, and validator                         |
+| `--codegen`               | Run lexer, parser, and code generator                    |
+| `--tacky`                 | Emit TACKY IR                                            |
+| `-S`                      | Emit assembly                                            |
+| `--run`                   | Run compiled program and print result                    |
+| `-c`                      | Emit object file only (no linking)                       |
+| `--gcc`                   | Use GCC for linking (instead of wild)                    |
+| `--static`                | Link statically (no runtime dependencies)                |
 | `--no-iced`               | Use text-based asm building instead of iced (deprecated) |
-| `-o`, `--output <OUTPUT>` | Override output file location                      |
-| `-h`, `--help`            | Print help                                         |
-| `-V`, `--version`         | Print version                                      |
+| `-o`, `--output <OUTPUT>` | Override output file location                            |
+| `-h`, `--help`            | Print help                                               |
+| `-V`, `--version`         | Print version                                            |
 
 Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `-S`, `--run`, `-c` are mutually exclusive options.
 
@@ -171,10 +250,12 @@ NCC uses specific exit codes to indicate different types of failures:
 | 30        | Validation error (semantic error)             |
 
 ## Contributing
+
 As a reminder to myself.
 Use the Makefile to check code quality `make quality` and fix formatting `make fix`.
 
 ### Requirements for Makefile
+
 ```shell
 sudo apt-get install pkg-config libssl-dev make
 ```

@@ -1,7 +1,7 @@
 use crate::parser;
 use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp, VarDeclaration};
 use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
-use crate::validate::NameGenerator;
+use crate::validate::{InitialValue, NameGenerator, SymbolTable, SymbolType};
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -121,11 +121,34 @@ pub struct FunctionDefinition {
     pub name: String,
     pub params: Vec<Identifier>,
     pub body: Vec<Instruction>,
+    pub global: bool,
+}
+
+/// Storage initialization for static variables.
+#[derive(Debug, Clone)]
+pub enum VarInit {
+    /// Variable defined here with initial value (0 = .bss, non-zero = .data)
+    Defined(i32),
+    /// Extern variable - no storage allocated, resolved by linker
+    Extern,
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticVariable {
+    pub name: String,
+    pub global: bool,
+    pub init: VarInit,
+}
+
+#[derive(Debug)]
+pub enum TopLevel {
+    Function(FunctionDefinition),
+    StaticVariable(StaticVariable),
 }
 
 #[derive(Debug)]
 pub struct Program {
-    pub functions: Vec<FunctionDefinition>,
+    pub top_level: Vec<TopLevel>,
 }
 
 /// Converts AST expressions into TACKY IR instructions.
@@ -530,6 +553,10 @@ fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_genera
     }
 }
 
+/// Emits runtime initialization code for automatic (local) variables only.
+///
+/// Static variables are initialized at compile time in the data section.
+/// Extern variables have no initialization code emitted.
 fn tackify_var_declaration(
     declaration: &VarDeclaration,
     instructions: &mut Vec<Instruction>,
@@ -539,6 +566,7 @@ fn tackify_var_declaration(
         name,
         init: Some(e),
         span,
+        storage_class: None,
     } = declaration
     {
         let ass = Expr::Assignment(Box::new(Expr::Var(name.clone(), *span)), Box::new(e.clone()), *span);
@@ -546,7 +574,11 @@ fn tackify_var_declaration(
     }
 }
 
-fn tackify_function(func: &parser::FunDeclaration, name_generator: &mut NameGenerator) -> FunctionDefinition {
+fn tackify_function(
+    func: &parser::FunDeclaration,
+    name_generator: &mut NameGenerator,
+    symbols: &SymbolTable,
+) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let parser::Identifier(name) = &func.name;
     if let Some(body) = &func.body {
@@ -561,15 +593,70 @@ fn tackify_function(func: &parser::FunDeclaration, name_generator: &mut NameGene
         name: name.clone(),
         params: func.params.clone(),
         body: instructions,
+        global: symbols.get(name).unwrap().global,
     }
 }
 
-pub fn tackify_program(program: &parser::Program, name_generator: &mut NameGenerator) -> Program {
-    let mut functions = Vec::new();
-    for function in &program.functions {
-        if function.body.is_some() {
-            functions.push(tackify_function(function, name_generator));
+/// Converts static variables from the symbol table into TACKY IR definitions.
+///
+/// Iterates through all symbols and emits `StaticVariable` entries for variables
+/// with static storage duration:
+/// - `VarInit::Defined(value)` for defined variables (Initial or Tentative)
+/// - `VarInit::Extern` for extern declarations (defined elsewhere)
+///
+/// Tentative definitions are initialized to 0.
+fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<TopLevel> {
+    let mut tacky_defs = vec![];
+    for (name, entry) in symbols.iter() {
+        if let SymbolType::Int(init) = &entry.symbol_type {
+            match init {
+                InitialValue::Initial(i) => tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
+                    name: name.clone(),
+                    global: entry.global,
+                    init: VarInit::Defined(*i),
+                })),
+                InitialValue::Tentative => tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
+                    name: name.clone(),
+                    global: entry.global,
+                    init: VarInit::Defined(0),
+                })),
+                InitialValue::NoInitializer => {
+                    // Only add extern vars if it's not a renamed local variable.
+                    // Renamed locals have dots in their names (e.g., "i.1").
+                    // File-scope extern declarations keep their original names.
+                    if !name.contains('.') {
+                        tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
+                            name: name.clone(),
+                            global: entry.global,
+                            init: VarInit::Extern,
+                        }));
+                    }
+                }
+            }
         }
     }
-    Program { functions }
+    tacky_defs
+}
+
+/// Converts a parsed C program into TACKY IR.
+///
+/// Processes all function definitions (skipping declarations without bodies) and
+/// combines them with static variable definitions from the symbol table.
+pub fn tackify_program(
+    program: &parser::Program,
+    name_generator: &mut NameGenerator,
+    symbols: &SymbolTable,
+) -> Program {
+    let mut top_level = Vec::new();
+    for decl in &program.declarations {
+        if let Declaration::FunDeclaration(func) = decl
+            && func.body.is_some()
+        {
+            top_level.push(TopLevel::Function(tackify_function(func, name_generator, symbols)));
+        }
+    }
+
+    let static_var_defs = convert_symbols_to_tacky(symbols);
+    top_level.extend(static_var_defs);
+    Program { top_level }
 }

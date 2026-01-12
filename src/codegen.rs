@@ -1,8 +1,8 @@
 use crate::parser;
 use crate::parser::Identifier;
 use crate::tacky;
-use crate::tacky::{BinOp, Val};
-use std::collections::HashMap;
+use crate::tacky::{BinOp, StaticVariable, Val};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reg {
@@ -23,6 +23,13 @@ pub enum Operand {
     Reg(Reg),
     Pseudo(String),
     Stack(i32),
+    Data(String),
+}
+
+impl Operand {
+    pub fn is_memory(&self) -> bool {
+        matches!(self, Operand::Data(_) | Operand::Stack(_))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,27 +80,29 @@ pub enum CondCode {
 }
 
 impl CondCode {
-    pub fn ins_suffix(&self) -> String {
+    pub fn ins_suffix(&self) -> &'static str {
         match self {
-            CondCode::E => "e".to_string(),
-            CondCode::NE => "ne".to_string(),
-            CondCode::G => "g".to_string(),
-            CondCode::GE => "ge".to_string(),
-            CondCode::L => "l".to_string(),
-            CondCode::LE => "le".to_string(),
+            CondCode::E => "e",
+            CondCode::NE => "ne",
+            CondCode::G => "g",
+            CondCode::GE => "ge",
+            CondCode::L => "l",
+            CondCode::LE => "le",
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct FunctionDefinition {
     pub name: String,
     pub body: Vec<Instruction>,
+    pub global: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Program {
     pub functions: Vec<FunctionDefinition>,
+    pub static_vars: Vec<StaticVariable>,
 }
 
 fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val) -> Vec<Instruction> {
@@ -117,7 +126,7 @@ fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val) -> Vec<
         let assembly_arg = convert_val(tacky_arg);
         match assembly_arg {
             Operand::Imm(_) | Operand::Reg(_) => instructions.push(Instruction::Push(assembly_arg)),
-            Operand::Stack(_) | Operand::Pseudo(_) => {
+            Operand::Stack(_) | Operand::Pseudo(_) | Operand::Data(_) => {
                 instructions.push(Instruction::Mov {
                     src: assembly_arg,
                     dst: Operand::Reg(Reg::AX),
@@ -209,7 +218,8 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
                         },
                     ]
                 }
-                BinOp::Divide => {
+                BinOp::Divide | BinOp::Remainder => {
+                    let result_reg = if *op == BinOp::Divide { Reg::AX } else { Reg::DX };
                     vec![
                         Instruction::Mov {
                             src: src1,
@@ -218,21 +228,7 @@ fn convert_instruction(instruction: &tacky::Instruction) -> Vec<Instruction> {
                         Instruction::Cdq,
                         Instruction::Idiv(src2),
                         Instruction::Mov {
-                            src: Operand::Reg(Reg::AX),
-                            dst,
-                        },
-                    ]
-                }
-                BinOp::Remainder => {
-                    vec![
-                        Instruction::Mov {
-                            src: src1,
-                            dst: Operand::Reg(Reg::AX),
-                        },
-                        Instruction::Cdq,
-                        Instruction::Idiv(src2),
-                        Instruction::Mov {
-                            src: Operand::Reg(Reg::DX),
+                            src: Operand::Reg(result_reg),
                             dst,
                         },
                     ]
@@ -316,7 +312,12 @@ impl From<&BinOp> for BinaryOp {
             BinOp::BitwiseXOr => BinaryOp::BitXOr,
             BinOp::BitwiseLeftShift => BinaryOp::BitShl,
             BinOp::BitwiseRightShift => BinaryOp::BitSar,
-            _ => unimplemented!("Binary operation not implemented: {:?}", op),
+            BinOp::Equal
+            | BinOp::NotEqual
+            | BinOp::LessThan
+            | BinOp::LessOrEqual
+            | BinOp::GreaterThan
+            | BinOp::GreaterOrEqual => unreachable!("Removed in convert_instruction"),
         }
     }
 }
@@ -337,7 +338,12 @@ fn convert_val(ast: &tacky::Val) -> Operand {
 }
 
 fn convert_function(ast: &tacky::FunctionDefinition) -> FunctionDefinition {
-    let tacky::FunctionDefinition { name, params, body } = ast;
+    let tacky::FunctionDefinition {
+        name,
+        params,
+        body,
+        global,
+    } = ast;
     let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
     let mut instructions = vec![];
 
@@ -361,36 +367,51 @@ fn convert_function(ast: &tacky::FunctionDefinition) -> FunctionDefinition {
         FunctionDefinition {
             name: name.to_string(),
             body: instructions,
+            global: *global,
         }
     }
 }
 
+/// Converts TACKY IR to x86-64 assembly AST.
+///
+/// Performs several passes: converts TACKY to assembly instructions,
+/// replaces pseudo-registers with stack slots (or Data operands for statics),
+/// fixes invalid instruction operand combinations, and coalesces consecutive labels.
 pub fn generate(ast: &tacky::Program) -> Program {
     let mut functions = vec![];
-    for function in ast.functions.as_slice() {
-        functions.push(convert_function(function))
+    let mut static_vars = vec![];
+
+    for decl in &ast.top_level {
+        match decl {
+            tacky::TopLevel::Function(function) => functions.push(convert_function(function)),
+            tacky::TopLevel::StaticVariable(s) => static_vars.push(s.clone()),
+        }
     }
-    let mut p = Program { functions };
+    let mut p = Program { functions, static_vars };
     let stack_offsets = replace_pseudo_registers(&mut p);
     fix_invalid(&mut p, &stack_offsets);
     coalesce_labels(&mut p);
     p
 }
 
-struct StackMapping {
-    stack_mapping: std::collections::HashMap<String, i32>,
+struct StackMapping<'a> {
+    stack_mapping: HashMap<String, i32>,
     offset: i32,
+    /// Names of variables that should use Data operands (RIP-relative addressing).
+    /// Includes both static variables defined in this file and extern variables.
+    data_vars: &'a HashSet<String>,
 }
 
-impl StackMapping {
-    pub fn new() -> Self {
+impl<'a> StackMapping<'a> {
+    fn from_data_vars(data_vars: &'a HashSet<String>) -> Self {
         StackMapping {
-            stack_mapping: std::collections::HashMap::new(),
+            stack_mapping: HashMap::new(),
             offset: 0,
+            data_vars,
         }
     }
 
-    pub fn get_stack_location(&mut self, pseudo: &str) -> Operand {
+    fn get_stack_location(&mut self, pseudo: &str) -> Operand {
         let offset_option = self.stack_mapping.get(pseudo);
         let offset = match offset_option {
             Some(offset) => offset,
@@ -403,18 +424,36 @@ impl StackMapping {
         Operand::Stack(*offset)
     }
 
-    pub fn replace_pseudo(&mut self, operand: &Operand) -> Operand {
+    /// Replaces pseudo-register operands with their actual locations.
+    ///
+    /// Static/extern variables become `Data` operands (RIP-relative addressing).
+    /// Local variables become `Stack` operands (RBP-relative addressing).
+    fn replace_pseudo(&mut self, operand: &Operand) -> Operand {
         match operand {
-            Operand::Pseudo(pseudo) => self.get_stack_location(pseudo),
+            Operand::Pseudo(pseudo) => {
+                if self.data_vars.contains(pseudo) {
+                    Operand::Data(pseudo.clone())
+                } else {
+                    self.get_stack_location(pseudo)
+                }
+            }
             _ => operand.clone(),
         }
     }
 }
 
+/// Replaces all pseudo-register operands with concrete locations.
+///
+/// For each function, assigns stack slots to local variables and converts
+/// static variable references to Data operands. Returns a map of function
+/// names to their total stack space used (as negative offsets from RBP).
 pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
+    // Collect data vars (static + extern) upfront to avoid borrow conflict in the loop
+    let data_vars: HashSet<String> = program.static_vars.iter().map(|v| v.name.clone()).collect();
+
     let mut offsets = HashMap::new();
-    for FunctionDefinition { name, body } in program.functions.iter_mut() {
-        let mut stack_mapping = StackMapping::new();
+    for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {
+        let mut stack_mapping = StackMapping::from_data_vars(&data_vars);
 
         for ins in body.iter_mut() {
             match ins {
@@ -441,8 +480,19 @@ pub fn replace_pseudo_registers(program: &mut Program) -> HashMap<String, i32> {
     offsets
 }
 
+/// Fixes invalid x86-64 instruction operand combinations.
+///
+/// Rewrites instructions that violate x86-64 encoding rules:
+/// - Memory-to-memory moves (uses R10 as intermediate)
+/// - Immediate operand to idiv (moves to R10 first)
+/// - imul with memory destination (uses R11 as intermediate)
+/// - Binary ops with both operands in memory (uses R10)
+/// - Shift with memory source (moves count to CX)
+/// - Compare with both operands in memory or immediate second operand
+///
+/// Also inserts stack allocation at the start of each function.
 pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
-    for FunctionDefinition { name, body } in program.functions.iter_mut() {
+    for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {
         // stack_offset is negative, so convert to positive, round up to 16, then negate for AllocateStack
         let mut positive_offset = -stack_offsets[name];
         if positive_offset % 16 != 0 {
@@ -451,17 +501,14 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) 
         let mut new_ins = vec![Instruction::AllocateStack(positive_offset)];
         for ins in body.iter() {
             match ins {
-                Instruction::Mov {
-                    src: Operand::Stack(src),
-                    dst: Operand::Stack(dst),
-                } => {
+                Instruction::Mov { src, dst } if src.is_memory() && dst.is_memory() => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Stack(*src),
+                        src: src.clone(),
                         dst: Operand::Reg(Reg::R10),
                     });
                     new_ins.push(Instruction::Mov {
                         src: Operand::Reg(Reg::R10),
-                        dst: Operand::Stack(*dst),
+                        dst: dst.clone(),
                     });
                 }
                 Instruction::Idiv(Operand::Imm(c)) => {
@@ -474,10 +521,10 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) 
                 Instruction::Binary {
                     op: BinaryOp::Mult,
                     src,
-                    dst: Operand::Stack(dst),
-                } => {
+                    dst,
+                } if dst.is_memory() => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Stack(*dst),
+                        src: dst.clone(),
                         dst: Operand::Reg(Reg::R11),
                     });
                     new_ins.push(Instruction::Binary {
@@ -487,31 +534,31 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) 
                     });
                     new_ins.push(Instruction::Mov {
                         src: Operand::Reg(Reg::R11),
-                        dst: Operand::Stack(*dst),
+                        dst: dst.clone(),
                     });
                 }
                 Instruction::Binary {
                     op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr),
-                    src: Operand::Stack(src),
-                    dst: Operand::Stack(dst),
-                } => {
+                    src,
+                    dst,
+                } if src.is_memory() && dst.is_memory() => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Stack(*src),
+                        src: src.clone(),
                         dst: Operand::Reg(Reg::R10),
                     });
                     new_ins.push(Instruction::Binary {
                         op: op.clone(),
                         src: Operand::Reg(Reg::R10),
-                        dst: Operand::Stack(*dst),
+                        dst: dst.clone(),
                     });
                 }
                 Instruction::Binary {
                     op: op @ (BinaryOp::BitShl | BinaryOp::BitSar),
-                    src: Operand::Stack(src),
+                    src,
                     dst,
-                } => {
+                } if src.is_memory() => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Stack(*src),
+                        src: src.clone(),
                         dst: Operand::Reg(Reg::CX),
                     });
                     new_ins.push(Instruction::Binary {
@@ -520,17 +567,14 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) 
                         dst: dst.clone(),
                     });
                 }
-                Instruction::Cmp {
-                    v1: Operand::Stack(v1),
-                    v2: Operand::Stack(v2),
-                } => {
+                Instruction::Cmp { v1, v2 } if v1.is_memory() && v2.is_memory() => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Stack(*v1),
+                        src: v1.clone(),
                         dst: Operand::Reg(Reg::R10),
                     });
                     new_ins.push(Instruction::Cmp {
                         v1: Operand::Reg(Reg::R10),
-                        v2: Operand::Stack(*v2),
+                        v2: v2.clone(),
                     });
                 }
                 Instruction::Cmp {
@@ -555,7 +599,12 @@ pub fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) 
 
 /// Coalesces consecutive labels by mapping subsequent labels to the first one
 pub fn coalesce_labels(program: &mut Program) {
-    for FunctionDefinition { name: _name, body } in program.functions.iter_mut() {
+    for FunctionDefinition {
+        name: _name,
+        body,
+        global: _,
+    } in program.functions.iter_mut()
+    {
         let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut new_ins = Vec::new();
         let mut current_label: Option<String> = None;

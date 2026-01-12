@@ -160,8 +160,8 @@ fn main() {
             std::process::exit(0);
         }
 
-        let mut name_gen = validated_result;
-        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
+        let (mut name_gen, symbols) = validated_result;
+        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen, &symbols);
 
         if args.tacky {
             println!("{tacky_ast:?}");
@@ -182,6 +182,7 @@ fn main() {
             let mut formatter = iced_x86::GasFormatter::with_options(Some(Box::new(resolver)), None);
             let ops = formatter.options_mut();
             ops.set_number_base(iced_x86::NumberBase::Decimal);
+            ops.set_rip_relative_addresses(true);
             let mut output = MyFormatterOutput::new();
 
             println!("Generated ASM\n");
@@ -208,6 +209,32 @@ fn main() {
                 current_offset += ins.len();
             }
 
+            // Print static variables (skip extern vars)
+            let mut defined_vars = code_ast
+                .static_vars
+                .iter()
+                .filter_map(|sv| match sv.init {
+                    tacky::VarInit::Defined(v) => Some((sv, v)),
+                    tacky::VarInit::Extern => None,
+                })
+                .peekable();
+            if defined_vars.peek().is_some() {
+                println!();
+                for (sv, init_val) in defined_vars {
+                    let section = if init_val == 0 { ".bss" } else { ".data" };
+                    println!("{}", section.cyan());
+                    if sv.global {
+                        println!("  {}", format!(".globl {}", sv.name).dimmed());
+                    }
+                    println!("{}:", sv.name.green());
+                    if init_val == 0 {
+                        println!("  {}", ".zero 4".yellow());
+                    } else {
+                        println!("  {} {}", ".long".yellow(), init_val.to_string().cyan());
+                    }
+                }
+            }
+
             std::process::exit(0);
         }
     }
@@ -222,12 +249,11 @@ fn main() {
             std::process::exit(1);
         };
 
-        let tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
+        let mut tokens = lexer::tokenizer(&input).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(10)
         });
 
-        let mut tokens = tokens;
         let ast = parser::parse_program(&mut tokens).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(20)
@@ -239,8 +265,8 @@ fn main() {
             std::process::exit(30);
         });
 
-        let mut name_gen = validated_result;
-        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen);
+        let (mut name_gen, symbols) = validated_result;
+        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen, &symbols);
         let code_ast = codegen::generate(&tacky_ast);
 
         let path = Path::new(c_file);
@@ -436,100 +462,5 @@ fn main() {
             }
         }
         fs::remove_file(&out_file).ok();
-    }
-}
-
-// Available for both unit tests and integration tests
-#[cfg(test)]
-pub mod test_utils {
-    use crate::lexer::tokenizer;
-    use crate::parser::parse_program;
-    use crate::validate::resolve_program;
-    use std::fs;
-    use std::path::Path;
-
-    static CHAPTER_COMPLETED: i32 = 8;
-    static EXTRA_COMPLETED: i32 = 8;
-    pub enum Stage {
-        Lex,
-        Parse,
-        Validate,
-    }
-
-    impl Stage {
-        pub fn dir(&self) -> &'static str {
-            match self {
-                Stage::Lex => "lex",
-                Stage::Parse => "parse",
-                Stage::Validate => "semantics",
-            }
-        }
-    }
-
-    pub fn get_sandler_dirs(valid: bool, stage: &Stage) -> Vec<String> {
-        let mut dirs = vec![];
-        for chapter in 1..=CHAPTER_COMPLETED {
-            if valid {
-                dirs.push(format!("../writing-a-c-compiler-tests/tests/chapter_{chapter}/valid/"));
-            } else {
-                dirs.push(format!(
-                    "../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/",
-                    stage.dir()
-                ));
-            }
-        }
-        for chapter in 1..=EXTRA_COMPLETED {
-            if valid {
-                dirs.push(format!(
-                    "../writing-a-c-compiler-tests/tests/chapter_{chapter}/valid/extra_credit/"
-                ));
-            } else {
-                dirs.push(format!(
-                    "../writing-a-c-compiler-tests/tests/chapter_{chapter}/invalid_{:}/extra_credit/",
-                    stage.dir()
-                ));
-            }
-        }
-        dirs
-    }
-
-    pub fn run_tests(dir_paths: &Vec<String>, should_pass: bool, stage: &Stage) -> (usize, Vec<String>) {
-        let mut passed = 0;
-        let mut failed = vec![];
-        for dir_path in dir_paths {
-            let test_dir = Path::new(dir_path);
-
-            if test_dir.exists() {
-                for entry in fs::read_dir(test_dir).unwrap() {
-                    let entry = entry.unwrap();
-                    let path = entry.path();
-                    if path.is_file() && path.extension() == Some("c".as_ref()) {
-                        let input = fs::read_to_string(&path).unwrap();
-                        let test_result = match stage {
-                            Stage::Lex => tokenizer(&input).is_err(),
-                            Stage::Parse => {
-                                let mut tokens = tokenizer(&input).unwrap();
-                                parse_program(&mut tokens).is_err()
-                            }
-                            Stage::Validate => {
-                                let mut tokens = tokenizer(&input).unwrap();
-                                let mut program = parse_program(&mut tokens).unwrap();
-                                resolve_program(&mut program).is_err()
-                            }
-                        };
-
-                        let test_passed = if should_pass { !test_result } else { test_result };
-
-                        if test_passed {
-                            passed += 1;
-                        } else {
-                            failed.push(path.file_name().unwrap().to_str().unwrap().to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        (passed, failed)
     }
 }

@@ -64,6 +64,8 @@ pub enum Token {
     DefaultKeyword,          // default
     CaseKeyword,             // case
     Comma,                   // ,
+    StaticKeyword,           // static
+    ExternKeyword,           // extern
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
@@ -133,6 +135,8 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^switch\b", Token::SwitchKeyword),
     (r"^default\b", Token::DefaultKeyword),
     (r"^case\b", Token::CaseKeyword),
+    (r"^static\b", Token::StaticKeyword),
+    (r"^extern\b", Token::ExternKeyword),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -184,7 +188,7 @@ impl fmt::Display for Span {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct SpannedToken {
     pub token: Token,
     pub span: Span,

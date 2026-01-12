@@ -1,5 +1,6 @@
 // Simple emitter using iced-x86 to generate machine code at runtime
 use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp};
+use crate::tacky::{StaticVariable, VarInit};
 use iced_x86::{BlockEncoderOptions, IcedError, SymbolResolver, SymbolResult, code_asm::*};
 use object::write::{
     Object, Relocation, RelocationFlags, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolId, SymbolKind,
@@ -11,29 +12,54 @@ use object::{
 };
 use std::collections::HashMap;
 
-// Symbol resolver for displaying labels in assembly output
+/// Creates an undefined symbol (resolved by linker at link time).
+fn undefined_symbol(name: &str, kind: SymbolKind) -> Symbol {
+    Symbol {
+        name: name.as_bytes().to_vec(),
+        value: 0,
+        size: 0,
+        kind,
+        scope: SymbolScope::Unknown,
+        weak: false,
+        section: SymbolSection::Undefined,
+        flags: SymbolFlags::None,
+    }
+}
+
+/// Symbol resolver for displaying labels in assembly output.
+///
+/// Handles two types of symbol resolution:
+/// - `symbols`: Direct address-to-name mapping for functions and internal labels
+/// - `reloc_symbols`: Instruction IP to symbol name for RIP-relative data references
 pub struct MySymbolResolver {
     symbols: HashMap<u64, String>,
+    reloc_symbols: HashMap<u64, String>,
 }
 
 impl MySymbolResolver {
-    fn new(symbols: HashMap<u64, String>) -> Self {
-        Self { symbols }
+    fn new(symbols: HashMap<u64, String>, reloc_symbols: HashMap<u64, String>) -> Self {
+        Self { symbols, reloc_symbols }
     }
 }
 
 impl SymbolResolver for MySymbolResolver {
     fn symbol(
         &'_ mut self,
-        _instruction: &iced_x86::Instruction,
+        instruction: &iced_x86::Instruction,
         _operand: u32,
         _instruction_operand: Option<u32>,
         address: u64,
         _address_size: u32,
     ) -> Option<SymbolResult<'_>> {
-        self.symbols
-            .get(&address)
-            .map(|name| SymbolResult::with_str(address, name.as_str()))
+        // First check direct address mapping (functions, internal labels)
+        if let Some(name) = self.symbols.get(&address) {
+            return Some(SymbolResult::with_str(address, name.as_str()));
+        }
+        // Then check relocation-based symbols (data references)
+        if let Some(name) = self.reloc_symbols.get(&instruction.ip()) {
+            return Some(SymbolResult::with_str(address, name.as_str()));
+        }
+        None
     }
 }
 
@@ -41,6 +67,8 @@ impl SymbolResolver for MySymbolResolver {
 pub fn get_instructions(
     program: &codegen::Program,
 ) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, String>), Box<dyn std::error::Error>> {
+    use object::read::RelocationTarget;
+
     let (obj_bytes, internal_labels) = emit_object_with_labels(program)?;
 
     // Parse the object file
@@ -49,6 +77,14 @@ pub fn get_instructions(
     // Extract .text section
     let text_section = obj.section_by_name(".text").ok_or("No .text section found")?;
     let code = text_section.data()?;
+
+    // Build symbol index to name map
+    let mut symbol_names: HashMap<object::SymbolIndex, String> = HashMap::new();
+    for symbol in obj.symbols() {
+        if let Ok(name) = symbol.name() {
+            symbol_names.insert(symbol.index(), name.to_string());
+        }
+    }
 
     // Build symbol resolver from object file symbols
     let mut address_map = HashMap::new();
@@ -78,6 +114,14 @@ pub fn get_instructions(
     decoder.set_ip(0);
     let instructions: Vec<iced_x86::Instruction> = decoder.into_iter().collect();
 
+    // Build instruction offset ranges: (start, end) for each instruction
+    let mut ins_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut offset = 0;
+    for ins in &instructions {
+        ins_ranges.push((offset, offset + ins.len()));
+        offset += ins.len();
+    }
+
     // Map instruction indices from internal_labels to byte offsets
     let mut current_offset = 0;
     for (ins_idx, ins) in instructions.iter().enumerate() {
@@ -89,13 +133,56 @@ pub fn get_instructions(
         current_offset += ins.len();
     }
 
-    Ok((instructions, MySymbolResolver::new(address_map), label_idx))
+    // Build relocation-based symbol map: instruction IP -> symbol name
+    // This allows the symbol resolver to show data symbol names for RIP-relative accesses
+    let mut reloc_symbols: HashMap<u64, String> = HashMap::new();
+    for (reloc_offset, reloc) in text_section.relocations() {
+        if let RelocationTarget::Symbol(sym_idx) = reloc.target()
+            && let Some(symbol_name) = symbol_names.get(&sym_idx)
+        {
+            // Find which instruction contains this relocation
+            for (start, end) in ins_ranges.iter() {
+                if reloc_offset as usize >= *start && (reloc_offset as usize) < *end {
+                    reloc_symbols.insert(*start as u64, symbol_name.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok((
+        instructions,
+        MySymbolResolver::new(address_map, reloc_symbols),
+        label_idx,
+    ))
 }
 
 pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     emit_object_with_labels(program).map(|(bytes, _)| bytes)
 }
 
+/// Emits an ELF/Mach-O object file from the codegen IR using iced-x86.
+///
+/// This is the core emission function that produces relocatable machine code.
+/// It performs the following steps:
+///
+/// 1. Creates iced-x86 labels for all functions and static variables upfront
+/// 2. Emits machine code for each function body, tracking:
+///    - External function calls (for PLT relocations)
+///    - Data references (for RIP-relative relocations)
+///    - Internal jump labels (for disassembly)
+/// 3. Assembles the code using iced-x86's block encoder
+/// 4. Builds an object file with the `object` crate containing:
+///    - `.text` section with the assembled code
+///    - `.data`/`.bss` sections for static variables
+///    - Symbol table entries for functions and variables
+///    - Relocations for external calls and data references
+///
+/// # Returns
+///
+/// A tuple containing:
+/// - The serialized object file bytes
+/// - A map from instruction index to label name (for disassembly/debugging)
 #[allow(clippy::type_complexity)]
 fn emit_object_with_labels(
     program: &codegen::Program,
@@ -108,8 +195,15 @@ fn emit_object_with_labels(
         fn_labels.insert(fun_def.name.clone(), a.create_label());
     }
 
+    // Create labels for static variables (including extern) to get RIP-relative addressing
+    let mut data_labels: HashMap<String, CodeLabel> = HashMap::new();
+    for sv in &program.static_vars {
+        data_labels.insert(sv.name.clone(), a.create_label());
+    }
+
     // Track external function calls (instruction index, function name)
     let mut external_calls: Vec<(usize, String)> = Vec::new();
+    let mut data_relocs: Vec<(usize, String)> = Vec::new();
 
     // Track all internal labels across all functions
     let mut all_label_idx: HashMap<usize, String> = HashMap::new();
@@ -125,7 +219,9 @@ fn emit_object_with_labels(
             &mut a,
             fun_def,
             &fn_labels,
+            &data_labels,
             &mut external_calls,
+            &mut data_relocs,
             &mut labels,
             &mut label_idx,
         )?;
@@ -134,13 +230,16 @@ fn emit_object_with_labels(
         all_label_idx.extend(label_idx);
     }
 
-    let result = a.assemble_options(0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
+    let result = a.assemble_options(
+        0,
+        BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS | BlockEncoderOptions::RETURN_CONSTANT_OFFSETS,
+    )?;
 
     // Get function offsets before moving the code buffer
-    let mut func_offsets: Vec<(String, u64)> = Vec::new();
+    let mut func_offsets: Vec<(String, u64, bool)> = Vec::new();
     for fun_def in &program.functions {
         let func_off = result.label_ip(fn_labels.get(&fun_def.name).unwrap())?;
-        func_offsets.push((fun_def.name.clone(), func_off));
+        func_offsets.push((fun_def.name.clone(), func_off, fun_def.global));
     }
 
     // Clone instruction offsets before moving the inner
@@ -168,34 +267,74 @@ fn emit_object_with_labels(
     obj.append_section_data(text, &code, 1);
 
     // Add all function symbols
-    for (func_name, func_off) in &func_offsets {
+    for (func_name, func_off, global) in &func_offsets {
         let func_size = code.len() as u64 - func_off;
         obj.add_symbol(Symbol {
             name: func_name.as_bytes().to_vec(),
             value: *func_off,
             size: func_size,
             kind: SymbolKind::Text,
-            scope: SymbolScope::Linkage,
+            // Use Dynamic for global symbols (DEFAULT visibility) to allow linking across object files
+            // Use Compilation for static symbols (LOCAL binding)
+            scope: if *global {
+                SymbolScope::Dynamic
+            } else {
+                SymbolScope::Compilation
+            },
             weak: false,
             section: SymbolSection::Section(text),
             flags: SymbolFlags::None,
         });
     }
 
+    let data = obj.section_id(StandardSection::Data);
+    let bss = obj.section_id(StandardSection::UninitializedData);
+    let mut data_offset: u64 = 0;
+    let mut bss_offset: u64 = 0;
+    let mut static_var_symbols: HashMap<String, SymbolId> = HashMap::new();
+    for StaticVariable { name, global, init } in &program.static_vars {
+        let sym_id = match init {
+            // Defined variable - allocate storage in .data or .bss
+            VarInit::Defined(init_val) => {
+                let (offset, section) = if *init_val == 0 {
+                    obj.append_section_bss(bss, 4, 4);
+                    let offset = bss_offset;
+                    bss_offset += 4;
+                    (offset, &bss)
+                } else {
+                    let init_bytes = init_val.to_le_bytes();
+                    obj.append_section_data(data, &init_bytes, 4);
+                    let offset = data_offset;
+                    data_offset += 4;
+                    (offset, &data)
+                };
+
+                obj.add_symbol(Symbol {
+                    name: name.as_bytes().to_vec(),
+                    value: offset,
+                    size: 4,
+                    kind: SymbolKind::Data,
+                    scope: if *global {
+                        SymbolScope::Dynamic
+                    } else {
+                        SymbolScope::Compilation
+                    },
+                    weak: false,
+                    section: SymbolSection::Section(*section),
+                    flags: SymbolFlags::None,
+                })
+            }
+            // Extern variable - undefined symbol resolved by linker
+            VarInit::Extern => obj.add_symbol(undefined_symbol(name, SymbolKind::Data)),
+        };
+        static_var_symbols.insert(name.clone(), sym_id);
+    }
+
     // Add external function symbols and relocations
     let mut external_symbols: HashMap<String, SymbolId> = HashMap::new();
     for (_ins_idx, func_name) in &external_calls {
         if !external_symbols.contains_key(func_name) {
-            let symbol_id = obj.add_symbol(Symbol {
-                name: func_name.as_bytes().to_vec(),
-                value: 0,
-                size: 0,
-                kind: SymbolKind::Text,
-                scope: SymbolScope::Unknown,
-                weak: false,
-                section: SymbolSection::Undefined,
-                flags: SymbolFlags::None,
-            });
+            let symbol_id = obj.add_symbol(undefined_symbol(func_name, SymbolKind::Text));
             external_symbols.insert(func_name.clone(), symbol_id);
         }
     }
@@ -227,21 +366,79 @@ fn emit_object_with_labels(
         }
     }
 
+    if !static_var_symbols.is_empty() {
+        for (ins_idx, var_name) in &data_relocs {
+            if let Some(symbol_id) = static_var_symbols.get(var_name) {
+                let ins_offset = instruction_offsets[*ins_idx] as u64;
+                let const_offsets = &result.inner.constant_offsets[*ins_idx];
+                let reloc_offset = ins_offset + const_offsets.displacement_offset() as u64;
+
+                // The addend is the negative of the bytes remaining after the displacement field.
+                // For R_X86_64_PC32: patched_value = S + A - P
+                // We want: displacement = S - RIP_next = S - (P + bytes_remaining)
+                // So: A = -bytes_remaining = -(displacement_size + immediate_size)
+                let bytes_remaining = const_offsets.displacement_size() + const_offsets.immediate_size();
+                let addend = -(bytes_remaining as i64);
+
+                obj.add_relocation(
+                    text,
+                    Relocation {
+                        offset: reloc_offset,
+                        flags: RelocationFlags::Generic {
+                            kind: RelocationKind::Relative,
+                            encoding: RelocationEncoding::Generic,
+                            size: 32,
+                        },
+                        symbol: *symbol_id,
+                        addend,
+                    },
+                )?;
+            }
+        }
+    }
+
     Ok((obj.write()?, all_label_idx))
 }
 
+/// Emits machine code for a single function body.
+///
+/// Generates the standard x86-64 function prologue (`push rbp; mov rbp, rsp`)
+/// followed by machine code for each instruction in the function body.
+///
+/// # Parameters
+///
+/// - `a`: The iced-x86 code assembler to emit instructions into
+/// - `fun_def`: The function definition containing the instruction list
+/// - `fn_labels`: Pre-created labels for all functions (for internal calls)
+/// - `data_labels`: Pre-created labels for static/extern variables (for RIP-relative access)
+/// - `external_calls`: Output vec tracking external call sites for relocation
+/// - `data_relocs`: Output vec tracking data reference sites for relocation
+/// - `labels`: Working map of jump label names to iced-x86 labels (within this function)
+/// - `label_idx`: Output map from instruction index to label name (for disassembly)
+#[allow(clippy::too_many_arguments)]
 fn emit_function_body(
     a: &mut CodeAssembler,
     fun_def: &codegen::FunctionDefinition,
     fn_labels: &HashMap<String, CodeLabel>,
+    data_labels: &HashMap<String, CodeLabel>,
     external_calls: &mut Vec<(usize, String)>,
+    data_relocs: &mut Vec<(usize, String)>,
     labels: &mut HashMap<String, CodeLabel>,
     label_idx: &mut HashMap<usize, String>,
 ) -> Result<(), IcedError> {
     a.push(gpr64::rbp)?;
     a.mov(gpr64::rbp, gpr64::rsp)?;
     for ins in &fun_def.body {
-        emit_instruction(a, ins, labels, label_idx, fn_labels, external_calls)?;
+        emit_instruction(
+            a,
+            ins,
+            labels,
+            label_idx,
+            fn_labels,
+            data_labels,
+            external_calls,
+            data_relocs,
+        )?;
     }
     Ok(())
 }
@@ -284,13 +481,22 @@ fn mem_rbp(offset: i32) -> AsmMemoryOperand {
     }
 }
 
+// Data operands (static variables) use RIP-relative addressing with relocations.
+//
+// Note: Many Data destination patterns (e.g., `Add(Reg, Data)`, `Neg(Data)`) are currently
+// unreached because the codegen uses load→op→store sequences for static variables.
+// These patterns will become reachable after implementing copy propagation and dead store
+// elimination, which can optimize `tmp = x; tmp = tmp + 1; x = tmp` into `x = x + 1`.
+#[allow(clippy::too_many_arguments)]
 fn emit_instruction(
     a: &mut CodeAssembler,
     ins: &Instruction,
     labels: &mut HashMap<String, CodeLabel>,
     label_idx: &mut HashMap<usize, String>,
     fn_labels: &HashMap<String, CodeLabel>,
+    data_labels: &HashMap<String, CodeLabel>,
     external_calls: &mut Vec<(usize, String)>,
+    data_relocs: &mut Vec<(usize, String)>,
 ) -> Result<(), IcedError> {
     match ins {
         Instruction::Mov { src, dst } => match (src, dst) {
@@ -298,18 +504,43 @@ fn emit_instruction(
             (Operand::Reg(s), Operand::Reg(d)) => a.mov(gpr32(d), gpr32(s))?,
             (Operand::Reg(s), Operand::Stack(off)) => a.mov(mem_rbp(*off), gpr32(s))?,
             (Operand::Stack(off), Operand::Reg(d)) => a.mov(gpr32(d), mem_rbp(*off))?,
+            (Operand::Data(name), Operand::Reg(d)) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.mov(gpr32(d), dword_ptr(*lbl))?
+            }
             (Operand::Imm(v), Operand::Stack(off)) => a.mov(mem_rbp(*off), *v)?,
+            (Operand::Imm(v), Operand::Data(name)) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.mov(dword_ptr(*lbl), *v)?
+            }
+            (Operand::Reg(s), Operand::Data(name)) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.mov(dword_ptr(*lbl), gpr32(s))?
+            }
             _ => unreachable!("unsupported mov combination"),
         },
         Instruction::Unary { op, dst } => match op {
             UnaryOp::Neg => match dst {
                 Operand::Reg(r) => a.neg(gpr32(r))?,
                 Operand::Stack(off) => a.neg(mem_rbp(*off))?,
+                Operand::Data(name) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.neg(dword_ptr(*lbl))?
+                }
                 _ => unreachable!(),
             },
             UnaryOp::Not => match dst {
                 Operand::Reg(r) => a.not(gpr32(r))?,
                 Operand::Stack(off) => a.not(mem_rbp(*off))?,
+                Operand::Data(name) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.not(dword_ptr(*lbl))?
+                }
                 _ => unreachable!(),
             },
         },
@@ -318,68 +549,155 @@ fn emit_instruction(
                 (Operand::Reg(s), Operand::Reg(d)) => a.add(gpr32(d), gpr32(s))?,
                 (Operand::Imm(v), Operand::Reg(d)) => a.add(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.add(mem_rbp(*off), gpr32(s))?,
+                (Operand::Reg(s), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.add(dword_ptr(*lbl), gpr32(s))?
+                }
                 (Operand::Imm(v), Operand::Stack(off)) => a.add(mem_rbp(*off), *v)?,
-                _ => unimplemented!(),
+                (Operand::Imm(v), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.add(dword_ptr(*lbl), *v)?
+                }
+                _ => unreachable!(),
             },
             BinaryOp::Sub => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.sub(gpr32(d), gpr32(s))?,
                 (Operand::Imm(v), Operand::Reg(d)) => a.sub(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.sub(mem_rbp(*off), gpr32(s))?,
+                (Operand::Reg(s), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.sub(dword_ptr(*lbl), gpr32(s))?
+                }
                 (Operand::Imm(v), Operand::Stack(off)) => a.sub(mem_rbp(*off), *v)?,
-                _ => unimplemented!(),
+                (Operand::Imm(v), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.sub(dword_ptr(*lbl), *v)?
+                }
+                _ => unreachable!(),
             },
             BinaryOp::Mult => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.imul_2(gpr32(d), gpr32(s))?,
                 (Operand::Imm(v), Operand::Reg(d)) => a.imul_3(gpr32(d), gpr32(d), *v)?,
-                (Operand::Reg(s), Operand::Stack(off)) => a.imul_2(gpr32(s), mem_rbp(*off))?,
                 (Operand::Stack(off), Operand::Reg(d)) => a.imul_2(gpr32(d), mem_rbp(*off))?,
-                _ => unimplemented!("Mult {:?}, {:?}", src, dst),
+                (Operand::Data(name), Operand::Reg(d)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.imul_2(gpr32(d), dword_ptr(*lbl))?
+                }
+                _ => unreachable!("Mult {:?}, {:?}", src, dst),
             },
             BinaryOp::BitAnd => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.and(gpr32(d), gpr32(s))?,
                 (Operand::Imm(v), Operand::Reg(d)) => a.and(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.and(mem_rbp(*off), gpr32(s))?,
+                (Operand::Reg(s), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.and(dword_ptr(*lbl), gpr32(s))?
+                }
                 (Operand::Imm(v), Operand::Stack(off)) => a.and(mem_rbp(*off), *v)?,
-                _ => unimplemented!(),
+                (Operand::Imm(v), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.and(dword_ptr(*lbl), *v)?
+                }
+                _ => unreachable!(),
             },
             BinaryOp::BitOr => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.or(gpr32(d), gpr32(s))?,
                 (Operand::Imm(v), Operand::Reg(d)) => a.or(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.or(mem_rbp(*off), gpr32(s))?,
+                (Operand::Reg(s), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.or(dword_ptr(*lbl), gpr32(s))?
+                }
                 (Operand::Imm(v), Operand::Stack(off)) => a.or(mem_rbp(*off), *v)?,
-                _ => unimplemented!(),
+                (Operand::Imm(v), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.or(dword_ptr(*lbl), *v)?
+                }
+                _ => unreachable!(),
             },
             BinaryOp::BitXOr => match (src, dst) {
                 (Operand::Reg(s), Operand::Reg(d)) => a.xor(gpr32(d), gpr32(s))?,
                 (Operand::Imm(v), Operand::Reg(d)) => a.xor(gpr32(d), *v)?,
                 (Operand::Reg(s), Operand::Stack(off)) => a.xor(mem_rbp(*off), gpr32(s))?,
+                (Operand::Reg(s), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.xor(dword_ptr(*lbl), gpr32(s))?
+                }
                 (Operand::Imm(v), Operand::Stack(off)) => a.xor(mem_rbp(*off), *v)?,
-                _ => unimplemented!(),
+                (Operand::Imm(v), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.xor(dword_ptr(*lbl), *v)?
+                }
+                _ => unreachable!(),
             },
             BinaryOp::BitShl => match (src, dst) {
                 (Operand::Imm(v), Operand::Reg(d)) => a.shl(gpr32(d), *v)?,
                 (Operand::Reg(Reg::CX), Operand::Reg(d)) => a.shl(gpr32(d), gpr8::cl)?,
                 (Operand::Imm(v), Operand::Stack(off)) => a.shl(mem_rbp(*off), *v)?,
+                (Operand::Imm(v), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.shl(dword_ptr(*lbl), *v)?
+                }
                 (Operand::Reg(Reg::CX), Operand::Stack(off)) => a.shl(mem_rbp(*off), gpr8::cl)?,
-                _ => unimplemented!(),
+                (Operand::Reg(Reg::CX), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.shl(dword_ptr(*lbl), gpr8::cl)?
+                }
+                _ => unreachable!(),
             },
             BinaryOp::BitSar => match (src, dst) {
                 (Operand::Imm(v), Operand::Reg(d)) => a.sar(gpr32(d), *v)?,
                 (Operand::Reg(Reg::CX), Operand::Reg(d)) => a.sar(gpr32(d), cl)?,
                 (Operand::Imm(v), Operand::Stack(off)) => a.sar(mem_rbp(*off), *v)?,
+                (Operand::Imm(v), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.sar(dword_ptr(*lbl), *v)?
+                }
                 (Operand::Reg(Reg::CX), Operand::Stack(off)) => a.sar(mem_rbp(*off), gpr8::cl)?,
-                _ => unimplemented!(),
+                (Operand::Reg(Reg::CX), Operand::Data(name)) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.sar(dword_ptr(*lbl), gpr8::cl)?
+                }
+                _ => unreachable!(),
             },
         },
         Instruction::Cmp { v1, v2 } => match (v1, v2) {
             (Operand::Reg(r1), Operand::Reg(r2)) => a.cmp(gpr32(r2), gpr32(r1))?,
-            (Operand::Reg(r1), Operand::Imm(v)) => a.cmp(gpr32(r1), *v)?,
             (Operand::Reg(r1), Operand::Stack(off)) => a.cmp(mem_rbp(*off), gpr32(r1))?,
+            (Operand::Reg(r1), Operand::Data(name)) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.cmp(dword_ptr(*lbl), gpr32(r1))?
+            }
             (Operand::Stack(off), Operand::Reg(r)) => a.cmp(gpr32(r), mem_rbp(*off))?,
-            (Operand::Stack(o1), Operand::Imm(v)) => a.cmp(mem_rbp(*o1), *v)?,
+            (Operand::Data(name), Operand::Reg(r)) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.cmp(gpr32(r), dword_ptr(*lbl))?
+            }
             (Operand::Imm(v), Operand::Reg(r)) => a.cmp(gpr32(r), *v)?,
             (Operand::Imm(v), Operand::Stack(off)) => a.cmp(mem_rbp(*off), *v)?,
-            _ => unimplemented!(),
+            (Operand::Imm(v), Operand::Data(name)) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.cmp(dword_ptr(*lbl), *v)?
+            }
+            _ => unreachable!(),
         },
         Instruction::Cdq => {
             a.cdq()?;
@@ -387,7 +705,12 @@ fn emit_instruction(
         Instruction::Idiv(op) => match op {
             Operand::Reg(r) => a.idiv(gpr32(r))?,
             Operand::Stack(off) => a.idiv(mem_rbp(*off))?,
-            _ => unimplemented!(),
+            Operand::Data(name) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.idiv(dword_ptr(*lbl))?
+            }
+            _ => unreachable!(),
         },
         Instruction::Jmp(label) => {
             let l = *labels.entry(label.0.clone()).or_insert_with(|| a.create_label());
@@ -421,7 +744,19 @@ fn emit_instruction(
                 CondCode::L => a.setl(mem_rbp(*off))?,
                 CondCode::LE => a.setle(mem_rbp(*off))?,
             },
-            _ => unimplemented!(),
+            Operand::Data(name) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                match code {
+                    CondCode::E => a.sete(byte_ptr(*lbl))?,
+                    CondCode::NE => a.setne(byte_ptr(*lbl))?,
+                    CondCode::G => a.setg(byte_ptr(*lbl))?,
+                    CondCode::GE => a.setge(byte_ptr(*lbl))?,
+                    CondCode::L => a.setl(byte_ptr(*lbl))?,
+                    CondCode::LE => a.setle(byte_ptr(*lbl))?,
+                }
+            }
+            _ => unreachable!(),
         },
         Instruction::Label(lbl) => {
             let l = labels.entry(lbl.0.clone()).or_insert_with(|| a.create_label());
@@ -445,7 +780,7 @@ fn emit_instruction(
             Operand::Imm(c) => a.push(*c)?,
             Operand::Reg(reg) => a.push(gpr64_reg(reg))?,
             Operand::Stack(off) => a.push(qword_ptr(gpr64::rbp - (-*off)))?,
-            Operand::Pseudo(_) => unreachable!(),
+            Operand::Pseudo(_) | Operand::Data(_) => unreachable!(),
         },
         Instruction::Call(name) => {
             if let Some(&lbl) = fn_labels.get(&name.0) {

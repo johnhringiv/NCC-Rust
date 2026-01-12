@@ -11,7 +11,8 @@ use crate::parser::{
     Program as ParserProgram, SpannedStmt, Stmt, UnaryOp as ParserUnaryOp, VarDeclaration,
 };
 use crate::tacky::{
-    BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction, Program as TackyProgram, Val,
+    BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction, Program as TackyProgram,
+    StaticVariable, TopLevel, Val, VarInit,
 };
 
 #[derive(Clone)]
@@ -112,13 +113,13 @@ macro_rules! impl_function_def {
 
 impl_function_def!(TackyFunctionDefinition, CodegenFunctionDefinition);
 
-// Macro for types with `functions` field (Program pattern)
+// Macro for types with `top_level` field (Program pattern)
 macro_rules! impl_program {
     ($($ty:ty),* $(,)?) => {
         $(
             impl ItfDisplay for $ty {
                 fn itf_node(&self) -> Node {
-                    let children: Vec<Node> = self.functions.iter().map(|f| f.itf_node()).collect();
+                    let children: Vec<Node> = self.top_level.iter().map(|t| t.itf_node()).collect();
                     Node::branch("Program".cyan().to_string(), children)
                 }
             }
@@ -126,7 +127,22 @@ macro_rules! impl_program {
     };
 }
 
-impl_program!(ParserProgram, TackyProgram, CodegenProgram);
+impl_program!(TackyProgram);
+
+impl ItfDisplay for CodegenProgram {
+    fn itf_node(&self) -> Node {
+        let mut children: Vec<Node> = self.functions.iter().map(|f| f.itf_node()).collect();
+        children.extend(self.static_vars.iter().map(|v| v.itf_node()));
+        Node::branch("Program".cyan().to_string(), children)
+    }
+}
+
+impl ItfDisplay for ParserProgram {
+    fn itf_node(&self) -> Node {
+        let children: Vec<Node> = self.declarations.iter().map(|d| d.itf_node()).collect();
+        Node::branch("Program".cyan().to_string(), children)
+    }
+}
 
 // Macro for enums that just delegate to inner types
 macro_rules! delegate_variants {
@@ -146,6 +162,10 @@ delegate_variants!(Declaration {
     FunDeclaration
 });
 delegate_variants!(BlockItem { Statement, Declaration });
+delegate_variants!(TopLevel {
+    Function,
+    StaticVariable
+});
 
 // Macro for wrapper types that delegate to a single field
 macro_rules! delegate_field {
@@ -407,6 +427,23 @@ impl ItfDisplay for TackyInstruction {
     }
 }
 
+impl ItfDisplay for StaticVariable {
+    fn itf_node(&self) -> Node {
+        let init_str = match &self.init {
+            VarInit::Defined(v) => v.to_string(),
+            VarInit::Extern => "extern".to_string(),
+        };
+        Node::branch(
+            "StaticVariable".cyan().to_string(),
+            vec![
+                Node::leaf(format!("name: {}", self.name.green())),
+                Node::leaf(format!("global: {}", self.global)),
+                Node::leaf(format!("init: {}", init_str.magenta())),
+            ],
+        )
+    }
+}
+
 // =============================================================================
 // Codegen types
 // =============================================================================
@@ -418,6 +455,7 @@ impl ItfDisplay for Operand {
             Operand::Reg(r) => Node::branch("Reg".cyan().to_string(), vec![r.itf_node()]),
             Operand::Pseudo(s) => Node::branch("Pseudo".cyan().to_string(), vec![s.itf_node()]),
             Operand::Stack(o) => Node::branch("Stack".cyan().to_string(), vec![o.itf_node()]),
+            Operand::Data(s) => Node::branch("Data".cyan().to_string(), vec![s.itf_node()]),
         }
     }
 }
