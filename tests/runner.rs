@@ -9,7 +9,11 @@ static EXTRA_COMPLETED: i32 = 10;
 #[derive(Debug, PartialEq, Clone)]
 enum ProgramOutput {
     Error(i32),
-    Result { code: i32, stdout: Option<String> },
+    Result {
+        code: i32,
+        stdout: Option<String>,
+        stderr: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -105,6 +109,7 @@ fn get_sandler_cases() -> Vec<TestCase> {
             ProgramOutput::Result {
                 code: expected.map(|e| e.return_code).unwrap_or(0),
                 stdout: expected.and_then(|e| e.stdout.clone()),
+                stderr: None, // Expected stderr is always empty
             }
         };
 
@@ -160,6 +165,7 @@ fn get_custom_cases() -> Vec<TestCase> {
             ProgramOutput::Result {
                 code: expected.map(|e| e.return_code).unwrap_or(0),
                 stdout: expected.and_then(|e| e.stdout.clone()),
+                stderr: None, // Expected stderr is always empty
             }
         };
 
@@ -275,10 +281,12 @@ fn run_test(
 
         let return_code = run_output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
         std::fs::remove_file(&binary_path).ok();
         ProgramOutput::Result {
             code: return_code,
             stdout: if stdout.is_empty() { None } else { Some(stdout) },
+            stderr: if stderr.is_empty() { None } else { Some(stderr) },
         }
     } else {
         ProgramOutput::Error(compile_output.status.code().unwrap_or(-1))
@@ -290,10 +298,12 @@ fn run_test(
             ProgramOutput::Result {
                 code: a_code,
                 stdout: a_stdout,
+                stderr: a_stderr,
             },
             ProgramOutput::Result {
                 code: b_code,
                 stdout: b_stdout,
+                stderr: b_stderr,
             },
         ) => {
             let code_match = a_code == b_code;
@@ -302,7 +312,13 @@ fn run_test(
                 (Some(a), Some(b)) => a == b,
                 (None, Some(_)) => false,
             };
-            code_match && stdout_match
+            // stderr should always be empty (b_stderr is always None)
+            let stderr_match = match (a_stderr, b_stderr) {
+                (None, None) => true,
+                (Some(_), None) => false, // Unexpected stderr output
+                (_, Some(_)) => unreachable!("Expected stderr should always be None"),
+            };
+            code_match && stdout_match && stderr_match
         }
         _ => false,
     };
@@ -416,9 +432,11 @@ fn run_library_cross_test(
 
     let return_code = run_output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
     let actual = ProgramOutput::Result {
         code: return_code,
         stdout: if stdout.is_empty() { None } else { Some(stdout) },
+        stderr: if stderr.is_empty() { None } else { Some(stderr) },
     };
 
     let passed = match (&actual, expected) {
@@ -426,10 +444,12 @@ fn run_library_cross_test(
             ProgramOutput::Result {
                 code: a_code,
                 stdout: a_stdout,
+                stderr: a_stderr,
             },
             ProgramOutput::Result {
                 code: b_code,
                 stdout: b_stdout,
+                stderr: b_stderr,
             },
         ) => {
             let code_match = a_code == b_code;
@@ -438,7 +458,13 @@ fn run_library_cross_test(
                 (Some(a), Some(b)) => a == b,
                 (None, Some(_)) => false,
             };
-            code_match && stdout_match
+            // stderr should always be empty
+            let stderr_match = match (a_stderr, b_stderr) {
+                (None, None) => true,
+                (Some(_), None) => false,
+                (_, Some(_)) => unreachable!("Expected stderr should always be None"),
+            };
+            code_match && stdout_match && stderr_match
         }
         _ => false,
     };

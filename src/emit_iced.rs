@@ -481,8 +481,12 @@ fn mem_rbp(offset: i32) -> AsmMemoryOperand {
     }
 }
 
-// Data operands (static variables) - RIP-relative with relocation
-// Using labels creates RIP-relative addressing; the displacement will be patched by linker
+// Data operands (static variables) use RIP-relative addressing with relocations.
+//
+// Note: Many Data destination patterns (e.g., `Add(Reg, Data)`, `Neg(Data)`) are currently
+// unreached because the codegen uses load→op→store sequences for static variables.
+// These patterns will become reachable after implementing copy propagation and dead store
+// elimination, which can optimize `tmp = x; tmp = tmp + 1; x = tmp` into `x = x + 1`.
 #[allow(clippy::too_many_arguments)]
 fn emit_instruction(
     a: &mut CodeAssembler,

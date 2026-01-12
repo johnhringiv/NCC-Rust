@@ -61,5 +61,26 @@
   },
   "warnings/unused_parameter.c": {
     "return_code": 1
+  },
+  "static_vars/data_operand_coverage.c": {
+    "return_code": 0
+  },
+  "static_vars/variable_shift_data.c": {
+    "return_code": 0
+  },
+  "static_vars/setcc_data.c": {
+    "return_code": 0
+  },
+  "static_vars/cmp_data_patterns.c": {
+    "return_code": 0
+  },
+  "static_vars/idiv_data.c": {
+    "return_code": 0
+  },
+  "static_vars/mult_data_src.c": {
+    "return_code": 0
+  },
+  "examples/collatz.c": {
+    "return_code": 97
   }
 }
