@@ -82,5 +82,9 @@
   },
   "examples/collatz.c": {
     "return_code": 97
+  },
+  "examples/hello_world.c": {
+    "return_code": 0,
+    "stdout": "Hello, World!\n"
   }
 }
