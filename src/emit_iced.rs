@@ -244,9 +244,28 @@ fn emit_object_with_labels(
 
     // Clone instruction offsets before moving the inner
     let instruction_offsets = result.inner.new_instruction_offsets.clone();
+    let constant_offsets = result.inner.constant_offsets.clone();
 
     // Now move the code buffer
-    let code = result.inner.code_buffer;
+    let mut code = result.inner.code_buffer;
+
+    // On Mach-O, patch displacement values for data references.
+    // The Mach-O linker uses implicit addends: final = existing + (symbol - P - 4)
+    // We want: final = symbol - (P + bytes_remaining)
+    // So: existing = -(bytes_remaining - 4)
+    // For most instructions where bytes_remaining = 4 (displacement only), existing should be 0.
+    if cfg!(target_os = "macos") {
+        for (ins_idx, _var_name) in &data_relocs {
+            let ins_offset = instruction_offsets[*ins_idx] as usize;
+            let const_off = &constant_offsets[*ins_idx];
+            let disp_offset = ins_offset + const_off.displacement_offset() as usize;
+            let bytes_remaining = const_off.displacement_size() + const_off.immediate_size();
+            // Mach-O linker adds 4 to pcrel addend, so we need existing = -(bytes_remaining - 4)
+            let implicit_addend = -((bytes_remaining as i32) - 4);
+            let bytes = implicit_addend.to_le_bytes();
+            code[disp_offset..disp_offset + 4].copy_from_slice(&bytes);
+        }
+    }
 
     let mut obj = if cfg!(target_os = "linux") {
         let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
@@ -787,10 +806,15 @@ fn emit_instruction(
                 // Internal function call
                 a.call(lbl)?;
             } else {
-                // External function call - emit call to 0 and track for relocation
+                // External function call - track for relocation
                 let ins_count = a.instructions().len();
                 external_calls.push((ins_count, name.0.clone()));
-                a.call(0)?;
+                // The Mach-O linker adds the existing displacement to (symbol - RIP).
+                // We want the final result to be (symbol - RIP), so we need displacement = 0.
+                // For ELF, the explicit addend in the relocation handles this, and the
+                // existing displacement is ignored.
+                // E8 = CALL rel32 opcode, 00 00 00 00 = 0 displacement
+                a.db(&[0xE8, 0x00, 0x00, 0x00, 0x00])?;
             }
         }
     }
