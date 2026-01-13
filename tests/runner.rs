@@ -538,8 +538,8 @@ fn run_cases(cases: Vec<TestCase>) {
         &mut total_passed,
         &mut total_failed,
         &mut failed_tests,
-        &["--gcc".to_string()],
-        "gcc-link",
+        &["--external-linker".to_string()],
+        "external-linker",
     );
 
     println!("\n=== C Programs Test Results ===");

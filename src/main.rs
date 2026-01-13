@@ -11,9 +11,11 @@ use crate::pretty::ItfDisplay;
 use clap::{ArgGroup, Parser};
 use colored::{ColoredString, Colorize};
 use iced_x86::{Formatter, FormatterOutput, FormatterTextKind};
-use libwild::{Args as WildArgs, Linker};
 use std::fs;
 use std::path::Path;
+
+#[cfg(target_os = "linux")]
+use libwild::{Args as WildArgs, Linker};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -55,11 +57,11 @@ struct Args {
     #[arg(short = 'c')]
     c: bool,
 
-    /// Use GCC for linking
+    /// Use external system linker (ld) instead of built-in libwild. Required on macOS.
     #[arg(long)]
-    gcc: bool,
+    external_linker: bool,
 
-    /// Link statically (no runtime dependencies)
+    /// Link statically (no runtime dependencies) - Linux only
     #[arg(long = "static")]
     static_link: bool,
 
@@ -87,8 +89,6 @@ impl MyFormatterOutput {
 
 impl FormatterOutput for MyFormatterOutput {
     fn write(&mut self, text: &str, kind: FormatterTextKind) {
-        // This allocates a string. If that's a problem, just call print!() here
-        // instead of storing the result in a vector.
         self.vec.push((String::from(text), kind));
     }
 }
@@ -104,13 +104,141 @@ fn get_color(s: &str, kind: FormatterTextKind) -> ColoredString {
     }
 }
 
-fn main() {
-    let mut args = Args::parse();
+/// Ask the C compiler for a file path (e.g., crt1.o, crti.o)
+#[cfg(target_os = "linux")]
+fn get_cc_file(name: &str) -> Option<String> {
+    std::process::Command::new("cc")
+        .arg(format!("-print-file-name={}", name))
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != name) // cc returns just the name if not found
+}
 
-    if cfg!(target_os = "macos") & !args.gcc {
-        println!("Using GCC as libwild does not support MacOS");
-        args.gcc = true;
+/// Get library search paths from the C compiler
+#[cfg(target_os = "linux")]
+fn get_cc_library_paths() -> Vec<String> {
+    std::process::Command::new("cc")
+        .args(["-print-search-dirs"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            s.lines().find(|line| line.starts_with("libraries:")).map(|line| {
+                line.trim_start_matches("libraries:")
+                    .trim_start_matches(" =")
+                    .split(':')
+                    .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
+                    .map(String::from)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Build linker arguments for Linux (shared between ld and libwild)
+#[cfg(target_os = "linux")]
+fn build_linux_linker_args(obj_files: &[String], out_file: &str, static_link: bool) -> Vec<String> {
+    let mut args = vec!["-o".to_string(), out_file.to_string()];
+
+    if static_link {
+        args.push("-static".to_string());
+    } else if let Some(ld) = get_cc_file("ld-linux-x86-64.so.2") {
+        args.push(format!("--dynamic-linker={}", ld));
     }
+
+    // Add library search paths
+    for path in get_cc_library_paths() {
+        args.push(format!("-L{}", path));
+    }
+
+    if let Some(crt1) = get_cc_file("crt1.o") {
+        args.push(crt1);
+    }
+    if let Some(crti) = get_cc_file("crti.o") {
+        args.push(crti);
+    }
+
+    args.extend(obj_files.iter().cloned());
+    args.push("-lc".to_string());
+
+    if static_link {
+        args.push("-lgcc".to_string());
+        args.push("-lgcc_eh".to_string());
+    }
+
+    if let Some(crtn) = get_cc_file("crtn.o") {
+        args.push(crtn);
+    }
+
+    args
+}
+
+/// Link object files using the system linker (ld)
+#[allow(unused_variables)]
+fn link_with_ld(obj_files: &[String], out_file: &str, static_link: bool) {
+    let mut cmd = std::process::Command::new("ld");
+
+    #[cfg(target_os = "macos")]
+    {
+        cmd.args(["-arch", "x86_64"]);
+
+        let macos_version = std::process::Command::new("sw_vers")
+            .args(["-productVersion"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| "11.0".to_string());
+        cmd.args(["-platform_version", "macos", &macos_version, &macos_version]);
+
+        if let Ok(output) = std::process::Command::new("xcrun").args(["--show-sdk-path"]).output() {
+            let sdk_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !sdk_path.is_empty() {
+                cmd.arg("-syslibroot").arg(&sdk_path);
+            }
+        }
+
+        cmd.arg("-lSystem");
+        for obj in obj_files {
+            cmd.arg(obj);
+        }
+        cmd.arg("-o").arg(out_file);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for arg in build_linux_linker_args(obj_files, out_file, static_link) {
+            cmd.arg(arg);
+        }
+    }
+
+    let status = cmd.status().expect("Failed to execute ld");
+    if !status.success() {
+        eprintln!("Linking failed with status: {status}");
+        std::process::exit(1);
+    }
+}
+
+/// Link object files using libwild (Linux only, in-process linker)
+#[cfg(target_os = "linux")]
+fn link_with_libwild(obj_files: &[String], out_file: &str, static_link: bool) {
+    let args_vec = build_linux_linker_args(obj_files, out_file, static_link);
+    let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
+
+    let linker = Linker::new();
+    let parsed = WildArgs::parse(|| args_refs.iter()).expect("parse args");
+    let _ = libwild::setup_tracing(&parsed);
+    let activated = parsed.activate_thread_pool().expect("activate args");
+    linker.run(&activated).expect("link failed");
+}
+
+fn main() {
+    let args = Args::parse();
+
+    // On macOS, always use external linker since libwild doesn't support it
+    let use_external_linker = args.external_linker || cfg!(target_os = "macos");
 
     // Separate C files from assembly files
     let (c_files, asm_files): (Vec<_>, Vec<_>) = args.filenames.iter().partition(|f| f.ends_with(".c"));
@@ -334,106 +462,11 @@ fn main() {
     }
 
     // Link all object files together
-    if args.gcc {
-        let mut cmd = std::process::Command::new("gcc");
-        for obj in &obj_files {
-            cmd.arg(obj);
-        }
-        cmd.arg("-o").arg(&out_file);
-
-        let status = cmd.status().expect("Failed to execute gcc");
-
-        if !status.success() {
-            eprintln!("Linking failed with status: {status}");
-            std::process::exit(1);
-        }
+    if use_external_linker {
+        link_with_ld(&obj_files, &out_file, args.static_link);
     } else {
-        let linker = Linker::new();
-
-        // Library search paths (architecture-specific)
-        let lib_dirs = [
-            "/lib/x86_64-linux-gnu",     // Ubuntu/Debian
-            "/usr/lib/x86_64-linux-gnu", // Alternative Ubuntu/Debian
-            "/lib64",                    // RHEL/Fedora
-            "/usr/lib64",                // RHEL/Fedora alt
-            "/usr/lib",                  // Generic
-        ];
-
-        // Find the library directory that has CRT files
-        let lib_dir = lib_dirs
-            .iter()
-            .find(|d| std::path::Path::new(&format!("{}/crt1.o", d)).exists());
-
-        let mut args_vec: Vec<String> = vec!["-o".to_string(), out_file.clone()];
-
-        // Static linking: no dynamic linker needed, links against libc.a
-        if args.static_link {
-            args_vec.push("-static".to_string());
-        } else {
-            // Find dynamic linker for dynamic linking
-            let ld_paths = [
-                "/lib64/ld-linux-x86-64.so.2",
-                "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-            ];
-            if let Some(ld) = ld_paths.iter().find(|p| std::path::Path::new(p).exists()) {
-                args_vec.push(format!("--dynamic-linker={}", ld));
-            }
-        }
-
-        // Add library search paths
-        for dir in &lib_dirs {
-            if std::path::Path::new(dir).exists() {
-                args_vec.push(format!("-L{}", dir));
-            }
-        }
-
-        // For static linking, we need libgcc for compiler support routines
-        if args.static_link {
-            // Find gcc library directory
-            let gcc_dirs = [
-                "/usr/lib/gcc/x86_64-linux-gnu/13",
-                "/usr/lib/gcc/x86_64-linux-gnu/12",
-                "/usr/lib/gcc/x86_64-linux-gnu/11",
-                "/usr/lib/gcc/x86_64-linux-gnu/10",
-                "/usr/lib/gcc/x86_64-linux-gnu/9",
-                "/usr/lib64/gcc/x86_64-linux-gnu/13",
-            ];
-            if let Some(gcc_dir) = gcc_dirs.iter().find(|d| std::path::Path::new(d).exists()) {
-                args_vec.push(format!("-L{}", gcc_dir));
-            }
-        }
-
-        // Add CRT startup files and object files in correct order:
-        // crt1.o crti.o <user objects> -lc [-lgcc -lgcc_eh] crtn.o
-        if let Some(dir) = lib_dir {
-            args_vec.push(format!("{}/crt1.o", dir));
-            args_vec.push(format!("{}/crti.o", dir));
-        }
-
-        // User object files
-        for obj in &obj_files {
-            args_vec.push(obj.clone());
-        }
-
-        // Link with libc
-        args_vec.push("-lc".to_string());
-
-        // Static linking needs libgcc for compiler support
-        if args.static_link {
-            args_vec.push("-lgcc".to_string());
-            args_vec.push("-lgcc_eh".to_string());
-        }
-
-        // CRT epilogue
-        if let Some(dir) = lib_dir {
-            args_vec.push(format!("{}/crtn.o", dir));
-        }
-
-        let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
-        let parsed = WildArgs::parse(|| args_refs.iter()).expect("parse args");
-        let _ = libwild::setup_tracing(&parsed);
-        let activated = parsed.activate_thread_pool().expect("activate args");
-        linker.run(&activated).expect("link failed");
+        #[cfg(target_os = "linux")]
+        link_with_libwild(&obj_files, &out_file, args.static_link);
     }
 
     // Clean up object files

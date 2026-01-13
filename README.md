@@ -3,21 +3,19 @@
 [![Lint](https://github.com/johnhringiv/NCC-Rust/actions/workflows/lint.yml/badge.svg)](https://github.com/johnhringiv/NCC-Rust/actions/workflows/lint.yml)
 [![codecov](https://codecov.io/gh/johnhringiv/NCC-Rust/graph/badge.svg?token=GJJCD2Z8Y6)](https://codecov.io/gh/johnhringiv/NCC-Rust)
 
-A simple C compiler written in Rust, following Sandler's "Writing a C Compiler".
-Some design decisions are informed by the book but the implementation is my own.
+A (**N**ot **C**ompletely) **C** compiler written in Rust, inspired by Sandler's "Writing a C Compiler".
 
-So far chapter 10, including extra credit is implemented, which includes a lexer, parser, semantic analysis, and code
-generator for C code with functions, local and file-scope variables, storage-class specifiers, compound statements,
-loops, and switch statements.
-This compiler is a fully standalone executable; it does not rely on any external programs for assembling or linking (on
-Linux).
-All provided tests pass.
+NCC is a full pipeline compiler, going from lexing all the way down to x86-64 machine code emission and linking.
+Machine code is encoded directly using [iced-x86](https://github.com/icedland/iced) and emitted to ELF/Mach-O
+object files via the [object](https://github.com/gimli-rs/object) crate—no external assembler required.
+A substantial subset of C is supported, including functions, static variables, all control flow statements, and
+bitwise operations. Additionally, NCC supports developer-friendly warnings and pretty-printing of each compiler pass.
+Runs on Linux and macOS (Intel).
 
 ## Example
 
-NCC supports a substantial subset of C, including functions, static variables, all control flow statements, and bitwise
-operations. Here's a [Collatz Conjecture](https://en.wikipedia.org/wiki/Collatz_conjecture) example showcasing some of
-these capabilities:
+This [Collatz Conjecture](https://en.wikipedia.org/wiki/Collatz_conjecture) program compiles and runs with NCC,
+demonstrating static variables, functions, loops, bitwise operations, and conditionals:
 
 ```c
 // Collatz Conjecture Explorer
@@ -63,10 +61,121 @@ int main(void) {
 }
 ```
 
-```sh
-$ ncc collatz.c --run
-97
+### Generated Assembly
+
+C code alongside the x86-64 assembly NCC generates (`ncc -S`). Labels are pretty-printed using
+the original function and variable names from the source. Redundant moves will be eliminated
+once copy propagation is implemented:
+
+<table>
+<tr>
+<th>C Code</th>
+<th>Generated Assembly</th>
+</tr>
+<tr>
+<td>
+
+```c
+static int counter = 0;
+
+int next(void) {
+    counter++;
+    return counter;
+}
+
+int main(void) {
+    return next() + next();
+}
 ```
+
+</td>
+<td>
+
+```asm
+next:
+  push %rbp
+  mov %rsp,%rbp
+  sub $16,%rsp
+  mov counter(%rip),%r10d
+  mov %r10d,-4(%rbp)
+  mov counter(%rip),%r10d
+  mov %r10d,-8(%rbp)
+  addl $1,-8(%rbp)
+  mov -8(%rbp),%r10d
+  mov %r10d,counter(%rip)
+  mov counter(%rip),%eax
+  mov %rbp,%rsp
+  pop %rbp
+  ret
+
+main:
+  push %rbp
+  mov %rsp,%rbp
+  sub $16,%rsp
+  call next
+  mov %eax,-4(%rbp)
+  mov -4(%rbp),%r10d
+  mov %r10d,-8(%rbp)
+  call next
+  mov %eax,-12(%rbp)
+  mov -8(%rbp),%r10d
+  mov %r10d,-16(%rbp)
+  mov -12(%rbp),%r10d
+  add %r10d,-16(%rbp)
+  mov -16(%rbp),%eax
+  mov %rbp,%rsp
+  pop %rbp
+  ret
+
+.bss
+counter:
+  .zero 4
+```
+
+</td>
+</tr>
+</table>
+
+## Usage
+
+```
+ncc [OPTIONS] <FILENAMES>...
+```
+
+### Arguments
+
+`<FILENAMES>...` Input files (required). Supports multiple C and assembly files.
+
+### Options
+
+| Option                    | Description                                              |
+|---------------------------|----------------------------------------------------------|
+| `--lex`                   | Run lexer                                                |
+| `--parse`                 | Run lexer and parser                                     |
+| `--validate`              | Run lexer, parser, and validator                         |
+| `--codegen`               | Run lexer, parser, and code generator                    |
+| `--tacky`                 | Emit TACKY IR                                            |
+| `-S`                      | Emit assembly                                            |
+| `--run`                   | Run compiled program and print result                    |
+| `-c`                      | Emit object file only (no linking)                       |
+| `--external-linker`       | Use system linker (`ld`) instead of built-in libwild     |
+| `--static`                | Link statically (no runtime dependencies) - Linux only   |
+| `--no-iced`               | Use text-based asm building instead of iced (deprecated) |
+| `-o`, `--output <OUTPUT>` | Override output file location                            |
+| `-h`, `--help`            | Print help                                               |
+| `-V`, `--version`         | Print version                                            |
+
+Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `-S`, `--run`, `-c` are mutually exclusive options.
+
+### Exit Codes
+
+| Exit Code | Description                                   |
+|-----------|-----------------------------------------------|
+| 0         | Success                                       |
+| 1         | General error (file I/O, compilation failure) |
+| 10        | Lexer error (tokenization failed)             |
+| 20        | Parser error (syntax error)                   |
+| 30        | Validation error (semantic error)             |
 
 ## Language Grammar
 
@@ -176,7 +285,22 @@ These features help catch common bugs at compile time while providing predictabl
 ## Requirements
 
 - Rust (latest stable)
-- GCC (Optional) for linking instead of `libwild`
+- A C toolchain to provide and locate system libraries (CRT & libc) - `cc` is not used for compilation
+
+### Linux
+
+```bash
+sudo apt install build-essential
+
+# For Makefile (optional - linting/formatting)
+sudo apt install pkg-config libssl-dev make
+```
+
+### macOS
+
+```bash
+xcode-select --install
+```
 
 ## Setup
 
@@ -189,14 +313,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Initialize submodules
 git submodule update --init
-
-# Install build essentials (Linux)
-sudo apt install build-essential
 ```
 
 ## Building
-
-Clone the repository and build with Cargo:
 
 ```sh
 cargo build --release
@@ -208,56 +327,6 @@ cargo build --release
 cargo test
 ```
 
-## Usage
-
-Usage: ncc [OPTIONS] `<FILENAMES>...`
-
-### Arguments
-
-`<FILENAMES>...` Input files (required). Supports multiple C and assembly files.
-
-### Options
-
-| Option                    | Description                                              |
-|---------------------------|----------------------------------------------------------|
-| `--lex`                   | Run lexer                                                |
-| `--parse`                 | Run lexer and parser                                     |
-| `--validate`              | Run lexer, parser, and validator                         |
-| `--codegen`               | Run lexer, parser, and code generator                    |
-| `--tacky`                 | Emit TACKY IR                                            |
-| `-S`                      | Emit assembly                                            |
-| `--run`                   | Run compiled program and print result                    |
-| `-c`                      | Emit object file only (no linking)                       |
-| `--gcc`                   | Use GCC for linking (instead of wild)                    |
-| `--static`                | Link statically (no runtime dependencies)                |
-| `--no-iced`               | Use text-based asm building instead of iced (deprecated) |
-| `-o`, `--output <OUTPUT>` | Override output file location                            |
-| `-h`, `--help`            | Print help                                               |
-| `-V`, `--version`         | Print version                                            |
-
-Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `-S`, `--run`, `-c` are mutually exclusive options.
-
-### Exit Codes
-
-NCC uses specific exit codes to indicate different types of failures:
-
-| Exit Code | Description                                   |
-|-----------|-----------------------------------------------|
-| 0         | Success                                       |
-| 1         | General error (file I/O, compilation failure) |
-| 10        | Lexer error (tokenization failed)             |
-| 20        | Parser error (syntax error)                   |
-| 30        | Validation error (semantic error)             |
-
 ## Contributing
 
-As a reminder to myself.
-Use the Makefile to check code quality `make quality` and fix formatting `make fix`.
-
-### Requirements for Makefile
-
-```shell
-sudo apt-get install pkg-config libssl-dev make
-```
-
-
+Use the Makefile to check code quality (`make quality`) and fix formatting (`make fix`).
