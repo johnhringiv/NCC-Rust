@@ -258,7 +258,7 @@ fn emit_object_with_labels(
         for (ins_idx, _var_name) in &data_relocs {
             let ins_offset = instruction_offsets[*ins_idx] as usize;
             let const_off = &constant_offsets[*ins_idx];
-            let disp_offset = ins_offset + const_off.displacement_offset() as usize;
+            let disp_offset = ins_offset + const_off.displacement_offset();
             let bytes_remaining = const_off.displacement_size() + const_off.immediate_size();
             // Mach-O linker adds 4 to pcrel addend, so we need existing = -(bytes_remaining - 4)
             let implicit_addend = -((bytes_remaining as i32) - 4);

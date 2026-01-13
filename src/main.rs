@@ -125,16 +125,14 @@ fn get_cc_library_paths() -> Vec<String> {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| {
-            s.lines()
-                .find(|line| line.starts_with("libraries:"))
-                .map(|line| {
-                    line.trim_start_matches("libraries:")
-                        .trim_start_matches(" =")
-                        .split(':')
-                        .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
-                        .map(String::from)
-                        .collect()
-                })
+            s.lines().find(|line| line.starts_with("libraries:")).map(|line| {
+                line.trim_start_matches("libraries:")
+                    .trim_start_matches(" =")
+                    .split(':')
+                    .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
+                    .map(String::from)
+                    .collect()
+            })
         })
         .unwrap_or_default()
 }
