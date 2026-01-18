@@ -237,6 +237,15 @@ fn link_with_libwild(obj_files: &[String], out_file: &str, static_link: bool) {
 fn main() {
     let args = Args::parse();
 
+    // Force colors to be enabled even when output is piped
+    colored::control::set_override(true);
+
+    // Enable TrueColor support for better color accuracy
+    // Safety: Setting COLORTERM is safe at program startup before any threads are spawned
+    unsafe {
+        std::env::set_var("COLORTERM", "truecolor");
+    }
+
     // On macOS, always use external linker since libwild doesn't support it
     let use_external_linker = args.external_linker || cfg!(target_os = "macos");
 
@@ -285,6 +294,7 @@ fn main() {
 
         if args.validate {
             println!("Program Valid");
+            println!("{}", ast.itf_string());
             std::process::exit(0);
         }
 
@@ -292,7 +302,6 @@ fn main() {
         let tacky_ast = tacky::tackify_program(&ast, &mut name_gen, &symbols);
 
         if args.tacky {
-            println!("{tacky_ast:?}");
             println!("{}", tacky_ast.itf_string());
             std::process::exit(0);
         }

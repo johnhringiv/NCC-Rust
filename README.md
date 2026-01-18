@@ -163,7 +163,6 @@ ncc [OPTIONS] <FILENAMES>...
 | `--no-iced`               | Use text-based asm building instead of iced (deprecated) |
 | `-o`, `--output <OUTPUT>` | Override output file location                            |
 | `-h`, `--help`            | Print help                                               |
-| `-V`, `--version`         | Print version                                            |
 
 Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `-S`, `--run`, `-c` are mutually exclusive options.
 
@@ -176,6 +175,32 @@ Note: `--lex`, `--parse`, `--validate`, `--codegen`, `--tacky`, `-S`, `--run`, `
 | 10        | Lexer error (tokenization failed)             |
 | 20        | Parser error (syntax error)                   |
 | 30        | Validation error (semantic error)             |
+
+## Architecture
+
+NCC follows a classic multi-pass compiler pipeline:
+
+```mermaid
+flowchart LR
+    A[Source .c] --> B[Lexer]
+    B -->|Tokens| C[Parser]
+    C -->|Abstract AST| D[Validator]
+    D -->|Typechecked AST & Symbol Table| E[Tackifier]
+    E -->|TACKY IR| F[Codegen]
+    F -->|Assembly AST| G[Emitter]
+    G -->|Object File| H[Linker]
+    H --> I[Executable]
+```
+
+| Pass | Description |
+|------|-------------|
+| **Lexer** | Converts source text into tokens using regex patterns with maximal munch. Each token carries a span (file, line, column) for error reporting. |
+| **Parser** | Recursive descent with precedence climbing. Builds an abstract syntax tree while handling operator precedence and associativity. |
+| **Validator** | Two-pass semantic analysis: (1) resolves variables to unique names, labels loops/switches, validates gotos; (2) type checks, builds symbol table, evaluates constant expressions. |
+| **Tackifier** | Lowers the AST to TACKY, a three-address code IR. Flattens nested expressions into sequences of simple operations and makes control flow explicit with jumps and labels. |
+| **Codegen** | Converts TACKY to an x86-64 assembly AST. Assigns pseudo-registers to stack slots, fixes invalid instructions, and implements the System V AMD64 calling convention. |
+| **Emitter** | Encodes instructions to machine code using [iced-x86](https://github.com/icedland/iced) and writes ELF/Mach-O object files via the [object](https://github.com/gimli-rs/object) crate. |
+| **Linker** | Resolves external symbols and produces the final executable. Uses [wild](https://github.com/nicholasbishop/wild) on Linux; shells out to `ld` on macOS. |
 
 ## Language Grammar
 
