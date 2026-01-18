@@ -237,13 +237,16 @@ fn link_with_libwild(obj_files: &[String], out_file: &str, static_link: bool) {
 fn main() {
     let args = Args::parse();
 
-    // Force colors to be enabled even when output is piped
-    colored::control::set_override(true);
-
-    // Enable TrueColor support for better color accuracy
-    // Safety: Setting COLORTERM is safe at program startup before any threads are spawned
-    unsafe {
-        std::env::set_var("COLORTERM", "truecolor");
+    // Only enable colors if stderr and stdout are TTYs (terminals)
+    use std::io::IsTerminal;
+    let is_tty = std::io::stderr().is_terminal() && std::io::stdout().is_terminal();
+    if is_tty {
+        colored::control::set_override(true);
+        // Enable TrueColor support for better color accuracy
+        // Safety: Setting COLORTERM is safe at program startup before any threads are spawned
+        unsafe {
+            std::env::set_var("COLORTERM", "truecolor");
+        }
     }
 
     // On macOS, always use external linker since libwild doesn't support it

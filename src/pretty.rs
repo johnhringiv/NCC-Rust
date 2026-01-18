@@ -61,13 +61,13 @@ use crate::tacky::{
 //
 // =============================================================================
 
-const TEAL_GREEN: (u8, u8, u8) = (77, 147, 117);    // s5: #4d9375
-const TEAL: (u8, u8, u8) = (93, 169, 148);          // s12: #5da994
-const MUTED_RED: (u8, u8, u8) = (203, 118, 118);    // s6: #cb7676
+const TEAL_GREEN: (u8, u8, u8) = (77, 147, 117); // s5: #4d9375
+const TEAL: (u8, u8, u8) = (93, 169, 148); // s12: #5da994
+const MUTED_RED: (u8, u8, u8) = (203, 118, 118); // s6: #cb7676
 const YELLOW_GREEN: (u8, u8, u8) = (128, 166, 101); // s3: #80a665
-const CREAM: (u8, u8, u8) = (219, 215, 202);        // s4: #dbd7caee
-const CYAN_TEAL: (u8, u8, u8) = (76, 154, 145);     // s18: #4c9a91
-const YELLOW_GOLD: (u8, u8, u8) = (230, 204, 119);  // s17: #e6cc77
+const CREAM: (u8, u8, u8) = (219, 215, 202); // s4: #dbd7caee
+const CYAN_TEAL: (u8, u8, u8) = (76, 154, 145); // s18: #4c9a91
+const YELLOW_GOLD: (u8, u8, u8) = (230, 204, 119); // s17: #e6cc77
 
 #[derive(Clone)]
 pub struct Node {
@@ -159,7 +159,14 @@ colored_node!(
 impl ItfDisplay for TackyFunctionDefinition {
     fn itf_node(&self) -> Node {
         let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
-        Node::branch(format!("{}: {}", "FunctionDefinition".truecolor(TEAL.0, TEAL.1, TEAL.2), self.name), body_children)
+        Node::branch(
+            format!(
+                "{}: {}",
+                "FunctionDefinition".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                self.name
+            ),
+            body_children,
+        )
     }
 }
 
@@ -167,7 +174,14 @@ impl ItfDisplay for TackyFunctionDefinition {
 impl ItfDisplay for CodegenFunctionDefinition {
     fn itf_node(&self) -> Node {
         let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
-        Node::branch(format!("{}: {}", "FunctionDefinition".truecolor(TEAL.0, TEAL.1, TEAL.2), self.name), body_children)
+        Node::branch(
+            format!(
+                "{}: {}",
+                "FunctionDefinition".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                self.name
+            ),
+            body_children,
+        )
     }
 }
 
@@ -269,7 +283,12 @@ impl_itf_display_for_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u12
 impl<T: ItfDisplay> ItfDisplay for Vec<T> {
     fn itf_node(&self) -> Node {
         let children: Vec<Node> = self.iter().map(|item| item.itf_node()).collect();
-        Node::branch(format!("[{}]", self.len()).truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), children)
+        Node::branch(
+            format!("[{}]", self.len())
+                .truecolor(TEAL.0, TEAL.1, TEAL.2)
+                .to_string(),
+            children,
+        )
     }
 }
 
@@ -291,33 +310,51 @@ impl ItfDisplay for ForInit {
 
 impl ItfDisplay for Identifier {
     fn itf_node(&self) -> Node {
-        Node::leaf(format!("Identifier(\"{}\")", self.0).truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2).to_string())
+        Node::leaf(
+            format!("Identifier(\"{}\")", self.0)
+                .truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+                .to_string(),
+        )
     }
 }
 
 impl ItfDisplay for Expr {
     fn itf_node(&self) -> Node {
         match self {
-            Expr::Constant(c) => Node::leaf(format!("Constant({c})").truecolor(YELLOW_GOLD.0, YELLOW_GOLD.1, YELLOW_GOLD.2).to_string()),
+            Expr::Constant(c) => Node::leaf(
+                format!("Constant({c})")
+                    .truecolor(YELLOW_GOLD.0, YELLOW_GOLD.1, YELLOW_GOLD.2)
+                    .to_string(),
+            ),
             Expr::Var(id, _span) => id.itf_node(),
-            Expr::Unary(op, e) => Node::branch(format!("Unary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), vec![e.itf_node()]),
+            Expr::Unary(op, e) => Node::branch(
+                format!("Unary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                vec![e.itf_node()],
+            ),
             Expr::Binary(op, e1, e2) => Node::branch(
                 format!("Binary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
                 vec![e1.itf_node(), e2.itf_node()],
             ),
-            Expr::Assignment(lhs, rhs, _span) => {
-                Node::branch("Assignment".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), vec![lhs.itf_node(), rhs.itf_node()])
-            }
-            Expr::CompoundAssignment(op, lhs, rhs, _span) => Node::branch(
-                format!("CompoundAssignment ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+            Expr::Assignment(lhs, rhs, _span) => Node::branch(
+                "Assignment".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
                 vec![lhs.itf_node(), rhs.itf_node()],
             ),
-            Expr::PostFixOp(op, e, _span) => {
-                Node::branch(format!("PostFix ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), vec![e.itf_node()])
-            }
-            Expr::PreFixOp(op, e, _span) => {
-                Node::branch(format!("PreFix ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), vec![e.itf_node()])
-            }
+            Expr::CompoundAssignment(op, lhs, rhs, _span) => Node::branch(
+                format!("CompoundAssignment ({op:?})")
+                    .truecolor(TEAL.0, TEAL.1, TEAL.2)
+                    .to_string(),
+                vec![lhs.itf_node(), rhs.itf_node()],
+            ),
+            Expr::PostFixOp(op, e, _span) => Node::branch(
+                format!("PostFix ({op:?})")
+                    .truecolor(TEAL.0, TEAL.1, TEAL.2)
+                    .to_string(),
+                vec![e.itf_node()],
+            ),
+            Expr::PreFixOp(op, e, _span) => Node::branch(
+                format!("PreFix ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                vec![e.itf_node()],
+            ),
             Expr::Conditional(condition, then_expr, else_expr) => Node::branch(
                 "Conditional".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
                 vec![
@@ -341,8 +378,16 @@ impl ItfDisplay for Expr {
 impl ItfDisplay for Stmt {
     fn itf_node(&self) -> Node {
         match self {
-            Stmt::Return(expr) => Node::branch("Return".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(), vec![expr.itf_node()]),
-            Stmt::Expression(expr) => Node::branch("Expression".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(), vec![expr.itf_node()]),
+            Stmt::Return(expr) => Node::branch(
+                "Return".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
+                vec![expr.itf_node()],
+            ),
+            Stmt::Expression(expr) => Node::branch(
+                "Expression"
+                    .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                    .to_string(),
+                vec![expr.itf_node()],
+            ),
             Stmt::If(condition, then_stmt, else_stmt) => {
                 let mut children = vec![
                     Node::branch("condition:", vec![condition.itf_node()]),
@@ -351,43 +396,74 @@ impl ItfDisplay for Stmt {
                 if let Some(else_s) = else_stmt.as_ref() {
                     children.push(Node::branch("else:", vec![else_s.stmt.itf_node()]));
                 }
-                Node::branch("If".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(), children)
+                Node::branch(
+                    "If".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
+                    children,
+                )
             }
             Stmt::Null => Node::leaf("Null".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()),
-            Stmt::Goto(label) => Node::branch("Goto".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(), vec![label.itf_node()]),
+            Stmt::Goto(label) => Node::branch(
+                "Goto".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
+                vec![label.itf_node()],
+            ),
             Stmt::Labeled(label, stmt) => Node::branch(
-                "Labeled".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
+                "Labeled"
+                    .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                    .to_string(),
                 vec![label.itf_node(), stmt.stmt.itf_node()],
             ),
             Stmt::Compound(block) => {
                 let children: Vec<Node> = block.iter().map(|item| item.itf_node()).collect();
-                Node::branch("Compound".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(), children)
+                Node::branch(
+                    "Compound"
+                        .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                        .to_string(),
+                    children,
+                )
             }
             Stmt::Break(target) => {
                 let label_str = if target.0.is_empty() {
                     "Break".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()
                 } else {
-                    format!("{} [{}]", "Break".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), target.0)
+                    format!(
+                        "{} [{}]",
+                        "Break".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                        target.0
+                    )
                 };
                 Node::leaf(label_str)
             }
             Stmt::Continue(target) => {
                 let label_str = if target.0.is_empty() {
-                    "Continue".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()
+                    "Continue"
+                        .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                        .to_string()
                 } else {
-                    format!("{} [{}]", "Continue".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), target.0)
+                    format!(
+                        "{} [{}]",
+                        "Continue".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                        target.0
+                    )
                 };
                 Node::leaf(label_str)
             }
             Stmt::While(condition, body, label) => Node::branch(
-                format!("{} [label: {}]", "While".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), label),
+                format!(
+                    "{} [label: {}]",
+                    "While".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                    label
+                ),
                 vec![
                     Node::branch("condition:", vec![condition.itf_node()]),
                     Node::branch("body:", vec![body.stmt.itf_node()]),
                 ],
             ),
             Stmt::DoWhile(body, condition, label) => Node::branch(
-                format!("{} [label: {}]", "DoWhile".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), label),
+                format!(
+                    "{} [label: {}]",
+                    "DoWhile".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                    label
+                ),
                 vec![
                     Node::branch("body:", vec![body.stmt.itf_node()]),
                     Node::branch("condition:", vec![condition.itf_node()]),
@@ -402,10 +478,21 @@ impl ItfDisplay for Stmt {
                     children.push(Node::branch("post:", vec![post_expr.itf_node()]));
                 }
                 children.push(Node::branch("body:", vec![body.stmt.itf_node()]));
-                Node::branch(format!("{} [label: {}]", "For".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), label), children)
+                Node::branch(
+                    format!(
+                        "{} [label: {}]",
+                        "For".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                        label
+                    ),
+                    children,
+                )
             }
             Stmt::Switch(expr, body, label, _) => Node::branch(
-                format!("{} [label: {}]", "Switch".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), label),
+                format!(
+                    "{} [label: {}]",
+                    "Switch".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                    label
+                ),
                 vec![
                     Node::branch("expr:", vec![expr.itf_node()]),
                     Node::branch("body:", vec![body.stmt.itf_node()]),
@@ -415,7 +502,11 @@ impl ItfDisplay for Stmt {
                 let header = if label.0.is_empty() {
                     "Case".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()
                 } else {
-                    format!("{} [{}]", "Case".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), label.0)
+                    format!(
+                        "{} [{}]",
+                        "Case".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                        label.0
+                    )
                 };
                 Node::branch(
                     header,
@@ -427,9 +518,15 @@ impl ItfDisplay for Stmt {
             }
             Stmt::Default(stmt, label) => {
                 let header = if label.0.is_empty() {
-                    "Default".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()
+                    "Default"
+                        .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                        .to_string()
                 } else {
-                    format!("{} [{}]", "Default".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2), label.0)
+                    format!(
+                        "{} [{}]",
+                        "Default".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                        label.0
+                    )
                 };
                 Node::branch(header, vec![stmt.stmt.itf_node()])
             }
@@ -443,9 +540,15 @@ impl ItfDisplay for VarDeclaration {
         match &self.init {
             Some(init_expr) => {
                 let init_node = Node::branch("init:", vec![init_expr.itf_node()]);
-                Node::branch("VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), vec![name_node, init_node])
+                Node::branch(
+                    "VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                    vec![name_node, init_node],
+                )
             }
-            None => Node::branch("VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), vec![name_node]),
+            None => Node::branch(
+                "VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                vec![name_node],
+            ),
         }
     }
 }
@@ -472,7 +575,11 @@ impl ItfDisplay for FunDeclaration {
 impl ItfDisplay for Val {
     fn itf_node(&self) -> Node {
         match self {
-            Val::Constant(c) => Node::leaf(c.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2).to_string()),
+            Val::Constant(c) => Node::leaf(
+                c.to_string()
+                    .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+                    .to_string(),
+            ),
             Val::Var(s) => Node::leaf(s.truecolor(CREAM.0, CREAM.1, CREAM.2).to_string()),
         }
     }
@@ -481,7 +588,10 @@ impl ItfDisplay for Val {
 // Helper to format Val compactly as string
 fn val_str(v: &Val) -> String {
     match v {
-        Val::Constant(c) => c.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2).to_string(),
+        Val::Constant(c) => c
+            .to_string()
+            .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+            .to_string(),
         Val::Var(s) => s.truecolor(CREAM.0, CREAM.1, CREAM.2).to_string(),
     }
 }
@@ -492,30 +602,58 @@ impl ItfDisplay for TackyInstruction {
             TackyInstruction::Return(v) => {
                 Node::leaf(format!("{} {}", "Return".truecolor(TEAL.0, TEAL.1, TEAL.2), val_str(v)))
             }
-            TackyInstruction::Unary { op, src, dst } => {
-                Node::leaf(format!("{} {:?} {} -> {}", "Unary".truecolor(TEAL.0, TEAL.1, TEAL.2), op, val_str(src), val_str(dst)))
-            }
-            TackyInstruction::Binary { op, src1, src2, dst } => {
-                Node::leaf(format!("{} {:?} {}, {} -> {}", "Binary".truecolor(TEAL.0, TEAL.1, TEAL.2), op, val_str(src1), val_str(src2), val_str(dst)))
-            }
-            TackyInstruction::Copy { src, dst } => {
-                Node::leaf(format!("{} {} -> {}", "Copy".truecolor(TEAL.0, TEAL.1, TEAL.2), val_str(src), val_str(dst)))
-            }
-            TackyInstruction::Jump { target } => {
-                Node::leaf(format!("{} -> {}", "Jump".truecolor(TEAL.0, TEAL.1, TEAL.2), target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
-            TackyInstruction::JumpIfZero { condition, target } => {
-                Node::leaf(format!("{} {} -> {}", "JumpIfZero".truecolor(TEAL.0, TEAL.1, TEAL.2), val_str(condition), target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
-            TackyInstruction::JumpIfNotZero { condition, target } => {
-                Node::leaf(format!("{} {} -> {}", "JumpIfNotZero".truecolor(TEAL.0, TEAL.1, TEAL.2), val_str(condition), target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
-            TackyInstruction::Label(lbl) => {
-                Node::leaf(format!("{}({})", "Label".truecolor(TEAL.0, TEAL.1, TEAL.2), lbl.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
+            TackyInstruction::Unary { op, src, dst } => Node::leaf(format!(
+                "{} {:?} {} -> {}",
+                "Unary".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                op,
+                val_str(src),
+                val_str(dst)
+            )),
+            TackyInstruction::Binary { op, src1, src2, dst } => Node::leaf(format!(
+                "{} {:?} {}, {} -> {}",
+                "Binary".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                op,
+                val_str(src1),
+                val_str(src2),
+                val_str(dst)
+            )),
+            TackyInstruction::Copy { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "Copy".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(src),
+                val_str(dst)
+            )),
+            TackyInstruction::Jump { target } => Node::leaf(format!(
+                "{} -> {}",
+                "Jump".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
+            TackyInstruction::JumpIfZero { condition, target } => Node::leaf(format!(
+                "{} {} -> {}",
+                "JumpIfZero".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(condition),
+                target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
+            TackyInstruction::JumpIfNotZero { condition, target } => Node::leaf(format!(
+                "{} {} -> {}",
+                "JumpIfNotZero".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(condition),
+                target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
+            TackyInstruction::Label(lbl) => Node::leaf(format!(
+                "{}({})",
+                "Label".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                lbl.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
             TackyInstruction::FunCall { fun_name, args, dst } => {
                 let args_str = args.iter().map(val_str).collect::<Vec<_>>().join(", ");
-                Node::leaf(format!("{} {}({}) -> {}", "FunCall".truecolor(TEAL.0, TEAL.1, TEAL.2), fun_name.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2), args_str, val_str(dst)))
+                Node::leaf(format!(
+                    "{} {}({}) -> {}",
+                    "FunCall".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                    fun_name.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2),
+                    args_str,
+                    val_str(dst)
+                ))
             }
         }
     }
@@ -528,7 +666,13 @@ impl ItfDisplay for StaticVariable {
             VarInit::Extern => "extern".to_string(),
         };
         let global_str = if self.global { ", global" } else { "" };
-        Node::leaf(format!("{}: {} ({}{})", "StaticVariable".truecolor(TEAL.0, TEAL.1, TEAL.2), self.name, init_str, global_str))
+        Node::leaf(format!(
+            "{}: {} ({}{})",
+            "StaticVariable".truecolor(TEAL.0, TEAL.1, TEAL.2),
+            self.name,
+            init_str,
+            global_str
+        ))
     }
 }
 
@@ -539,19 +683,29 @@ impl ItfDisplay for StaticVariable {
 // Helper to format Operand compactly as string
 fn operand_str(op: &Operand) -> String {
     match op {
-        Operand::Imm(i) => format!("{}({})",
+        Operand::Imm(i) => format!(
+            "{}({})",
             "Imm".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
-            i.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)),
-        Operand::Reg(r) => format!("{:?}", r).truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
-        Operand::Pseudo(s) => format!("{}({})",
+            i.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+        ),
+        Operand::Reg(r) => format!("{:?}", r)
+            .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+            .to_string(),
+        Operand::Pseudo(s) => format!(
+            "{}({})",
             "Pseudo".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
-            s.truecolor(CREAM.0, CREAM.1, CREAM.2)),
-        Operand::Stack(o) => format!("{}({})",
+            s.truecolor(CREAM.0, CREAM.1, CREAM.2)
+        ),
+        Operand::Stack(o) => format!(
+            "{}({})",
             "Stack".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
-            o.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)),
-        Operand::Data(s) => format!("{}({})",
+            o.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+        ),
+        Operand::Data(s) => format!(
+            "{}({})",
             "Data".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
-            s.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)),
+            s.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+        ),
     }
 }
 
@@ -564,47 +718,80 @@ impl ItfDisplay for Operand {
 impl ItfDisplay for CodegenInstruction {
     fn itf_node(&self) -> Node {
         match self {
-            CodegenInstruction::Mov { src, dst } => {
-                Node::leaf(format!("{} {} -> {}", "Mov".truecolor(TEAL.0, TEAL.1, TEAL.2), operand_str(src), operand_str(dst)))
-            }
-            CodegenInstruction::Unary { op, dst } => {
-                Node::leaf(format!("{} {:?} {}", "Unary".truecolor(TEAL.0, TEAL.1, TEAL.2), op, operand_str(dst)))
-            }
-            CodegenInstruction::Binary { op, src, dst } => {
-                Node::leaf(format!("{} {:?} {} -> {}", "Binary".truecolor(TEAL.0, TEAL.1, TEAL.2), op, operand_str(src), operand_str(dst)))
-            }
-            CodegenInstruction::Cmp { v1, v2 } => {
-                Node::leaf(format!("{} {}, {}", "Cmp".truecolor(TEAL.0, TEAL.1, TEAL.2), operand_str(v1), operand_str(v2)))
-            }
-            CodegenInstruction::Idiv(op) => {
-                Node::leaf(format!("{} {}", "Idiv".truecolor(TEAL.0, TEAL.1, TEAL.2), operand_str(op)))
-            }
+            CodegenInstruction::Mov { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "Mov".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                operand_str(src),
+                operand_str(dst)
+            )),
+            CodegenInstruction::Unary { op, dst } => Node::leaf(format!(
+                "{} {:?} {}",
+                "Unary".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                op,
+                operand_str(dst)
+            )),
+            CodegenInstruction::Binary { op, src, dst } => Node::leaf(format!(
+                "{} {:?} {} -> {}",
+                "Binary".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                op,
+                operand_str(src),
+                operand_str(dst)
+            )),
+            CodegenInstruction::Cmp { v1, v2 } => Node::leaf(format!(
+                "{} {}, {}",
+                "Cmp".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                operand_str(v1),
+                operand_str(v2)
+            )),
+            CodegenInstruction::Idiv(op) => Node::leaf(format!(
+                "{} {}",
+                "Idiv".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                operand_str(op)
+            )),
             CodegenInstruction::Cdq => Node::leaf("Cdq".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string()),
-            CodegenInstruction::Jmp(label) => {
-                Node::leaf(format!("{} -> {}", "Jmp".truecolor(TEAL.0, TEAL.1, TEAL.2), label.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
-            CodegenInstruction::JmpCC { code, label } => {
-                Node::leaf(format!("{} {:?} -> {}", "JmpCC".truecolor(TEAL.0, TEAL.1, TEAL.2), code, label.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
-            CodegenInstruction::SetCC { code, op } => {
-                Node::leaf(format!("{} {:?} {}", "SetCC".truecolor(TEAL.0, TEAL.1, TEAL.2), code, operand_str(op)))
-            }
-            CodegenInstruction::Label(l) => {
-                Node::leaf(format!("{}({})", "Label".truecolor(TEAL.0, TEAL.1, TEAL.2), l.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
-            CodegenInstruction::AllocateStack(off) => {
-                Node::leaf(format!("{} {}", "AllocateStack".truecolor(TEAL.0, TEAL.1, TEAL.2), off.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)))
-            }
+            CodegenInstruction::Jmp(label) => Node::leaf(format!(
+                "{} -> {}",
+                "Jmp".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                label.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
+            CodegenInstruction::JmpCC { code, label } => Node::leaf(format!(
+                "{} {:?} -> {}",
+                "JmpCC".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                code,
+                label.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
+            CodegenInstruction::SetCC { code, op } => Node::leaf(format!(
+                "{} {:?} {}",
+                "SetCC".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                code,
+                operand_str(op)
+            )),
+            CodegenInstruction::Label(l) => Node::leaf(format!(
+                "{}({})",
+                "Label".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                l.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
+            CodegenInstruction::AllocateStack(off) => Node::leaf(format!(
+                "{} {}",
+                "AllocateStack".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                off.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+            )),
             CodegenInstruction::Ret => Node::leaf("Ret".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string()),
-            CodegenInstruction::DeallocateStack(off) => {
-                Node::leaf(format!("{} {}", "DeallocateStack".truecolor(TEAL.0, TEAL.1, TEAL.2), off.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)))
-            }
-            CodegenInstruction::Push(op) => {
-                Node::leaf(format!("{} {}", "Push".truecolor(TEAL.0, TEAL.1, TEAL.2), operand_str(op)))
-            }
-            CodegenInstruction::Call(name) => {
-                Node::leaf(format!("{} {}", "Call".truecolor(TEAL.0, TEAL.1, TEAL.2), name.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)))
-            }
+            CodegenInstruction::DeallocateStack(off) => Node::leaf(format!(
+                "{} {}",
+                "DeallocateStack".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                off.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+            )),
+            CodegenInstruction::Push(op) => Node::leaf(format!(
+                "{} {}",
+                "Push".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                operand_str(op)
+            )),
+            CodegenInstruction::Call(name) => Node::leaf(format!(
+                "{} {}",
+                "Call".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                name.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
+            )),
         }
     }
 }
