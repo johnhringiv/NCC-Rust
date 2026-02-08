@@ -13,8 +13,9 @@
 //!
 use crate::lexer::{Span, SpannedToken, Token};
 use colored::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{VecDeque};
 use std::fmt;
+use std::hash::Hash;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Identifier(pub String);
@@ -26,7 +27,7 @@ impl fmt::Display for Identifier {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnaryOp {
     BitwiseComplement,
     Negate,
@@ -70,8 +71,9 @@ impl From<&Token> for AssignOp {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    Constant(i32),
+    Constant(Const),
     Var(Identifier, Span),
+    Cast(Type, Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Assignment(Box<Expr>, Box<Expr>, Span),
@@ -83,12 +85,18 @@ pub enum Expr {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum Const {
+    ConstInt(i32),
+    ConstLong(i64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IncDec {
     Increment,
     Decrement,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BinOp {
     Subtract,
     Add,
@@ -133,13 +141,49 @@ impl BinOp {
     }
 }
 
-#[derive(Eq, Hash, PartialEq, Debug, Clone)]
+/// Represents case label values in switch statements.
+///
+/// # Duplicate Case Detection
+///
+/// In C, case labels are compared by their numeric value after conversion to the
+/// switch expression's type. This implementation normalizes case values using the
+/// `as_i64` method during semantic analysis to properly handle overflow/truncation:
+///
+/// ```c
+/// switch (x) {  // x is int
+///     case 0: return 0;
+///     case 17179869184: return 1;  // 2^34 truncates to 0 - detected as duplicate
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum SwitchIntType {
     Int(i32),
+    Long(i64),
     Default,
 }
 
 impl SwitchIntType {
+
+    /// Normalize case value to the switch expression's type.
+    ///
+    /// This handles overflow/truncation when the case constant's type differs
+    /// from the switch expression's type. Used during semantic analysis for
+    /// duplicate case detection.
+    pub fn as_i64(&self, switch_type: &Type) -> Option<i64> {
+        match self {
+            SwitchIntType::Int(v) => match switch_type {
+                Type::Int | Type::Long => Some(*v as i64),
+                Type::FunType { .. } => unreachable!("Cannot switch on function type"),
+            },
+            SwitchIntType::Long(v) => match switch_type {
+                Type::Int => Some((*v as i32) as i64),  // Truncate to int, then extend
+                Type::Long => Some(*v),
+                Type::FunType { .. } => unreachable!("Cannot switch on function type"),
+            },
+            SwitchIntType::Default => None,
+        }
+    }
+
     pub fn label_str(&self, switch_num: u64) -> String {
         match self {
             SwitchIntType::Int(val) => {
@@ -150,9 +194,38 @@ impl SwitchIntType {
                     format!("switch.{switch_num}_case.neg{c_str}")
                 }
             }
+            SwitchIntType::Long(val) => {
+                if *val >= 0 {
+                    format!("switch.{switch_num}_case.{val}L")
+                } else {
+                    let c_str = &val.to_string()[1..];
+                    format!("switch.{switch_num}_case.neg{c_str}L")
+                }
+            }
             SwitchIntType::Default => {
                 format!("switch.{switch_num}_default")
             }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum Type {
+    Int,
+    Long,
+    FunType {
+        params: Vec<Type>,
+        ret: Box<Type>,
+        defined: bool,
+    }
+}
+
+impl Type {
+    pub fn get_1(&self) -> Const {
+        match self {
+            Type::Int => Const::ConstInt(1),
+            Type::Long => Const::ConstLong(1),
+            Type::FunType { .. } => unreachable!("Cannot increment function type")
         }
     }
 }
@@ -175,7 +248,7 @@ pub enum Stmt {
     While(Expr, Box<SpannedStmt>, u64),   // while(condition, body, label)
     DoWhile(Box<SpannedStmt>, Expr, u64), // dowhile(body, condition, label)
     For(ForInit, Option<Expr>, Option<Expr>, Box<SpannedStmt>, u64), // for(init, condition, post, body, label)
-    Switch(Expr, Box<SpannedStmt>, u64, HashSet<SwitchIntType>),
+    Switch(Expr, Box<SpannedStmt>, u64, Vec<(SwitchIntType, Span)>),
     Case(Expr, Box<SpannedStmt>, Identifier),
     Default(Box<SpannedStmt>, Identifier),
     Null,
@@ -193,14 +266,11 @@ pub enum StorageClass {
     Extern,
 }
 
-enum TypeClass {
-    Int,
-}
-
 #[derive(PartialEq, Clone)]
 pub struct VarDeclaration {
     pub name: Identifier,
     pub init: Option<Expr>,
+    pub var_type: Type,
     pub storage_class: Option<StorageClass>,
     pub span: Span,
 }
@@ -210,6 +280,7 @@ pub struct FunDeclaration {
     pub name: Identifier,
     pub params: Vec<Identifier>,
     pub body: Option<Block>,
+    pub fun_type: Type,
     pub storage_class: Option<StorageClass>,
     pub span: Span,
 }
@@ -327,33 +398,60 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
     }
 }
 
+fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
+    match &token.token {
+        Token::ConstantInt(value_str) => {
+            match value_str.parse::<i32>() {
+                Ok(val) => Ok(Expr::Constant(Const::ConstInt(val))),
+                Err(_) => parse_constant(&SpannedToken {
+                    token: Token::ConstantLong(value_str.clone()),
+                    span: token.span,
+                })
+            }
+        },
+        Token::ConstantLong(value_str) => {
+            match value_str.parse::<i64>() {
+                Ok(val) => Ok(Expr::Constant(Const::ConstLong(val))),
+                Err(_) => Err(SyntaxError::with_span(
+                    format!("Integer constant '{}' does not fit in 64-bit int", value_str.bold()),
+                    Some(token.span),
+                )),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
 /// Parses primary expressions and operators with precedence higher than any binary operator.
 ///
 /// Handles:
 /// - Constants and identifiers
 /// - Prefix unary operators (`-`, `~`, `!`, `++`, `--`)
-/// - Parenthesized expressions
+/// - Cast expressions (`(type) expr`)
+/// - Parenthesized expressions (`(expr)`)
 /// - Postfix operators (`++`, `--`)
+/// - Function calls
 ///
 /// # Implementation Notes
 ///
+/// **Cast vs Parenthesized Expression:**
+/// When encountering `(`, the parser looks ahead to distinguish between casts and
+/// parenthesized expressions. If type keywords follow, it's a cast; otherwise, it's
+/// a parenthesized expression. Crucially:
+/// - Casts call `parse_factor` for their operand (unary precedence, e.g., `(int) -x`)
+/// - Parenthesized expressions call `parse_exp` (can contain binary operators, e.g., `(a + b)`)
+///
+/// **Postfix operators:**
 /// Postfix operators are parsed in a loop after the primary expression to handle
 /// cases like `x++++` (though this would fail validation). The loop structure
-/// also makes it easy to extend with other postfix operators like array subscripts
-/// or function calls in the future.
+/// also makes it easy to extend with other postfix operators like array subscripts.
 fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
     let next_token = tokens.front().cloned();
     let mut expr = match next_token {
         Some(ref spanned) => match &spanned.token {
-            Token::ConstantInt(value_str) => {
+            Token::ConstantInt(_) | Token::ConstantLong(_) => {
                 tokens.pop_front();
-                match value_str.parse::<i32>() {
-                    Ok(val) => Ok(Expr::Constant(val)),
-                    Err(_) => Err(SyntaxError::with_span(
-                        format!("Integer constant '{}' does not fit in 32-bit int", value_str.bold()),
-                        Some(spanned.span),
-                    )),
-                }
+                parse_constant(spanned)
             }
             Token::Negation => {
                 // simply treating negation as an unop cases a panic when unwrapping int min
@@ -388,9 +486,21 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             }
             Token::OpenParen => {
                 tokens.pop_front();
-                let inner_exp = parse_exp(tokens, 0)?;
-                expect(&Token::CloseParen, tokens)?;
-                Ok(inner_exp)
+                let mut type_specifiers =  vec![];
+                while matches!(tokens.front().map(|t| &t.token), Some(Token::LongKeyword | Token::IntKeyword)) {
+                    type_specifiers.push(tokens.front().unwrap().token.clone());
+                    tokens.pop_front();
+                }
+                if !type_specifiers.is_empty() {
+                    let cast_type = parse_type(&type_specifiers, &Some(spanned.span))?;
+                    expect(&Token::CloseParen, tokens)?;
+                    let inner_exp = parse_factor(tokens)?;
+                    Ok(Expr::Cast(cast_type, Box::from(inner_exp)))
+                } else {
+                    let inner_exp = parse_exp(tokens, 0)?;
+                    expect(&Token::CloseParen, tokens)?;
+                    Ok(inner_exp)
+                }
             }
             Token::Identifier(name) => {
                 tokens.pop_front();
@@ -407,7 +517,7 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                     Err(SyntaxError::expression(next_token))
                 }
             }
-            _ => Err(SyntaxError::expression(next_token)),
+            _ => Err(SyntaxError::expression(next_token))
         },
         _ => Err(SyntaxError::expression(next_token)),
     }?;
@@ -488,22 +598,25 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
     Ok(left)
 }
 
+fn parse_type(specifier_list: &Vec<Token>, err_span: &Option<Span>) -> Result<Type, SyntaxError> {
+    match specifier_list.as_slice() {
+        [Token::IntKeyword] => Ok(Type::Int),
+        [Token::LongKeyword] | [Token::IntKeyword, Token::LongKeyword] | [Token::LongKeyword, Token::IntKeyword]  => Ok(Type::Long),
+        [] => Err(SyntaxError::with_span("Missing type specifier".to_string(), *err_span)),
+        _ => Err(SyntaxError::with_span(
+            "Invalid type specifier combination".to_string(), *err_span))
+    }
+}
+
 fn parse_type_and_storage_class(
     specifier_list: &Vec<SpannedToken>,
-) -> Result<(TypeClass, Option<StorageClass>), SyntaxError> {
-    let mut type_specifier = None;
+) -> Result<(Type, Option<StorageClass>), SyntaxError> {
+    let mut types = Vec::new();
     let mut storage_class = None;
     for token in specifier_list {
         match token.token {
-            Token::IntKeyword => {
-                if type_specifier.is_none() {
-                    type_specifier = Some(TypeClass::Int);
-                } else {
-                    return Err(SyntaxError::with_span(
-                        "Duplicate type specifier".to_string(),
-                        Option::from(token.span),
-                    ));
-                }
+            Token::IntKeyword | Token::LongKeyword => {
+                types.push(token.token.clone());
             }
             Token::StaticKeyword | Token::ExternKeyword => {
                 let sc = if token.token == Token::StaticKeyword {
@@ -523,11 +636,8 @@ fn parse_type_and_storage_class(
             _ => unreachable!("Already matched on type specifier"),
         }
     }
-    if let Some(type_specifier) = type_specifier {
-        Ok((type_specifier, storage_class))
-    } else {
-        Err(SyntaxError::with_span("Missing type specifier".to_string(), None))
-    }
+    let err_span = specifier_list.first().map(|s| s.span);
+    Ok((parse_type(&types, &err_span)?, storage_class))
 }
 
 fn parse_conditional_middle(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError> {
@@ -756,7 +866,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             // check for stmt before first case
             switch_unreachable_check(&stmt);
             Ok(SpannedStmt {
-                stmt: Stmt::Switch(exp, Box::from(stmt), 0, HashSet::new()),
+                stmt: Stmt::Switch(exp, Box::from(stmt), 0, Vec::new()),
                 span,
             })
         }
@@ -789,7 +899,10 @@ fn switch_unreachable_check(stmt: &SpannedStmt) {
 }
 
 fn declaration_check(tokens: &VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
-    if tokens.front().map(|t| &t.token) == Some(&Token::IntKeyword) {
+    if matches!(
+        tokens.front().map(|t| &t.token),
+        Some(&Token::IntKeyword | &Token::LongKeyword | &Token::StaticKeyword | &Token::ExternKeyword)
+    ) {
         Err(SyntaxError::with_span(
             "A label can only be part of a statement and a declaration is not a statement. Add a statement or ';' before the declaration.".to_string(),
             Some(tokens.front().unwrap().span),
@@ -822,7 +935,7 @@ fn parse_declaration(
     let mut specifier_list = Vec::new();
     while let Some(front) = tokens.front() {
         match front.token {
-            Token::IntKeyword | Token::StaticKeyword | Token::ExternKeyword => {
+            Token::IntKeyword | Token::StaticKeyword | Token::ExternKeyword | Token::LongKeyword => {
                 specifier_list.push(tokens.pop_front().unwrap());
             }
             _ => break,
@@ -831,21 +944,23 @@ fn parse_declaration(
     if specifier_list.is_empty() {
         return Ok(None); // no declaration
     }
-    let (_type_class, storage_class) = parse_type_and_storage_class(&specifier_list)?;
+    let (type_class, storage_class) = parse_type_and_storage_class(&specifier_list)?;
 
     let (name, span) = parse_identifier(tokens)?;
     if let Some(front) = tokens.front() {
         if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) {
             // function declaration
             tokens.pop_front();
-            let params = parse_function_params(tokens, &Some(span))?;
+            let (params, types) = parse_function_params(tokens, &Some(span))?;
 
             let body = parse_function_body(tokens)?;
+            let defined = body.is_some();
 
             Ok(Some(Declaration::FunDeclaration(FunDeclaration {
                 name,
                 params,
                 body,
+                fun_type: Type::FunType {params: types, ret: Box::from(type_class), defined},
                 storage_class,
                 span,
             })))
@@ -859,6 +974,7 @@ fn parse_declaration(
             Ok(Some(Declaration::VarDeclaration(VarDeclaration {
                 name,
                 init,
+                var_type: type_class,
                 storage_class,
                 span,
             })))
@@ -889,8 +1005,9 @@ fn parse_arg_comma(tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxErro
 fn parse_function_params(
     tokens: &mut VecDeque<SpannedToken>,
     err_span: &Option<Span>,
-) -> Result<Vec<Identifier>, SyntaxError> {
+) -> Result<(Vec<Identifier>, Vec<Type>), SyntaxError> {
     let mut params = vec![];
+    let mut types = vec![];
     if let Some(front) = tokens.front().cloned() {
         if front.token == Token::VoidKeyword {
             tokens.pop_front();
@@ -899,14 +1016,31 @@ fn parse_function_params(
                 if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
                     break;
                 }
-                expect(&Token::IntKeyword, tokens)?;
+                let mut type_tokens = Vec::new();
+                while let Some(front) = tokens.front() {
+                    match front.token {
+                        Token::IntKeyword | Token::LongKeyword => {
+                            type_tokens.push(front.token.clone());
+                            tokens.pop_front();
+                        }
+                        _ => break,
+                    }
+                }
+                let err_span = tokens.front().map(|t| t.span);
+                if type_tokens.is_empty() {
+                    return Err(SyntaxError::with_span(
+                        "Expected type specifier in function parameter".to_string(),
+                        err_span,
+                    ));
+                }
+                types.push(parse_type(&type_tokens, &err_span)?);
                 let (name, _span) = parse_identifier(tokens)?;
                 params.push(name.clone());
                 parse_arg_comma(tokens)?;
             }
         }
         expect(&Token::CloseParen, tokens)?;
-        Ok(params)
+        Ok((params, types))
     } else {
         Err(SyntaxError::with_span(
             "EOF when parsing function parameters".to_string(),

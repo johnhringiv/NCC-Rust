@@ -1,11 +1,12 @@
+use std::cmp::PartialEq;
+use std::collections::HashMap;
 use crate::parser;
-use crate::parser::{Block, BlockItem, Declaration, Expr, ForInit, Identifier, IncDec, Stmt, UnaryOp, VarDeclaration};
-use crate::tacky::Instruction::{JumpIfNotZero, JumpIfZero};
-use crate::validate::{InitialValue, NameGenerator, SymbolTable, SymbolType};
+use crate::parser::{Type, Declaration, Identifier, IncDec, UnaryOp, VarDeclaration, Const, SwitchIntType};
+use crate::validate::{Expr, TypedExpression, InitialValue, NameGenerator, SymbolTable, StaticInt, Stmt, ForInit, Block, BlockItem, TypedVarDeclaration, TypedFunction, TypedProgram, TypedDeclaration};
 
 #[derive(Clone, Debug)]
 pub enum Val {
-    Constant(i32),
+    Constant(Const),
     Var(String),
 }
 
@@ -82,6 +83,14 @@ impl From<&parser::AssignOp> for BinOp {
 #[derive(Clone, Debug)]
 pub enum Instruction {
     Return(Val),
+    SignExtend {
+        src: Val,
+        dst: Val,
+    },
+    Truncate {
+        src: Val,
+        dst: Val,
+    },
     Unary {
         op: UnaryOp,
         src: Val,
@@ -122,13 +131,14 @@ pub struct FunctionDefinition {
     pub params: Vec<Identifier>,
     pub body: Vec<Instruction>,
     pub global: bool,
+    pub temp_types: HashMap<String, Type>,
 }
 
 /// Storage initialization for static variables.
 #[derive(Debug, Clone)]
 pub enum VarInit {
     /// Variable defined here with initial value (0 = .bss, non-zero = .data)
-    Defined(i32),
+    Defined(StaticInt),
     /// Extern variable - no storage allocated, resolved by linker
     Extern,
 }
@@ -138,17 +148,13 @@ pub struct StaticVariable {
     pub name: String,
     pub global: bool,
     pub init: VarInit,
-}
-
-#[derive(Debug)]
-pub enum TopLevel {
-    Function(FunctionDefinition),
-    StaticVariable(StaticVariable),
+    pub var_type: Type,
 }
 
 #[derive(Debug)]
 pub struct Program {
-    pub top_level: Vec<TopLevel>,
+    pub function_defs: Vec<FunctionDefinition>,
+    pub static_vars: Vec<StaticVariable>,
 }
 
 /// Converts AST expressions into TACKY IR instructions.
@@ -164,12 +170,31 @@ pub struct Program {
 /// - Postfix operators return the original value before modification
 /// - Prefix operators return the new value after modification
 /// - Lvalue expressions are currently limited to simple variables
-fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) -> Val {
-    match e {
-        parser::Expr::Constant(c) => Val::Constant(*c),
-        parser::Expr::Unary(op, inner) => {
-            let src = tackify_expr(inner, instructions, name_generator);
-            let dst = Val::Var(name_generator.next("temp"));
+fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<String, Type>) -> Val {
+    let e_type = e.exp_type.clone();
+    match &e.exp {
+        Expr::Const(c) => Val::Constant(c.clone()),
+        Expr::Cast(target_type, inner) => {
+            let source_type = inner.exp_type.clone();
+            let result = tackify_expr(inner, instructions, name_generator, temp_types);
+            if *target_type == source_type {
+                return result
+            }
+            let dst_name = name_generator.next("temp");
+            temp_types.insert(dst_name.to_string(), target_type.clone());
+            let dst = Val::Var(dst_name);
+            if *target_type == Type::Long {
+                instructions.push(Instruction::SignExtend {src: result, dst: dst.clone() });
+            } else {
+                instructions.push(Instruction::Truncate {src: result, dst: dst.clone() });
+            }
+            dst
+        }
+        Expr::Unary(op, inner) => {
+            let src = tackify_expr(inner, instructions, name_generator, temp_types);
+            let dst_name = name_generator.next("temp");
+            temp_types.insert(dst_name.to_string(), e.exp_type.clone());
+            let dst = Val::Var(dst_name);
             instructions.push(Instruction::Unary {
                 op: op.clone(),
                 src,
@@ -177,21 +202,23 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             });
             dst
         }
-        parser::Expr::Binary(parser::BinOp::And, e1, e2) => {
-            let src1 = tackify_expr(e1, instructions, name_generator);
+        Expr::Binary(parser::BinOp::And, e1, e2) => {
+            let src1 = tackify_expr(e1, instructions, name_generator, temp_types);
             let false_label = Identifier(name_generator.next("and_false"));
             instructions.push(Instruction::JumpIfZero {
                 condition: src1,
                 target: false_label.clone(),
             });
-            let src2 = tackify_expr(e2, instructions, name_generator);
+            let src2 = tackify_expr(e2, instructions, name_generator, temp_types);
             instructions.push(Instruction::JumpIfZero {
                 condition: src2,
                 target: false_label.clone(),
             });
-            let result = Val::Var(name_generator.next("temp"));
+            let result_name = name_generator.next("temp");
+            temp_types.insert(result_name.to_string(), e.exp_type.clone());
+            let result = Val::Var(result_name);
             instructions.push(Instruction::Copy {
-                src: Val::Constant(1),
+                src: Val::Constant(Const::ConstInt(1)),
                 dst: result.clone(),
             });
             let end_label = Identifier(name_generator.next("end"));
@@ -200,27 +227,29 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             });
             instructions.push(Instruction::Label(false_label));
             instructions.push(Instruction::Copy {
-                src: Val::Constant(0),
+                src: Val::Constant(Const::ConstInt(0)),
                 dst: result.clone(),
             });
             instructions.push(Instruction::Label(end_label));
             result
         }
-        parser::Expr::Binary(parser::BinOp::Or, e1, e2) => {
-            let src1 = tackify_expr(e1, instructions, name_generator);
+        Expr::Binary(parser::BinOp::Or, e1, e2) => {
+            let src1 = tackify_expr(e1, instructions, name_generator, temp_types);
             let false_label = Identifier(name_generator.next("or_false"));
             instructions.push(Instruction::JumpIfNotZero {
                 condition: src1,
                 target: false_label.clone(),
             });
-            let src2 = tackify_expr(e2, instructions, name_generator);
+            let src2 = tackify_expr(e2, instructions, name_generator, temp_types);
             instructions.push(Instruction::JumpIfNotZero {
                 condition: src2,
                 target: false_label.clone(),
             });
-            let result = Val::Var(name_generator.next("temp"));
+            let result_name = name_generator.next("temp");
+            temp_types.insert(result_name.to_string(), e.exp_type.clone());
+            let result = Val::Var(result_name);
             instructions.push(Instruction::Copy {
-                src: Val::Constant(0),
+                src: Val::Constant(Const::ConstInt(0)),
                 dst: result.clone(),
             });
             let end_label = Identifier(name_generator.next("end"));
@@ -229,27 +258,31 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             });
             instructions.push(Instruction::Label(false_label));
             instructions.push(Instruction::Copy {
-                src: Val::Constant(1),
+                src: Val::Constant(Const::ConstInt(1)),
                 dst: result.clone(),
             });
             instructions.push(Instruction::Label(end_label));
             result
         }
-        parser::Expr::Binary(op, e1, e2) => {
+        Expr::Binary(op, e1, e2) => {
             // Evaluate left-to-right and capture values immediately to avoid undefined behavior
-            let mut src1 = tackify_expr(e1, instructions, name_generator);
+            let mut src1 = tackify_expr(e1, instructions, name_generator, temp_types);
             // If src1 is a variable, copy it to a temp to capture its current value
             // before evaluating src2 (which might modify it)
             if let Val::Var(_) = &src1 {
-                let temp = Val::Var(name_generator.next("binary_left"));
+                let temp_name = name_generator.next("binary_left");
+                temp_types.insert(temp_name.to_string(), e1.exp_type.clone());
+                let temp = Val::Var(temp_name);
                 instructions.push(Instruction::Copy {
                     src: src1.clone(),
                     dst: temp.clone(),
                 });
                 src1 = temp;
             }
-            let src2 = tackify_expr(e2, instructions, name_generator);
-            let dst = Val::Var(name_generator.next("temp"));
+            let src2 = tackify_expr(e2, instructions, name_generator, temp_types);
+            let dst_name = name_generator.next("temp");
+            temp_types.insert(dst_name.to_string(), e.exp_type.clone());
+            let dst = Val::Var(dst_name);
             instructions.push(Instruction::Binary {
                 op: BinOp::from(op),
                 src1,
@@ -258,10 +291,10 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             });
             dst
         }
-        Expr::Var(Identifier(name), _span) => Val::Var(name.clone()),
-        Expr::Assignment(lhs, rhs, _span) => match lhs.as_ref() {
-            Expr::Var(Identifier(name), _) => {
-                let res = tackify_expr(rhs, instructions, name_generator);
+        Expr::Var(Identifier(name)) => Val::Var(name.clone()),
+        Expr::Assignment(lhs, rhs) => match &lhs.exp {
+            Expr::Var(Identifier(name)) => {
+                let res = tackify_expr(rhs, instructions, name_generator, temp_types);
                 instructions.push(Instruction::Copy {
                     src: res.clone(),
                     dst: Val::Var(name.clone()),
@@ -269,12 +302,19 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
                 Val::Var(name.clone())
             }
             _ => unreachable!("Assignment to non-lvalue"),
-        },
-        Expr::CompoundAssignment(op, lhs, rhs, _span) => match lhs.as_ref() {
-            Expr::Var(Identifier(name), _) => {
+        }
+        Expr::CompoundAssignment(op, lhs, rhs) => match &lhs.exp {
+            Expr::Var(Identifier(name)) => {
                 let current_val = Val::Var(name.clone()); // get the original value
-                let rhs_val = tackify_expr(rhs, instructions, name_generator);
-                let dst = Val::Var(name_generator.next("compound_temp"));
+                let rhs_val = tackify_expr(rhs, instructions, name_generator, temp_types);
+                // TODO: If lhs.exp_type != rhs.exp_type, need to:
+                //   1. Cast current_val to rhs.exp_type (SignExtend or Truncate)
+                //   2. Perform Binary operation in rhs.exp_type
+                //   3. Cast result back to lhs.exp_type before Copy
+                // Currently breaks compound assignments with type mismatches (int += long, etc.)
+                let dst_name = name_generator.next("compound_temp");
+                temp_types.insert(dst_name.to_string(), e.exp_type.clone());
+                let dst = Val::Var(dst_name);
                 // do the operation and store the result in a temporary variable
                 instructions.push(Instruction::Binary {
                     op: op.into(),
@@ -292,11 +332,15 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             }
             _ => unreachable!("Compound assignment to non-lvalue"),
         },
-        Expr::PostFixOp(op, e, _) => match e.as_ref() {
-            Expr::Var(Identifier(name), _) => {
+        Expr::PostFixOp(op, e) => match &e.exp {
+            Expr::Var(Identifier(name)) => {
                 let current_val = Val::Var(name.clone()); // get the original value
-                let org_tmp = Val::Var(name_generator.next("postfix_org"));
-                let new_val = Val::Var(name_generator.next("postfix_new"));
+                let org_tmp_name = name_generator.next("postfix_org");
+                temp_types.insert(org_tmp_name.to_string(), e.exp_type.clone());
+                let org_tmp = Val::Var(org_tmp_name);
+                let new_val_name = name_generator.next("postfix_new");
+                temp_types.insert(new_val_name.to_string(), e.exp_type.clone());
+                let new_val = Val::Var(new_val_name);
                 instructions.push(Instruction::Copy {
                     src: current_val.clone(),
                     dst: org_tmp.clone(),
@@ -304,7 +348,7 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
                 instructions.push(Instruction::Binary {
                     op: op.into(),
                     src1: current_val.clone(),
-                    src2: Val::Constant(1),
+                    src2: Val::Constant(e_type.get_1()),
                     dst: new_val.clone(),
                 });
                 instructions.push(Instruction::Copy {
@@ -315,14 +359,16 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             }
             _ => unreachable!("Postfix on non-lvalue"),
         },
-        Expr::PreFixOp(op, e, _) => match e.as_ref() {
-            Expr::Var(Identifier(name), _) => {
+        Expr::PreFixOp(op, e) => match &e.exp {
+            Expr::Var(Identifier(name)) => {
                 let current_val = Val::Var(name.clone()); // get the original value
-                let new_val = Val::Var(name_generator.next("prefix_new"));
+                let new_val_name = name_generator.next("prefix_new");
+                temp_types.insert(new_val_name.to_string(), e.exp_type.clone());
+                let new_val = Val::Var(new_val_name);
                 instructions.push(Instruction::Binary {
                     op: op.into(),
                     src1: current_val.clone(),
-                    src2: Val::Constant(1),
+                    src2: Val::Constant(e_type.get_1()),
                     dst: new_val.clone(),
                 });
                 instructions.push(Instruction::Copy {
@@ -334,15 +380,17 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             _ => unreachable!("Prefix on non-lvalue"),
         },
         Expr::Conditional(cond, e1, e2) => {
-            let c = tackify_expr(cond, instructions, name_generator);
-            let result = Val::Var(name_generator.next("temp"));
+            let c = tackify_expr(cond, instructions, name_generator, temp_types);
+            let result_name = name_generator.next("temp");
+            temp_types.insert(result_name.to_string(), e.exp_type.clone());
+            let result = Val::Var(result_name);
             let cond_false = Identifier(name_generator.next("cond_false"));
             let cond_end = Identifier(name_generator.next("cond_end"));
             instructions.push(Instruction::JumpIfZero {
                 condition: c,
                 target: cond_false.clone(),
             });
-            let left = tackify_expr(e1, instructions, name_generator);
+            let left = tackify_expr(e1, instructions, name_generator, temp_types);
             instructions.push(Instruction::Copy {
                 src: left,
                 dst: result.clone(),
@@ -351,7 +399,7 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
                 target: cond_end.clone(),
             });
             instructions.push(Instruction::Label(cond_false.clone()));
-            let right = tackify_expr(e2, instructions, name_generator);
+            let right = tackify_expr(e2, instructions, name_generator, temp_types);
             instructions.push(Instruction::Copy {
                 src: right,
                 dst: result.clone(),
@@ -359,12 +407,14 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
             instructions.push(Instruction::Label(cond_end.clone()));
             result
         }
-        Expr::FunctionCall(fun_name, params, _span) => {
+        Expr::FunctionCall(fun_name, params) => {
             let mut tacky_params = vec![];
             for param in params {
-                let mut tacky_param = tackify_expr(param, instructions, name_generator);
+                let mut tacky_param = tackify_expr(param, instructions, name_generator, temp_types);
                 if let Val::Var(_) = &tacky_param {
-                    let temp = Val::Var(name_generator.next("arg"));
+                    let temp_name = name_generator.next("arg");
+                    temp_types.insert(temp_name.to_string(), param.exp_type.clone());
+                    let temp = Val::Var(temp_name);
                     instructions.push(Instruction::Copy {
                         src: tacky_param,
                         dst: temp.clone(),
@@ -373,7 +423,9 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
                 }
                 tacky_params.push(tacky_param);
             }
-            let dst = Val::Var(name_generator.next("call"));
+            let dst_name = name_generator.next("call");
+            temp_types.insert(dst_name.to_string(), e.exp_type.clone());
+            let dst = Val::Var(dst_name);
             instructions.push(Instruction::FunCall {
                 fun_name: fun_name.clone(),
                 args: tacky_params,
@@ -384,89 +436,89 @@ fn tackify_expr(e: &parser::Expr, instructions: &mut Vec<Instruction>, name_gene
     }
 }
 
-fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
-    match &stmt {
-        parser::Stmt::Return(expr) => {
-            let val = tackify_expr(expr, instructions, name_generator);
+fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<String, Type>) {
+    match stmt {
+        Stmt::Return(expr) => {
+            let val = tackify_expr(expr, instructions, name_generator, temp_types);
             instructions.push(Instruction::Return(val));
         }
-        parser::Stmt::Expression(e) => {
-            tackify_expr(e, instructions, name_generator);
+        Stmt::Expression(e) => {
+            tackify_expr(e, instructions, name_generator, temp_types);
         }
-        parser::Stmt::Null => (),
-        &parser::Stmt::If(cond, then_stmt, else_stmt) => {
-            let c = tackify_expr(cond, instructions, name_generator);
+        Stmt::Null => (),
+        Stmt::If(cond, then_stmt, else_stmt) => {
+            let c = tackify_expr(cond, instructions, name_generator, temp_types);
             let end_label = Identifier(name_generator.next("fi"));
 
-            if let Some(e) = &**else_stmt {
+            if let Some(e) = else_stmt {
                 // if with else
                 let else_label = Identifier(name_generator.next("if_else"));
                 instructions.push(Instruction::JumpIfZero {
                     condition: c,
                     target: else_label.clone(),
                 });
-                tackify_stmt(&then_stmt.stmt, instructions, name_generator);
+                tackify_stmt(then_stmt, instructions, name_generator, temp_types);
                 instructions.push(Instruction::Jump {
                     target: end_label.clone(),
                 });
                 instructions.push(Instruction::Label(else_label));
-                tackify_stmt(&e.stmt, instructions, name_generator);
+                tackify_stmt(e, instructions, name_generator, temp_types);
             } else {
                 // no else
                 instructions.push(Instruction::JumpIfZero {
                     condition: c,
                     target: end_label.clone(),
                 });
-                tackify_stmt(&then_stmt.stmt, instructions, name_generator);
+                tackify_stmt(then_stmt, instructions, name_generator, temp_types);
             }
             instructions.push(Instruction::Label(end_label.clone()));
         }
-        &parser::Stmt::Labeled(label_name, stmt) => {
+        Stmt::Labeled(label_name, stmt) => {
             instructions.push(Instruction::Label(Identifier(label_name.to_string())));
-            tackify_stmt(&stmt.stmt, instructions, name_generator)
+            tackify_stmt(stmt, instructions, name_generator, temp_types);
         }
-        &parser::Stmt::Goto(label_name) => instructions.push(Instruction::Jump {
+        Stmt::Goto(label_name) => instructions.push(Instruction::Jump {
             target: Identifier(label_name.to_string()),
         }),
-        &parser::Stmt::Compound(block) => tackify_block(block, instructions, name_generator),
-        parser::Stmt::Break(target) | parser::Stmt::Continue(target) => {
+        Stmt::Compound(block) => tackify_block(block, instructions, name_generator, temp_types),
+        Stmt::Break(target) | Stmt::Continue(target) => {
             instructions.push(Instruction::Jump { target: target.clone() })
         }
-        parser::Stmt::While(condition, body, label) => {
+        Stmt::While(condition, body, label) => {
             let continue_label = Identifier(format!("continue_loop.{label}"));
             let break_label = Identifier(format!("break_loop.{label}"));
 
             instructions.push(Instruction::Label(continue_label.clone()));
-            let c = tackify_expr(condition, instructions, name_generator);
+            let c = tackify_expr(condition, instructions, name_generator, temp_types);
             instructions.push(Instruction::JumpIfZero {
                 condition: c,
                 target: break_label.clone(),
             });
-            tackify_stmt(&body.stmt, instructions, name_generator);
+            tackify_stmt(body, instructions, name_generator, temp_types);
             instructions.push(Instruction::Jump { target: continue_label });
             instructions.push(Instruction::Label(break_label));
         }
-        parser::Stmt::DoWhile(body, condition, label) => {
+        Stmt::DoWhile(body, condition, label) => {
             let start_label = Identifier(format!("start_loop.{label}"));
             let continue_label = Identifier(format!("continue_loop.{label}"));
             let break_label = Identifier(format!("break_loop.{label}"));
 
             instructions.push(Instruction::Label(start_label.clone()));
-            tackify_stmt(&body.stmt, instructions, name_generator);
+            tackify_stmt(body, instructions, name_generator, temp_types);
             instructions.push(Instruction::Label(continue_label));
-            let c = tackify_expr(condition, instructions, name_generator);
-            instructions.push(JumpIfNotZero {
+            let c = tackify_expr(condition, instructions, name_generator, temp_types);
+            instructions.push(Instruction::JumpIfNotZero {
                 condition: c,
                 target: start_label,
             });
             instructions.push(Instruction::Label(break_label));
         }
-        parser::Stmt::For(init, condition, post, body, label) => {
+        Stmt::For(init, condition, post, body, label) => {
             match init {
-                ForInit::InitDecl(dec) => tackify_var_declaration(dec, instructions, name_generator),
+                ForInit::InitDecl(dec) => tackify_var_declaration(dec, instructions, name_generator, temp_types),
                 ForInit::InitExp(exp) => {
                     if let Some(e) = exp {
-                        tackify_expr(e, instructions, name_generator);
+                        tackify_expr(e, instructions, name_generator, temp_types);
                     }
                 }
             }
@@ -477,37 +529,43 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
 
             instructions.push(Instruction::Label(start_label.clone()));
             if let Some(condition) = condition {
-                let c = tackify_expr(condition, instructions, name_generator);
-                instructions.push(JumpIfZero {
+                let c = tackify_expr(condition, instructions, name_generator, temp_types);
+                instructions.push(Instruction::JumpIfZero {
                     condition: c,
                     target: break_label.clone(),
                 })
             }
-            tackify_stmt(&body.stmt, instructions, name_generator);
+            tackify_stmt(body, instructions, name_generator, temp_types);
             instructions.push(Instruction::Label(continue_label));
             if let Some(post) = post {
-                tackify_expr(post, instructions, name_generator);
+                tackify_expr(post, instructions, name_generator, temp_types);
             }
             instructions.push(Instruction::Jump { target: start_label });
             instructions.push(Instruction::Label(break_label));
         }
         Stmt::Switch(exp, stmt, switch_num, cases) => {
             let end_label = Identifier(format!("break_switch.{switch_num}"));
-            let switch_val = tackify_expr(exp, instructions, name_generator);
+            let switch_val = tackify_expr(exp, instructions, name_generator, temp_types);
 
             // Build conditional jumps for each case
             // this can be optimized with binary search and/or jump tables
             let mut default_label = None;
             for case in cases {
                 match case {
-                    parser::SwitchIntType::Int(val) => {
+                    SwitchIntType::Int(_) | SwitchIntType::Long(_) => {
                         let case_label = Identifier(case.label_str(*switch_num));
-                        let case_val = Val::Constant(*val);
-                        let cond = Val::Var(name_generator.next("case_cond"));
+                        let case_const = match case {
+                            SwitchIntType::Int(c) => Const::ConstInt(*c),
+                            SwitchIntType::Long(c) => Const::ConstLong(*c),
+                            SwitchIntType::Default => unreachable!()
+                        };
+                        let cond_name = name_generator.next("case_cond");
+                        temp_types.insert(cond_name.to_string(), Type::Int);
+                        let cond = Val::Var(cond_name);
                         instructions.push(Instruction::Binary {
                             op: BinOp::Equal,
                             src1: switch_val.clone(),
-                            src2: case_val,
+                            src2: Val::Constant(case_const),
                             dst: cond.clone(),
                         });
                         instructions.push(Instruction::JumpIfNotZero {
@@ -515,7 +573,7 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
                             target: case_label,
                         });
                     }
-                    parser::SwitchIntType::Default => {
+                    SwitchIntType::Default => {
                         default_label = Some(Identifier(case.label_str(*switch_num)));
                     }
                 }
@@ -531,23 +589,23 @@ fn tackify_stmt(stmt: &parser::Stmt, instructions: &mut Vec<Instruction>, name_g
                 });
             }
 
-            tackify_stmt(&stmt.stmt, instructions, name_generator);
+            tackify_stmt(stmt, instructions, name_generator, temp_types);
             instructions.push(Instruction::Label(end_label));
         }
         Stmt::Case(_, stmt, label) | Stmt::Default(stmt, label) => {
             instructions.push(Instruction::Label(label.clone()));
-            tackify_stmt(&stmt.stmt, instructions, name_generator);
+            tackify_stmt(stmt, instructions, name_generator, temp_types);
         }
     }
 }
 
-fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator) {
+fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<String, Type>) {
     for item in block {
         match item {
-            BlockItem::Statement(stmt) => tackify_stmt(&stmt.stmt, instructions, name_generator),
+            BlockItem::Statement(stmt) => tackify_stmt(stmt, instructions, name_generator, temp_types),
             BlockItem::Declaration(dec) => match dec {
-                Declaration::VarDeclaration(var) => tackify_var_declaration(var, instructions, name_generator),
-                Declaration::FunDeclaration(_) => {}
+                TypedDeclaration::Variable(var) => tackify_var_declaration(var, instructions, name_generator, temp_types),
+                TypedDeclaration::Function(_) => {}  // Function declarations in blocks have no body
             },
         }
     }
@@ -558,42 +616,50 @@ fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_genera
 /// Static variables are initialized at compile time in the data section.
 /// Extern variables have no initialization code emitted.
 fn tackify_var_declaration(
-    declaration: &VarDeclaration,
+    declaration: &TypedVarDeclaration,
     instructions: &mut Vec<Instruction>,
     name_generator: &mut NameGenerator,
+    temp_types: &mut HashMap<String, Type>
 ) {
-    if let VarDeclaration {
-        name,
-        init: Some(e),
-        span,
-        storage_class: None,
-    } = declaration
-    {
-        let ass = Expr::Assignment(Box::new(Expr::Var(name.clone(), *span)), Box::new(e.clone()), *span);
-        tackify_expr(&ass, instructions, name_generator);
+    if declaration.storage_class.is_none() {
+        if let Some(init_exp) = &declaration.init {
+            let res = tackify_expr(init_exp, instructions, name_generator, temp_types);
+            instructions.push(Instruction::Copy { src: res, dst: Val::Var(declaration.name.0.clone()) });
+        }
     }
 }
 
 fn tackify_function(
-    func: &parser::FunDeclaration,
+    func: &TypedFunction,
     name_generator: &mut NameGenerator,
-    symbols: &SymbolTable,
 ) -> FunctionDefinition {
     let mut instructions = Vec::new();
-    let parser::Identifier(name) = &func.name;
+    let mut temp_types = HashMap::new();
+    let Identifier(name) = &func.name;
     if let Some(body) = &func.body {
-        tackify_block(body, &mut instructions, name_generator);
+        tackify_block(body, &mut instructions, name_generator, &mut temp_types);
     }
 
-    // Return 0 if the function has no return statement
-    // will not be reached if the function has a return statement
-    instructions.push(Instruction::Return(Val::Constant(0)));
+    if !matches!(instructions.last(), Some(Instruction::Return(_))) {
+        let ret_type = match &func.fun_type {
+            Type::FunType { ret, .. } => ret.as_ref(),
+            _ => unreachable!("Function must have FunType"),
+        };
+
+        let default_return = match ret_type {
+            Type::Int => Val::Constant(Const::ConstInt(0)),
+            Type::Long => Val::Constant(Const::ConstLong(0)),
+            _ => unreachable!("Function return type must be Int or Long"),
+        };
+        instructions.push(Instruction::Return(default_return));
+    }
 
     FunctionDefinition {
         name: name.clone(),
         params: func.params.clone(),
         body: instructions,
-        global: symbols.get(name).unwrap().global,
+        global: func.global,
+        temp_types,
     }
 }
 
@@ -605,33 +671,48 @@ fn tackify_function(
 /// - `VarInit::Extern` for extern declarations (defined elsewhere)
 ///
 /// Tentative definitions are initialized to 0.
-fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<TopLevel> {
+fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
     let mut tacky_defs = vec![];
     for (name, entry) in symbols.iter() {
-        if let SymbolType::Int(init) = &entry.symbol_type {
-            match init {
-                InitialValue::Initial(i) => tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
-                    name: name.clone(),
-                    global: entry.global,
-                    init: VarInit::Defined(*i),
-                })),
-                InitialValue::Tentative => tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
-                    name: name.clone(),
-                    global: entry.global,
-                    init: VarInit::Defined(0),
-                })),
-                InitialValue::NoInitializer => {
-                    // Only add extern vars if it's not a renamed local variable.
-                    // Renamed locals have dots in their names (e.g., "i.1").
-                    // File-scope extern declarations keep their original names.
-                    if !name.contains('.') {
-                        tacky_defs.push(TopLevel::StaticVariable(StaticVariable {
+        match &entry.symbol_type {
+            Type::Int | Type::Long => {
+                match &entry.val {
+                    InitialValue::Initial(static_val) => tacky_defs.push(StaticVariable {
+                        name: name.clone(),
+                        global: entry.global,
+                        init: VarInit::Defined(*static_val),
+                        var_type: entry.symbol_type.clone(),
+                    }),
+                    InitialValue::Tentative => {
+                        let zero = match &entry.symbol_type {
+                            Type::Int => StaticInt::IntInit(0),
+                            Type::Long => StaticInt::LongInit(0),
+                            Type::FunType { .. } => unreachable!("Tentative must be Int or Long"),
+                        };
+                        tacky_defs.push(StaticVariable {
                             name: name.clone(),
                             global: entry.global,
-                            init: VarInit::Extern,
-                        }));
+                            init: VarInit::Defined(zero),
+                            var_type: entry.symbol_type.clone(),
+                        })
+                    },
+                    InitialValue::NoInitializer => {
+                        // Only add extern vars if it's not a renamed local variable.
+                        // Renamed locals have dots in their names (e.g., "i.1").
+                        // File-scope extern declarations keep their original names.
+                        if !name.contains('.') {
+                            tacky_defs.push(StaticVariable {
+                                name: name.clone(),
+                                global: entry.global,
+                                init: VarInit::Extern,
+                                var_type: entry.symbol_type.clone(),
+                            });
+                        }
                     }
                 }
+            }
+            Type::FunType { .. } => {
+                // Skip function types - they're handled separately
             }
         }
     }
@@ -643,20 +724,17 @@ fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<TopLevel> {
 /// Processes all function definitions (skipping declarations without bodies) and
 /// combines them with static variable definitions from the symbol table.
 pub fn tackify_program(
-    program: &parser::Program,
+    program: TypedProgram,
     name_generator: &mut NameGenerator,
     symbols: &SymbolTable,
 ) -> Program {
-    let mut top_level = Vec::new();
+    let mut function_defs = Vec::new();
     for decl in &program.declarations {
-        if let Declaration::FunDeclaration(func) = decl
-            && func.body.is_some()
-        {
-            top_level.push(TopLevel::Function(tackify_function(func, name_generator, symbols)));
+        if let TypedDeclaration::Function(func) = decl && func.body.is_some() {
+            function_defs.push(tackify_function(func, name_generator));
         }
     }
 
-    let static_var_defs = convert_symbols_to_tacky(symbols);
-    top_level.extend(static_var_defs);
-    Program { top_level }
+    let static_vars = convert_symbols_to_tacky(symbols);
+    Program { function_defs, static_vars }
 }

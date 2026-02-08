@@ -286,6 +286,14 @@ NCC provides several safety features and guarantees to help developers write mor
   `INT_MAX + 1` reliably wraps to `INT_MIN`.
 - **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from
   evaluation order.
+- **Type conversions**: Converting `long` to `int` truncates to the lower 32 bits using two's complement representation,
+  equivalent to repeatedly subtracting 2^32 until the value fits in an `int` range.
+  For example, `2147483650L` (INT_MAX + 3) converts to `-2147483646`.
+- **Shift masking**: Left and right shifts mask the shift amount to prevent undefined behavior. For `int` types,
+  the shift amount is masked with `& 31` (modulo 32); for `long` types, masked with `& 63` (modulo 64).
+  For example, `1 << 32` evaluates to `1 << 0 = 1`, matching x86 hardware behavior.
+- **Consistent compile-time and runtime behavior**: Constant expressions (static initializers, case labels) follow
+  the same arithmetic and type conversion rules as runtime expressions, ensuring predictable behavior.
 
 #### Compile-Time Warnings
 

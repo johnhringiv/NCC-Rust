@@ -86,5 +86,8 @@
   "examples/hello_world.c": {
     "return_code": 0,
     "stdout": "Hello, World!\n"
+  },
+  "large_shift_immediate.c": {
+    "return_code": 0
   }
 }

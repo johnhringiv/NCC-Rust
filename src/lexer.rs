@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 pub enum Token {
     Identifier(String),
     ConstantInt(String),
+    ConstantLong(String),
     IntKeyword,              // int
     VoidKeyword,             // void
     ReturnKeyword,           // return
@@ -66,12 +67,14 @@ pub enum Token {
     Comma,                   // ,
     StaticKeyword,           // static
     ExternKeyword,           // extern
+    LongKeyword,             // long
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
     // Special handling tokens (handled differently in next_token)
     (r"^[a-zA-Z_]\w*\b", Token::Identifier(String::new())),
     (r"^[0-9]+\b", Token::ConstantInt(String::new())),
+    (r"^[0-9]++[lL]\b", Token::ConstantLong(String::new())),
     // Keywords
     (r"^int\b", Token::IntKeyword),
     (r"^void\b", Token::VoidKeyword),
@@ -137,6 +140,7 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^case\b", Token::CaseKeyword),
     (r"^static\b", Token::StaticKeyword),
     (r"^extern\b", Token::ExternKeyword),
+    (r"^long\b", Token::LongKeyword),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -201,6 +205,10 @@ fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
             let token = match variant {
                 Token::Identifier(_) => Token::Identifier(mat.as_str().to_string()),
                 Token::ConstantInt(_) => Token::ConstantInt(mat.as_str().to_string()),
+                Token::ConstantLong(_) => {
+                    let s = mat.as_str();
+                    Token::ConstantLong(s[..s.len()-1].to_string())
+                },
                 other => other.clone(),
             };
             matches.push(TokenMatch {
