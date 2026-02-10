@@ -23,7 +23,7 @@ pub enum Expr {
     Unary(UnaryOp, Box<TypedExpression>),
     Binary(BinOp, Box<TypedExpression>, Box<TypedExpression>),
     Assignment(Box<TypedExpression>, Box<TypedExpression>),
-    CompoundAssignment(AssignOp, Box<TypedExpression>, Box<TypedExpression>),
+    CompoundAssignment(AssignOp, Box<TypedExpression>, Box<TypedExpression>, Type),
     PostFixOp(IncDec, Box<TypedExpression>),
     PreFixOp(IncDec, Box<TypedExpression>),
     Conditional(Box<TypedExpression>, Box<TypedExpression>, Box<TypedExpression>),
@@ -137,7 +137,7 @@ impl StaticInt {
         }
     }
 
-    fn get_common(self, other: Self) -> (Self, Self) {
+    pub fn get_common(self, other: Self) -> (Self, Self) {
         let common_type = get_common_type(&self.get_type(), &other.get_type());
         let left = convert_to_type(self, &common_type);
         let right = convert_to_type(other, &common_type);
@@ -605,7 +605,7 @@ fn typecheck_file_variable_declaration(decl: &VarDeclaration, symbols: &mut Symb
     })
 }
 
-fn get_common_type(t1: &Type, t2: &Type) -> Type {
+pub(crate) fn get_common_type(t1: &Type, t2: &Type) -> Type {
     if t1 == t2 {
         t1.clone()
     } else {
@@ -714,9 +714,12 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
             let typed_lhs = typecheck_exp(*lhs, symbols)?;
             let typed_rhs = typecheck_exp(*rhs, symbols)?;
             let left_type = typed_lhs.exp_type.clone();
-            let converted_rhs = convert_to(typed_rhs, &left_type);
-            let compound = Expr::CompoundAssignment(op, Box::new(typed_lhs), Box::new(converted_rhs));
-            Ok(compound.with_type(left_type))  // Result type is lhs type (assignment result)
+            let op_type = match op {
+                AssignOp::BitwiseLeftShift | AssignOp::BitwiseRightShift => left_type.clone(),
+                _ => get_common_type(&typed_lhs.exp_type, &typed_rhs.exp_type),
+            };
+            let compound = Expr::CompoundAssignment(op, Box::new(typed_lhs), Box::new(typed_rhs), op_type);
+            Ok(compound.with_type(left_type))
         }
         ParserExpr::FunctionCall(Identifier(name), param_exps, span) => {
             let f_type = &symbols.get(&name).expect("Undefined function in typechecking").symbol_type;

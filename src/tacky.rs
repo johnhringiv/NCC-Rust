@@ -1,8 +1,8 @@
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 use crate::parser;
-use crate::parser::{Type, Declaration, Identifier, IncDec, UnaryOp, VarDeclaration, Const, SwitchIntType};
-use crate::validate::{Expr, TypedExpression, InitialValue, NameGenerator, SymbolTable, StaticInt, Stmt, ForInit, Block, BlockItem, TypedVarDeclaration, TypedFunction, TypedProgram, TypedDeclaration};
+use crate::parser::{Type, Declaration, Identifier, IncDec, UnaryOp, VarDeclaration, Const, SwitchIntType, AssignOp};
+use crate::validate::{Expr, TypedExpression, InitialValue, NameGenerator, SymbolTable, StaticInt, Stmt, ForInit, Block, BlockItem, TypedVarDeclaration, TypedFunction, TypedProgram, TypedDeclaration, get_common_type};
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -157,6 +157,14 @@ pub struct Program {
     pub static_vars: Vec<StaticVariable>,
 }
 
+fn emit_cast(src: Val, dst: Val, src_type: &Type, dst_type: &Type, instructions: &mut Vec<Instruction>) {
+    match (src_type, dst_type) {
+        (Type::Int, Type::Long) => instructions.push(Instruction::SignExtend { src, dst }),
+        (Type::Long, Type::Int) => instructions.push(Instruction::Truncate { src, dst }),
+        _ => unreachable!("Unsupported cast: {:?} -> {:?}", src_type, dst_type),
+    }
+}
+
 /// Converts AST expressions into TACKY IR instructions.
 ///
 /// Returns the `Val` containing the expression's result. For most expressions,
@@ -183,11 +191,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
             let dst_name = name_generator.next("temp");
             temp_types.insert(dst_name.to_string(), target_type.clone());
             let dst = Val::Var(dst_name);
-            if *target_type == Type::Long {
-                instructions.push(Instruction::SignExtend {src: result, dst: dst.clone() });
-            } else {
-                instructions.push(Instruction::Truncate {src: result, dst: dst.clone() });
-            }
+            emit_cast(result, dst.clone(), &source_type, target_type, instructions);
             dst
         }
         Expr::Unary(op, inner) => {
@@ -303,32 +307,54 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
             }
             _ => unreachable!("Assignment to non-lvalue"),
         }
-        Expr::CompoundAssignment(op, lhs, rhs) => match &lhs.exp {
+        Expr::CompoundAssignment(op, lhs, rhs, op_type) => match &lhs.exp {
             Expr::Var(Identifier(name)) => {
-                let current_val = Val::Var(name.clone()); // get the original value
+                let current_val = Val::Var(name.clone());
                 let rhs_val = tackify_expr(rhs, instructions, name_generator, temp_types);
-                // TODO: If lhs.exp_type != rhs.exp_type, need to:
-                //   1. Cast current_val to rhs.exp_type (SignExtend or Truncate)
-                //   2. Perform Binary operation in rhs.exp_type
-                //   3. Cast result back to lhs.exp_type before Copy
-                // Currently breaks compound assignments with type mismatches (int += long, etc.)
-                let dst_name = name_generator.next("compound_temp");
-                temp_types.insert(dst_name.to_string(), e.exp_type.clone());
-                let dst = Val::Var(dst_name);
-                // do the operation and store the result in a temporary variable
-                instructions.push(Instruction::Binary {
-                    op: op.into(),
-                    src1: current_val.clone(),
-                    src2: rhs_val.clone(),
-                    dst: dst.clone(),
-                });
 
-                // copy the result back to the original variable
-                instructions.push(Instruction::Copy {
-                    src: dst.clone(),
-                    dst: Val::Var(name.clone()),
-                });
-                dst
+                // Promote RHS to op_type if needed
+                let src2 = if *op_type != rhs.exp_type {
+                    let cast_name = name_generator.next("cast_tmp");
+                    temp_types.insert(cast_name.to_string(), op_type.clone());
+                    let cast_dst = Val::Var(cast_name);
+                    emit_cast(rhs_val, cast_dst.clone(), &rhs.exp_type, op_type, instructions);
+                    cast_dst
+                } else {
+                    rhs_val
+                };
+
+                // Promote LHS to op_type if needed
+                let src1 = if *op_type != lhs.exp_type {
+                    let cast_name = name_generator.next("cast_tmp");
+                    temp_types.insert(cast_name.to_string(), op_type.clone());
+                    let cast_dst = Val::Var(cast_name);
+                    emit_cast(current_val.clone(), cast_dst.clone(), &lhs.exp_type, op_type, instructions);
+                    cast_dst
+                } else {
+                    current_val.clone()
+                };
+
+                // Perform operation; use temp if result needs truncation
+                if *op_type != lhs.exp_type {
+                    let dst_name = name_generator.next("compound_temp");
+                    temp_types.insert(dst_name.to_string(), op_type.clone());
+                    let dst = Val::Var(dst_name);
+                    instructions.push(Instruction::Binary {
+                        op: op.into(),
+                        src1,
+                        src2,
+                        dst: dst.clone(),
+                    });
+                    emit_cast(dst, current_val.clone(), op_type, &lhs.exp_type, instructions);
+                } else {
+                    instructions.push(Instruction::Binary {
+                        op: op.into(),
+                        src1,
+                        src2,
+                        dst: current_val.clone(),
+                    });
+                }
+                current_val
             }
             _ => unreachable!("Compound assignment to non-lvalue"),
         },
@@ -338,9 +364,6 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 let org_tmp_name = name_generator.next("postfix_org");
                 temp_types.insert(org_tmp_name.to_string(), e.exp_type.clone());
                 let org_tmp = Val::Var(org_tmp_name);
-                let new_val_name = name_generator.next("postfix_new");
-                temp_types.insert(new_val_name.to_string(), e.exp_type.clone());
-                let new_val = Val::Var(new_val_name);
                 instructions.push(Instruction::Copy {
                     src: current_val.clone(),
                     dst: org_tmp.clone(),
@@ -349,10 +372,10 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                     op: op.into(),
                     src1: current_val.clone(),
                     src2: Val::Constant(e_type.get_1()),
-                    dst: new_val.clone(),
+                    dst: current_val.clone(),
                 });
                 instructions.push(Instruction::Copy {
-                    src: new_val.clone(),
+                    src: current_val.clone(),
                     dst: Val::Var(name.clone()),
                 });
                 org_tmp
@@ -362,20 +385,17 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
         Expr::PreFixOp(op, e) => match &e.exp {
             Expr::Var(Identifier(name)) => {
                 let current_val = Val::Var(name.clone()); // get the original value
-                let new_val_name = name_generator.next("prefix_new");
-                temp_types.insert(new_val_name.to_string(), e.exp_type.clone());
-                let new_val = Val::Var(new_val_name);
                 instructions.push(Instruction::Binary {
                     op: op.into(),
                     src1: current_val.clone(),
                     src2: Val::Constant(e_type.get_1()),
-                    dst: new_val.clone(),
+                    dst: current_val.clone(),
                 });
                 instructions.push(Instruction::Copy {
-                    src: new_val.clone(),
+                    src: current_val.clone(),
                     dst: Val::Var(name.clone()),
                 });
-                new_val
+                current_val
             }
             _ => unreachable!("Prefix on non-lvalue"),
         },

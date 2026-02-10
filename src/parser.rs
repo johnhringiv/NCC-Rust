@@ -34,7 +34,7 @@ pub enum UnaryOp {
     Not,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AssignOp {
     Add,
     Subtract,

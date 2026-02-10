@@ -1,5 +1,4 @@
-
 int main(void) {
-    int int_max = 2147483648; //too large
-    return int_max;
+    long long_max = 9223372036854775808; // too large for long
+    return long_max;
 }

@@ -89,5 +89,8 @@
   },
   "large_shift_immediate.c": {
     "return_code": 0
+  },
+  "types/compound_assign_mixed_types.c": {
+    "return_code": 30
   }
 }
