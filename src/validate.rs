@@ -60,6 +60,7 @@ use crate::parser::{BinOp, Block as ParserBlock, BlockItem as ParserBlockItem, D
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::rc::Rc;
 
 pub struct SemanticError {
     message: String,
@@ -406,17 +407,17 @@ pub struct Symbol {
     span: Span,
 }
 
-pub type SymbolTable = HashMap<String, Symbol>;
+pub type SymbolTable = HashMap<Rc<str>, Symbol>;
 
 #[derive(Clone)]
 struct VarInfo {
-    renamed: String,
+    renamed: Rc<str>,
     span: Span,
     ext_link: bool,
 }
 
 pub struct NameGenerator {
-    counts: HashMap<String, usize>,
+    counts: HashMap<Rc<str>, usize>,
 }
 
 impl NameGenerator {
@@ -424,10 +425,10 @@ impl NameGenerator {
         NameGenerator { counts: HashMap::new() }
     }
 
-    pub fn next(&mut self, base: &str) -> String {
-        let count = self.counts.entry(base.to_string()).or_insert(0);
+    pub fn next(&mut self, base: &str) -> Rc<str> {
+        let count = self.counts.entry(Rc::from(base)).or_insert(0);
         *count += 1;
-        format!("{base}.{count}")
+        Rc::from(format!("{base}.{count}"))
     }
 }
 
@@ -554,7 +555,7 @@ fn typecheck_local_variable_declaration(decl: &VarDeclaration, symbols: &mut Sym
 /// - No initializer + not `extern` → `Tentative`
 ///
 /// The span stored is the location of the definition, or most recent declaration if never defined.
-fn typecheck_file_variable_declaration(decl: &VarDeclaration, symbols: &mut SymbolTable) -> Result<TypedVarDeclaration, SemanticError> {
+fn typecheck_file_variable_declaration(decl: VarDeclaration, symbols: &mut SymbolTable) -> Result<TypedVarDeclaration, SemanticError> {
     let mut initial_value = if let Some(expr) = &decl.init {
         match eval_constant_expr(expr) {
             None => {
@@ -659,10 +660,10 @@ fn typecheck_file_variable_declaration(decl: &VarDeclaration, symbols: &mut Symb
     };
 
     Ok(TypedVarDeclaration {
-        name: decl.name.clone(),
+        name: decl.name,
         init: typed_init,
-        var_type: decl.var_type.clone(),
-        storage_class: decl.storage_class.clone(),
+        var_type: decl.var_type,
+        storage_class: decl.storage_class,
     })
 }
 
@@ -791,7 +792,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
         ParserExpr::FunctionCall(Identifier(name), param_exps, span) => {
             let f_type = &symbols.get(&name).expect("Undefined function in typechecking").symbol_type;
             let (param_types, ret_type) = match f_type {
-                Type::FunType { params, ret, .. } => (params.clone(), ret.clone()), //todo check clone
+                Type::FunType { params, ret, .. } => (params.clone(), ret.clone()),
                 _ => return Err(SemanticError::with_span(
                     format!("'{}' is not a function", name.bold()),
                     span,
@@ -814,7 +815,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
 
             let mut converted_args = Vec::with_capacity(param_exps.len());
             for (arg, param_type) in param_exps.iter().zip(param_types.iter()) {
-                let typed_arg = typecheck_exp(arg.clone(), symbols)?; // todo check clone
+                let typed_arg = typecheck_exp(arg.clone(), symbols)?;
                 let converted_arg = convert_to(typed_arg, param_type);
                 converted_args.push(converted_arg);
             }
@@ -837,14 +838,14 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
 ///
 /// The span stored in the symbol table is the location of the function's
 /// definition (body), or the most recent declaration if never defined.
-fn typecheck_function_declaration(decl: &FunDeclaration, symbols: &mut SymbolTable) -> Result<Option<TypedFunction>, SemanticError> {
+fn typecheck_function_declaration(decl: FunDeclaration, symbols: &mut SymbolTable) -> Result<Option<TypedFunction>, SemanticError> {
     let mut global = decl.storage_class != Some(StorageClass::Static);
     let mut defined = decl.body.is_some();
     let mut saved_span = decl.span;
-    let mut fun_type = decl.fun_type.clone();
+    let mut fun_type = decl.fun_type;
 
     let (new_param_types, new_ret_type) = match &fun_type {
-        Type::FunType { params, ret, .. } => (params.clone(), ret.clone()), // todo check clone
+        Type::FunType { params, ret, .. } => (params.clone(), ret.clone()),
         _ => unreachable!("Function declaration must have FunType"),
     };
 
@@ -855,7 +856,7 @@ fn typecheck_function_declaration(decl: &FunDeclaration, symbols: &mut SymbolTab
                 ret: old_ret_type,
                 defined: old_defined,
             } => {
-                if old_params != &new_param_types || old_ret_type != &new_ret_type {
+                if *old_params != new_param_types || old_ret_type != &new_ret_type {
                     return Err(SemanticError::with_span(
                         format!(
                             "incompatible declaration of function '{}'\n{}: {}: previous declaration was here",
@@ -919,7 +920,7 @@ fn typecheck_function_declaration(decl: &FunDeclaration, symbols: &mut SymbolTab
     );
 
     // If function has a body, typecheck it and return TypedFunction
-    if let Some(body) = &decl.body {
+    if let Some(body) = decl.body {
         for (Identifier(name), param_type) in decl.params.iter().zip(new_param_types.iter()) {
             symbols.insert(
                 name.clone(),
@@ -931,11 +932,11 @@ fn typecheck_function_declaration(decl: &FunDeclaration, symbols: &mut SymbolTab
                 },
             );
         }
-        let typed_body = typecheck_block(body.clone(), symbols, &new_ret_type)?; // TODO: VERY expensive clone of entire Block - refactor typecheck_block to take &Block
+        let typed_body = typecheck_block(body, symbols, &new_ret_type)?;
 
         Ok(Some(TypedFunction {
-            name: decl.name.clone(),
-            params: decl.params.clone(), //todo check clone
+            name: decl.name,
+            params: decl.params,
             body: Some(typed_body),
             fun_type,
             global,
@@ -960,7 +961,7 @@ fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Typ
             }
             ParserBlockItem::Declaration(Declaration::FunDeclaration(fun)) => {
                 // Function declarations in blocks cannot have bodies (already validated in resolve phase)
-                typecheck_function_declaration(&fun, symbols)?;
+                typecheck_function_declaration(fun, symbols)?;
             }
             ParserBlockItem::Statement(stmt) => {
                 let typed_stmt = typecheck_stmt(stmt.stmt, symbols, ret_type)?;
@@ -1088,8 +1089,8 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
 /// target variables. Function calls are checked for shadowing by local variables.
 fn resolve_exp(
     exp: &mut ParserExpr,
-    variable_map: &HashMap<String, VarInfo>,
-    used_vars: &mut HashSet<String>,
+    variable_map: &HashMap<Rc<str>, VarInfo>,
+    used_vars: &mut HashSet<Rc<str>>,
 ) -> Result<(), SemanticError> {
     match exp {
         ParserExpr::Assignment(e1, e2, span) | ParserExpr::CompoundAssignment(_, e1, e2, span) => match &**e1 {
@@ -1166,12 +1167,12 @@ fn resolve_exp(
 
 fn resolve_fun_decoration(
     dec: &mut FunDeclaration,
-    variable_map: &mut HashMap<String, VarInfo>,
-    block_vars: &mut HashSet<String>,
-    labels: &mut HashSet<String>,
-    jumps: &mut HashMap<String, Span>,
+    variable_map: &mut HashMap<Rc<str>, VarInfo>,
+    block_vars: &mut HashSet<Rc<str>>,
+    labels: &mut HashSet<Rc<str>>,
+    jumps: &mut HashMap<Rc<str>, Span>,
     name_gen: &mut NameGenerator,
-    used_vars: &mut HashSet<String>,
+    used_vars: &mut HashSet<Rc<str>>,
 ) -> Result<(), SemanticError> {
     let Identifier(name) = &dec.name;
 
@@ -1203,7 +1204,7 @@ fn resolve_fun_decoration(
 
     let mut inner_map = variable_map.clone(); // TODO: expensive clone of HashMap for nested function - necessary for scoping but consider Arc/Rc approach
     let mut inner_block_vars = HashSet::new();
-    let original_params: Vec<String> = dec.params.iter().map(|Identifier(name)| name.clone()).collect();
+    let original_params: Vec<Rc<str>> = dec.params.iter().map(|Identifier(name)| name.clone()).collect();
 
     for param in &mut dec.params {
         resolve_param(param, &mut inner_map, name_gen, &mut inner_block_vars, dec.span)?;
@@ -1238,9 +1239,9 @@ fn resolve_fun_decoration(
 
 fn resolve_param(
     param: &mut Identifier,
-    variable_map: &mut HashMap<String, VarInfo>,
+    variable_map: &mut HashMap<Rc<str>, VarInfo>,
     name_gen: &mut NameGenerator,
-    block_vars: &mut HashSet<String>,
+    block_vars: &mut HashSet<Rc<str>>,
     span: Span,
 ) -> Result<(), SemanticError> {
     let Identifier(name) = param.clone();
@@ -1294,7 +1295,7 @@ fn resolve_param(
 /// - Are marked with `ext_link: true` (external linkage by default)
 ///
 /// This is the resolve pass counterpart to `typecheck_file_variable_declaration`.
-fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut HashMap<String, VarInfo>) {
+fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut HashMap<Rc<str>, VarInfo>) {
     let Identifier(name) = &dec.name;
     variable_map.insert(
         name.clone(),
@@ -1326,10 +1327,10 @@ fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut Has
 /// This is the resolve pass counterpart to `typecheck_local_variable_declaration`.
 fn resolve_local_var_decoration(
     dec: &mut VarDeclaration,
-    variable_map: &mut HashMap<String, VarInfo>,
+    variable_map: &mut HashMap<Rc<str>, VarInfo>,
     name_gen: &mut NameGenerator,
-    block_vars: &mut HashSet<String>,
-    used_vars: &mut HashSet<String>,
+    block_vars: &mut HashSet<Rc<str>>,
+    used_vars: &mut HashSet<Rc<str>>,
 ) -> Result<(), SemanticError> {
     let Identifier(name) = &dec.name.clone();
 
@@ -1391,11 +1392,11 @@ fn resolve_local_var_decoration(
 
 fn resolve_statement(
     statement: &mut SpannedStmt,
-    variable_map: &mut HashMap<String, VarInfo>,
-    labels: &mut HashSet<String>,
-    jumps: &mut HashMap<String, Span>,
+    variable_map: &mut HashMap<Rc<str>, VarInfo>,
+    labels: &mut HashSet<Rc<str>>,
+    jumps: &mut HashMap<Rc<str>, Span>,
     name_gen: &mut NameGenerator,
-    used_vars: &mut HashSet<String>,
+    used_vars: &mut HashSet<Rc<str>>,
 ) -> Result<(), SemanticError> {
     match &mut statement.stmt {
         ParserStmt::Return(e) => resolve_exp(e, variable_map, used_vars),
@@ -1577,30 +1578,30 @@ impl LabelTracker {
         }
     }
 
-    fn get_break_label(&self) -> Option<String> {
+    fn get_break_label(&self) -> Option<Rc<str>> {
         if let Some(label) = self.cur_label.last() {
             let s = match label {
                 LabelTag::Switch(l) => format!("break_switch.{l}"),
                 LabelTag::Loop(l) => format!("break_loop.{l}"),
             };
-            Some(s)
+            Some(Rc::from(s))
         } else {
             None
         }
     }
 
-    fn get_continue_label(&self) -> Option<String> {
+    fn get_continue_label(&self) -> Option<Rc<str>> {
         if let Some(LabelTag::Loop(label)) = self.cur_label.iter().rev().find(|x| match x {
             LabelTag::Switch(..) => false,
             LabelTag::Loop(..) => true,
         }) {
-            Some(format!("continue_loop.{label}"))
+            Some(Rc::from(format!("continue_loop.{label}")))
         } else {
             None
         }
     }
 
-    fn get_switch_case(&mut self, c: StaticInt, span: &Span) -> Result<String, SemanticError> {
+    fn get_switch_case(&mut self, c: StaticInt, span: &Span) -> Result<Rc<str>, SemanticError> {
         // get the active switch id
         if let Some(LabelTag::Switch(label)) = self.cur_label.iter().rev().find(|x| match x {
             LabelTag::Switch(..) => true,
@@ -1612,13 +1613,13 @@ impl LabelTracker {
             };
             // Just collect cases with spans - duplicate checking happens during typecheck
             self.switch_to_cases.get_mut(label).unwrap().push((case_exp, *span));
-            Ok(case_exp.label_str(*label))
+            Ok(Rc::from(case_exp.label_str(*label)))
         } else {
             Err(SemanticError::with_span("Case outside of switch".to_string(), *span))
         }
     }
 
-    fn get_switch_default(&mut self, span: &Span) -> Result<String, SemanticError> {
+    fn get_switch_default(&mut self, span: &Span) -> Result<Rc<str>, SemanticError> {
         // get the active switch id
         if let Some(LabelTag::Switch(label)) = self.cur_label.iter().rev().find(|x| match x {
             LabelTag::Switch(..) => true,
@@ -1627,7 +1628,7 @@ impl LabelTracker {
             let default_case = SwitchIntType::Default;
             // Just collect with span - duplicate checking happens during typecheck
             self.switch_to_cases.get_mut(label).unwrap().push((default_case, *span));
-            Ok(default_case.label_str(*label))
+            Ok(Rc::from(default_case.label_str(*label)))
         } else {
             Err(SemanticError::with_span("Default outside of switch".to_string(), *span))
         }
@@ -1653,7 +1654,7 @@ impl LabelTracker {
 
     fn pop_switch(&mut self, switch_id: u64) -> Vec<(SwitchIntType, Span)> {
         self.cur_label.pop();
-        self.switch_to_cases.get(&switch_id).unwrap().clone() // todo check clone
+        self.switch_to_cases.remove(&switch_id).unwrap()
     }
 }
 
@@ -1744,12 +1745,12 @@ fn label_block(block: &mut ParserBlock, label_tracker: &mut LabelTracker) -> Res
 
 fn resolve_block(
     block: &mut ParserBlock,
-    block_vars: &mut HashSet<String>,
-    variable_map: &mut HashMap<String, VarInfo>,
-    labels: &mut HashSet<String>,
-    jumps: &mut HashMap<String, Span>,
+    block_vars: &mut HashSet<Rc<str>>,
+    variable_map: &mut HashMap<Rc<str>, VarInfo>,
+    labels: &mut HashSet<Rc<str>>,
+    jumps: &mut HashMap<Rc<str>, Span>,
     name_gen: &mut NameGenerator,
-    used_vars: &mut HashSet<String>,
+    used_vars: &mut HashSet<Rc<str>>,
 ) -> Result<(), SemanticError> {
     for bi in block.iter_mut() {
         match bi {
@@ -1781,7 +1782,7 @@ fn resolve_block(
     Ok(())
 }
 
-pub fn resolve_program(program: &mut Program) -> Result<(NameGenerator, TypedProgram, SymbolTable), SemanticError> {
+pub fn resolve_program(mut program: Program) -> Result<(NameGenerator, TypedProgram, SymbolTable), SemanticError> {
     let mut variable_map = HashMap::new();
     let mut name_gen = NameGenerator::new();
     let mut undefined_jumps = Vec::new();
@@ -1793,7 +1794,7 @@ pub fn resolve_program(program: &mut Program) -> Result<(NameGenerator, TypedPro
             Declaration::FunDeclaration(function) => {
                 let mut used_vars = HashSet::new();
                 let mut labels = HashSet::new();
-                let mut jumps: HashMap<String, Span> = HashMap::new();
+                let mut jumps: HashMap<Rc<str>, Span> = HashMap::new();
                 if let Some(body) = &mut function.body {
                     label_block(body, &mut label_tracker)?;
                 }
@@ -1830,11 +1831,11 @@ pub fn resolve_program(program: &mut Program) -> Result<(NameGenerator, TypedPro
     }
 }
 
-pub fn typecheck_program(program: &Program) -> Result<(TypedProgram, SymbolTable), SemanticError> {
+pub fn typecheck_program(program: Program) -> Result<(TypedProgram, SymbolTable), SemanticError> {
     let mut symbols = SymbolTable::new();
     let mut typed_declarations = Vec::with_capacity(program.declarations.len());
 
-    for decl in &program.declarations {
+    for decl in program.declarations {
         match decl {
             Declaration::VarDeclaration(dec) => {
                 let typed_dec = typecheck_file_variable_declaration(dec, &mut symbols)?;

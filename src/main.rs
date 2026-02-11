@@ -289,19 +289,17 @@ fn main() {
             std::process::exit(0);
         }
 
-        let mut ast = ast;
-        let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+        let validated_result = validate::resolve_program(ast).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(30);
         });
 
+        let (mut name_gen, typed_program, symbols) = validated_result;
+
         if args.validate {
-            println!("Program Valid");
-            println!("{}", ast.itf_string());
+            println!("{}", typed_program.itf_string());
             std::process::exit(0);
         }
-
-        let (mut name_gen, typed_program, symbols) = validated_result;
         let tacky_ast = tacky::tackify_program(typed_program, &mut name_gen, &symbols);
 
         if args.tacky {
@@ -403,8 +401,7 @@ fn main() {
             std::process::exit(20)
         });
 
-        let mut ast = ast;
-        let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+        let validated_result = validate::resolve_program(ast).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(30);
         });

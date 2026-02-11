@@ -40,9 +40,10 @@ use colored::*;
 use std::collections::{VecDeque};
 use std::fmt;
 use std::hash::Hash;
+use std::rc::Rc;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Identifier(pub String);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Identifier(pub Rc<str>);
 
 impl fmt::Display for Identifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -108,7 +109,7 @@ pub enum Expr {
     FunctionCall(Identifier, Vec<Expr>, Span),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Const {
     ConstInt(i32),
     ConstLong(i64),
@@ -538,9 +539,9 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                         tokens.pop_front();
                         // parse the function call
                         let params = parse_function_args(tokens, &Some(spanned.span))?;
-                        Ok(Expr::FunctionCall(Identifier(name.clone()), params, spanned.span))
+                        Ok(Expr::FunctionCall(Identifier(Rc::from(name.as_str())), params, spanned.span))
                     } else {
-                        Ok(Expr::Var(Identifier(name.clone()), spanned.span))
+                        Ok(Expr::Var(Identifier(Rc::from(name.as_str())), spanned.span))
                     }
                 } else {
                     Err(SyntaxError::expression(next_token))
@@ -737,7 +738,7 @@ fn parse_identifier(tokens: &mut VecDeque<SpannedToken>) -> Result<(Identifier, 
         Some(SpannedToken {
             token: Token::Identifier(value),
             span,
-        }) => Ok((Identifier(value), span)),
+        }) => Ok((Identifier(Rc::from(value)), span)),
         x => Err(SyntaxError::new(Some(Token::Identifier("whatever".to_string())), x)),
     }
 }
@@ -786,7 +787,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
         Token::Identifier(label_name) => {
             // Check if it's a label (identifier followed by colon)
             if tokens.get(1).map(|t| &t.token) == Some(&Token::Colon) {
-                let label = Identifier(label_name);
+                let label = Identifier(Rc::from(label_name));
                 let span = tokens.pop_front().unwrap().span; // consume identifier
                 tokens.pop_front(); // consume colon
                 declaration_check(tokens)?;
@@ -813,7 +814,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Semicolon, tokens)?;
             Ok(SpannedStmt {
-                stmt: Stmt::Break(Identifier("_dummy".to_string())),
+                stmt: Stmt::Break(Identifier(Rc::from("_dummy"))),
                 span,
             })
         }
@@ -821,7 +822,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             let span = tokens.pop_front().unwrap().span;
             expect(&Token::Semicolon, tokens)?;
             Ok(SpannedStmt {
-                stmt: Stmt::Continue(Identifier("_dummy".to_string())),
+                stmt: Stmt::Continue(Identifier(Rc::from("_dummy"))),
                 span,
             })
         }
@@ -880,7 +881,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             declaration_check(tokens)?;
             let stmt = parse_statement(tokens)?;
             Ok(SpannedStmt {
-                stmt: Stmt::Case(exp, Box::from(stmt), Identifier("_dummy".to_string())),
+                stmt: Stmt::Case(exp, Box::from(stmt), Identifier(Rc::from("_dummy"))),
                 span,
             })
         }
@@ -890,7 +891,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             declaration_check(tokens)?;
             let stmt = parse_statement(tokens)?;
             Ok(SpannedStmt {
-                stmt: Stmt::Default(Box::from(stmt), Identifier("_dummy".to_string())),
+                stmt: Stmt::Default(Box::from(stmt), Identifier(Rc::from("_dummy"))),
                 span,
             })
         }

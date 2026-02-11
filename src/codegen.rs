@@ -63,9 +63,10 @@ use crate::parser::{Const, Identifier, Type};
 use crate::tacky;
 use crate::tacky::{BinOp, Val, VarInit, StaticVariable as TackyStaticVariable};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use crate::validate::SymbolTable;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reg {
     AX,
     CX,
@@ -114,7 +115,7 @@ impl From<Type> for AssemblyType {
 
 #[derive(Debug)]
 pub struct StaticVariable {
-    pub name: String,
+    pub name: Rc<str>,
     pub global: bool,
     pub alignment: u64,
     pub init: VarInit,
@@ -124,9 +125,9 @@ pub struct StaticVariable {
 pub enum Operand {
     Imm(i64),
     Reg(Reg),
-    Pseudo(String),
+    Pseudo(Rc<str>),
     Stack(i32),
-    Data(String),
+    Data(Rc<str>),
 }
 
 impl Operand {
@@ -145,13 +146,13 @@ impl From<&Val> for Operand {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -181,7 +182,7 @@ pub enum Instruction {
     Ret,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CondCode {
     E,
     NE,
@@ -206,7 +207,7 @@ impl CondCode {
 
 #[derive(Debug)]
 pub struct FunctionDefinition {
-    pub name: String,
+    pub name: Rc<str>,
     pub body: Vec<Instruction>,
     pub global: bool,
 }
@@ -525,7 +526,7 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
     }  ));
     {
         FunctionDefinition {
-            name: name.to_string(),
+            name: name.clone(),
             body: instructions,
             global: *global,
         }
@@ -546,7 +547,7 @@ pub enum AsmSymbolEntry {
     },
 }
 
-pub type BackendSymbolTable = HashMap<String, AsmSymbolEntry>;
+pub type BackendSymbolTable = HashMap<Rc<str>, AsmSymbolEntry>;
 
 pub trait BackendSymbolTableExt {
     fn get_obj_type(&self, name: &str) -> &AssemblyType;
@@ -568,7 +569,7 @@ impl BackendSymbolTableExt for BackendSymbolTable {
 fn build_backend_symbol_table(ast: &tacky::Program, symbols: &SymbolTable) -> BackendSymbolTable {
     let mut backend = BackendSymbolTable::new();
     let static_names: HashSet<&str> = ast.static_vars.iter()
-        .map(|sv| sv.name.as_str())
+        .map(|sv| &*sv.name)
         .collect();
 
     for (name, symbol) in symbols.iter() {
@@ -578,7 +579,7 @@ fn build_backend_symbol_table(ast: &tacky::Program, symbols: &SymbolTable) -> Ba
             },
             ty => AsmSymbolEntry::Obj {
                     asm_type: ty.into(),
-                    is_static: static_names.contains(name.as_str()),
+                    is_static: static_names.contains(&**name),
             }
         };
         backend.insert(name.clone(), backend_entry);
@@ -626,15 +627,15 @@ pub fn generate(ast: tacky::Program, symbols: &SymbolTable) -> (Program, Backend
 }
 
 struct StackMapping<'a> {
-    stack_mapping: HashMap<String, i32>,
+    stack_mapping: HashMap<Rc<str>, i32>,
     offset: i32,
     /// Names of variables that should use Data operands (RIP-relative addressing).
     /// Includes both static variables defined in this file and extern variables.
-    data_vars: &'a HashSet<String>,
+    data_vars: &'a HashSet<Rc<str>>,
 }
 
 impl<'a> StackMapping<'a> {
-    fn from_data_vars(data_vars: &'a HashSet<String>) -> Self {
+    fn from_data_vars(data_vars: &'a HashSet<Rc<str>>) -> Self {
         StackMapping {
             stack_mapping: HashMap::new(),
             offset: 0,
@@ -651,7 +652,7 @@ impl<'a> StackMapping<'a> {
             Some(offset) => offset,
             None => {
                 self.offset -= asm_type.size() as i32;
-                self.stack_mapping.insert(pseudo.to_string(), self.offset);
+                self.stack_mapping.insert(Rc::from(pseudo), self.offset);
                 &self.offset
             }
         };
@@ -681,9 +682,9 @@ impl<'a> StackMapping<'a> {
 /// For each function, assigns stack slots to local variables and converts
 /// static variable references to Data operands. Returns a map of function
 /// names to their total stack space used (as negative offsets from RBP).
-fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable) -> HashMap<String, i32> {
+fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable) -> HashMap<Rc<str>, i32> {
     // Collect data vars (static + extern) upfront to avoid borrow conflict in the loop
-    let data_vars: HashSet<String> = program.static_vars.iter().map(|v| v.name.clone()).collect();
+    let data_vars: HashSet<Rc<str>> = program.static_vars.iter().map(|v| v.name.clone()).collect();
 
     let mut offsets = HashMap::new();
     for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {
@@ -719,7 +720,7 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
                 _ => {}
             }
         }
-        offsets.insert(name.to_string(), stack_mapping.offset);
+        offsets.insert(name.clone(), stack_mapping.offset);
     }
     offsets
 }
@@ -737,7 +738,7 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
 /// - Movsx with immediate source or pseudo-register destination
 ///
 /// Also inserts stack allocation at the start of each function.
-fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
+fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
     for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {
         // stack_offset is negative, so convert to positive, round up to 16, then negate for AllocateStack
         let mut positive_offset = -stack_offsets[name];
@@ -753,34 +754,35 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
                 size: AssemblyType::Quadword
             })
         }
-        for ins in body.iter() {
+        for ins in body.drain(..) {
             match ins {
-                Instruction::Mov { src, dst, size } if src.is_memory() && dst.is_memory() => {
+                Instruction::Mov { ref src, ref dst, size } if src.is_memory() && dst.is_memory() => {
                     new_ins.push(Instruction::Mov {
                         src: src.clone(),
                         dst: Operand::Reg(Reg::R10),
-                        size: *size,
+                        size,
                     });
                     new_ins.push(Instruction::Mov {
                         src: Operand::Reg(Reg::R10),
                         dst: dst.clone(),
-                        size: *size,
+                        size,
                     });
                 }
-                Instruction::Mov { src: Operand::Imm(val), dst, size: AssemblyType::Longword } if *val < i32::MIN as i64 || *val > i32::MAX as i64 => { // handle case where quadwords imm are being moved into longword. Avoids linker warnings
+                Instruction::Mov { src: Operand::Imm(val), dst, size: AssemblyType::Longword } if val < i32::MIN as i64 || val > i32::MAX as i64 => { // handle case where quadwords imm are being moved into longword. Avoids linker warnings
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Imm(*val as i32 as i64),
-                        dst: dst.clone(),
+                        src: Operand::Imm(val as i32 as i64),
+                        dst,
                         size: AssemblyType::Longword,
                     });
                 }
                 Instruction::Mov { // iced caught this missing case, can't mov imm quadword to memory
                     src: Operand::Imm(val),
-                    dst: dst @ (Operand::Stack(_) | Operand::Data(_)),
+                    ref dst,
                     size: AssemblyType::Quadword,
-                } if *val < i32::MIN as i64 || *val > i32::MAX as i64 => {
+                } if matches!(dst, Operand::Stack(_) | Operand::Data(_))
+                    && (val < i32::MIN as i64 || val > i32::MAX as i64) => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Imm(*val),
+                        src: Operand::Imm(val),
                         dst: Operand::Reg(Reg::R10),
                         size: AssemblyType::Quadword,
                     });
@@ -792,16 +794,16 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
                 }
                 Instruction::Idiv(Operand::Imm(c), size) => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Imm(*c),
+                        src: Operand::Imm(c),
                         dst: Operand::Reg(Reg::R10),
-                        size: *size
+                        size
                     });
-                    new_ins.push(Instruction::Idiv(Operand::Reg(Reg::R10), *size));
+                    new_ins.push(Instruction::Idiv(Operand::Reg(Reg::R10), size));
                 }
                 Instruction::Binary {
                     op: BinaryOp::Mult,
-                    src,
-                    dst,
+                    ref src,
+                    ref dst,
                     size
                 } if dst.is_memory() => {
                     let new_src = if matches!(src, Operand::Imm(val) if *val < i32::MIN as i64 || *val > i32::MAX as i64) {
@@ -818,36 +820,36 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
                     new_ins.push(Instruction::Mov {
                         src: dst.clone(),
                         dst: Operand::Reg(Reg::R11),
-                        size: *size
+                        size
                     });
                     new_ins.push(Instruction::Binary {
                         op: BinaryOp::Mult,
-                        src: new_src.clone(),
+                        src: new_src,
                         dst: Operand::Reg(Reg::R11),
-                        size: *size
+                        size
                     });
                     new_ins.push(Instruction::Mov {
                         src: Operand::Reg(Reg::R11),
                         dst: dst.clone(),
-                        size: *size,
+                        size,
                     });
                 }
                 Instruction::Binary {
                     op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr),
                     src,
-                    dst,
+                    ref dst,
                     size
                 } if src.is_memory() && dst.is_memory() => {
                     new_ins.push(Instruction::Mov {
-                        src: src.clone(),
+                        src,
                         dst: Operand::Reg(Reg::R10),
-                        size: *size
+                        size
                     });
                     new_ins.push(Instruction::Binary {
-                        op: op.clone(),
+                        op,
                         src: Operand::Reg(Reg::R10),
                         dst: dst.clone(),
-                        size: *size
+                        size
                     });
                 }
                 Instruction::Binary {
@@ -855,44 +857,45 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
                     src,
                     dst,
                     size
-                } if src.is_memory() || matches!(src, Operand::Imm(val) if *val > 255 || *val < 0) => {
+                } if src.is_memory() || matches!(src, Operand::Imm(val) if val > 255 || val < 0) => {
                     new_ins.push(Instruction::Mov {
-                        src: src.clone(),
+                        src,
                         dst: Operand::Reg(Reg::CX),
-                        size: *size
+                        size
                     });
                     new_ins.push(Instruction::Binary {
-                        op: op.clone(),
+                        op,
                         src: Operand::Reg(Reg::CX),
-                        dst: dst.clone(),
-                        size: *size
+                        dst,
+                        size
                     });
                 }
                 Instruction::Binary {
-                    op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mult | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr),
+                    op,
                     src: Operand::Imm(val),
                     dst,
                     size: AssemblyType::Quadword
-                } if *val < i32::MIN as i64 || *val > i32::MAX as i64 => {
+                } if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mult | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr)
+                    && (val < i32::MIN as i64 || val > i32::MAX as i64) => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Imm(*val),
+                        src: Operand::Imm(val),
                         dst: Operand::Reg(Reg::R10),
                         size: AssemblyType::Quadword,
                     });
                     new_ins.push(Instruction::Binary {
-                        op: op.clone(),
+                        op,
                         src: Operand::Reg(Reg::R10),
-                        dst: dst.clone(),
+                        dst,
                         size: AssemblyType::Quadword,
                     })
                 }
-                Instruction::Cmp {v1, v2, size} => {
+                Instruction::Cmp {ref v1, ref v2, size} => {
                     let new_v1 = if (v1.is_memory() && v2.is_memory())
                         || matches!((v1, size), (Operand::Imm(c), AssemblyType::Quadword) if *c < i32::MIN as i64 || *c > i32::MAX as i64) {
                         new_ins.push(Instruction::Mov {
                             src: v1.clone(),
                             dst: Operand::Reg(Reg::R10),
-                            size: *size,
+                            size,
                         });
                         Operand::Reg(Reg::R10)
                     } else { v1.clone() };
@@ -901,7 +904,7 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
                         new_ins.push(Instruction::Mov {
                             src: v2.clone(),
                             dst: Operand::Reg(Reg::R11),
-                            size: *size,
+                            size,
                         });
                         Operand::Reg(Reg::R11)
                     } else { v2.clone() };
@@ -909,18 +912,18 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
                     new_ins.push(Instruction::Cmp {
                         v1: new_v1,
                         v2: new_v2,
-                        size: *size,
+                        size,
                     });
                 }
-                Instruction::Push(Operand::Imm(c)) if *c < i32::MIN as i64 || *c > i32::MAX as i64 => {
+                Instruction::Push(Operand::Imm(c)) if c < i32::MIN as i64 || c > i32::MAX as i64 => {
                     new_ins.push(Instruction::Mov {
-                        src: Operand::Imm(*c),
+                        src: Operand::Imm(c),
                         dst: Operand::Reg(Reg::R10),
                         size: AssemblyType::Quadword,
                     });
                     new_ins.push(Instruction::Push(Operand::Reg(Reg::R10)));
                 }
-                Instruction::Movsx {src, dst} => { //extends longword src to quadword dst
+                Instruction::Movsx {ref src, ref dst} => { //extends longword src to quadword dst
                     if let &Operand::Imm(val) = src {
                         new_ins.push(Instruction::Mov { // move src to r10
                             src: Operand::Imm(val),
@@ -944,10 +947,10 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<String, i32>) {
                         });
                         new_ins.push(Instruction::Mov {src: Operand::Reg(Reg::R11), dst: dst.clone(), size: AssemblyType::Quadword });
                     } else { // valid
-                        new_ins.push(ins.clone());
+                        new_ins.push(ins);
                     }
                 }
-                _ => new_ins.push(ins.clone()),
+                _ => new_ins.push(ins),
             }
         }
         *body = new_ins;
@@ -962,12 +965,12 @@ fn coalesce_labels(program: &mut Program) {
         global: _,
     } in program.functions.iter_mut()
     {
-        let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut label_map: std::collections::HashMap<Rc<str>, Rc<str>> = std::collections::HashMap::new();
         let mut new_ins = Vec::new();
-        let mut current_label: Option<String> = None;
+        let mut current_label: Option<Rc<str>> = None;
         // First pass: build label mapping
-        for ins in body.iter() {
-            match ins {
+        for ins in body.drain(..) {
+            match &ins {
                 Instruction::Label(Identifier(label)) => {
                     if let Some(first_label) = &current_label {
                         // Map this label to the first label in the sequence
@@ -976,13 +979,13 @@ fn coalesce_labels(program: &mut Program) {
                     } else {
                         // This is the first label in a potential sequence
                         current_label = Some(label.clone());
-                        new_ins.push(ins.clone());
+                        new_ins.push(ins);
                     }
                 }
                 _ => {
                     // Non-label instruction, reset the sequence
                     current_label = None;
-                    new_ins.push(ins.clone());
+                    new_ins.push(ins);
                 }
             }
         }

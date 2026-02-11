@@ -50,6 +50,7 @@ use object::{
     RelocationKind, SectionKind,
 };
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Creates an undefined symbol (resolved by linker at link time).
 fn undefined_symbol(name: &str, kind: SymbolKind) -> Symbol {
@@ -71,12 +72,12 @@ fn undefined_symbol(name: &str, kind: SymbolKind) -> Symbol {
 /// - `symbols`: Direct address-to-name mapping for functions and internal labels
 /// - `reloc_symbols`: Instruction IP to symbol name for RIP-relative data references
 pub struct MySymbolResolver {
-    symbols: HashMap<u64, String>,
-    reloc_symbols: HashMap<u64, String>,
+    symbols: HashMap<u64, Rc<str>>,
+    reloc_symbols: HashMap<u64, Rc<str>>,
 }
 
 impl MySymbolResolver {
-    fn new(symbols: HashMap<u64, String>, reloc_symbols: HashMap<u64, String>) -> Self {
+    fn new(symbols: HashMap<u64, Rc<str>>, reloc_symbols: HashMap<u64, Rc<str>>) -> Self {
         Self { symbols, reloc_symbols }
     }
 }
@@ -92,11 +93,11 @@ impl SymbolResolver for MySymbolResolver {
     ) -> Option<SymbolResult<'_>> {
         // First check direct address mapping (functions, internal labels)
         if let Some(name) = self.symbols.get(&address) {
-            return Some(SymbolResult::with_str(address, name.as_str()));
+            return Some(SymbolResult::with_str(address, name));
         }
         // Then check relocation-based symbols (data references)
         if let Some(name) = self.reloc_symbols.get(&instruction.ip()) {
-            return Some(SymbolResult::with_str(address, name.as_str()));
+            return Some(SymbolResult::with_str(address, name));
         }
         None
     }
@@ -105,7 +106,7 @@ impl SymbolResolver for MySymbolResolver {
 #[allow(clippy::type_complexity)]
 pub fn get_instructions(
     program: &codegen::Program,
-) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, String>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<iced_x86::Instruction>, MySymbolResolver, HashMap<usize, Rc<str>>), Box<dyn std::error::Error>> {
     use object::read::RelocationTarget;
 
     let (obj_bytes, internal_labels) = emit_object_with_labels(program)?;
@@ -118,23 +119,24 @@ pub fn get_instructions(
     let code = text_section.data()?;
 
     // Build symbol index to name map
-    let mut symbol_names: HashMap<object::SymbolIndex, String> = HashMap::new();
+    let mut symbol_names: HashMap<object::SymbolIndex, Rc<str>> = HashMap::new();
     for symbol in obj.symbols() {
         if let Ok(name) = symbol.name() {
-            symbol_names.insert(symbol.index(), name.to_string());
+            symbol_names.insert(symbol.index(), Rc::from(name));
         }
     }
 
     // Build symbol resolver from object file symbols
-    let mut address_map = HashMap::new();
-    let mut function_offsets = HashMap::new();
+    let mut address_map: HashMap<u64, Rc<str>> = HashMap::new();
+    let mut function_offsets: HashMap<Rc<str>, u64> = HashMap::new();
     for symbol in obj.symbols() {
         if let Ok(name) = symbol.name()
             && !name.is_empty()
             && symbol.kind() == object::SymbolKind::Text
         {
-            address_map.insert(symbol.address(), name.to_string());
-            function_offsets.insert(name.to_string(), symbol.address());
+            let name: Rc<str> = Rc::from(name);
+            address_map.insert(symbol.address(), name.clone());
+            function_offsets.insert(name, symbol.address());
         }
     }
 
@@ -174,7 +176,7 @@ pub fn get_instructions(
 
     // Build relocation-based symbol map: instruction IP -> symbol name
     // This allows the symbol resolver to show data symbol names for RIP-relative accesses
-    let mut reloc_symbols: HashMap<u64, String> = HashMap::new();
+    let mut reloc_symbols: HashMap<u64, Rc<str>> = HashMap::new();
     for (reloc_offset, reloc) in text_section.relocations() {
         if let RelocationTarget::Symbol(sym_idx) = reloc.target()
             && let Some(symbol_name) = symbol_names.get(&sym_idx)
@@ -225,27 +227,27 @@ pub fn emit_object(program: &codegen::Program) -> Result<Vec<u8>, Box<dyn std::e
 #[allow(clippy::type_complexity)]
 fn emit_object_with_labels(
     program: &codegen::Program,
-) -> Result<(Vec<u8>, HashMap<usize, String>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<u8>, HashMap<usize, Rc<str>>), Box<dyn std::error::Error>> {
     let mut a = CodeAssembler::new(64)?;
 
     // Create labels for all functions upfront
-    let mut fn_labels: HashMap<String, CodeLabel> = HashMap::new();
+    let mut fn_labels: HashMap<Rc<str>, CodeLabel> = HashMap::new();
     for fun_def in &program.functions {
         fn_labels.insert(fun_def.name.clone(), a.create_label());
     }
 
     // Create labels for static variables (including extern) to get RIP-relative addressing
-    let mut data_labels: HashMap<String, CodeLabel> = HashMap::new();
+    let mut data_labels: HashMap<Rc<str>, CodeLabel> = HashMap::new();
     for sv in &program.static_vars {
         data_labels.insert(sv.name.clone(), a.create_label());
     }
 
     // Track external function calls (instruction index, function name)
-    let mut external_calls: Vec<(usize, String)> = Vec::new();
-    let mut data_relocs: Vec<(usize, String)> = Vec::new();
+    let mut external_calls: Vec<(usize, Rc<str>)> = Vec::new();
+    let mut data_relocs: Vec<(usize, Rc<str>)> = Vec::new();
 
     // Track all internal labels across all functions
-    let mut all_label_idx: HashMap<usize, String> = HashMap::new();
+    let mut all_label_idx: HashMap<usize, Rc<str>> = HashMap::new();
 
     // Emit all functions
     for fun_def in &program.functions {
@@ -275,7 +277,7 @@ fn emit_object_with_labels(
     )?;
 
     // Get function offsets before moving the code buffer
-    let mut func_offsets: Vec<(String, u64, bool)> = Vec::new();
+    let mut func_offsets: Vec<(Rc<str>, u64, bool)> = Vec::new();
     for fun_def in &program.functions {
         let func_off = result.label_ip(fn_labels.get(&fun_def.name).unwrap())?;
         func_offsets.push((fun_def.name.clone(), func_off, fun_def.global));
@@ -349,7 +351,7 @@ fn emit_object_with_labels(
     let bss = obj.section_id(StandardSection::UninitializedData);
     let mut data_offset: u64 = 0;
     let mut bss_offset: u64 = 0;
-    let mut static_var_symbols: HashMap<String, SymbolId> = HashMap::new();
+    let mut static_var_symbols: HashMap<Rc<str>, SymbolId> = HashMap::new();
     for StaticVariable { name, global, init, alignment } in &program.static_vars {
         let sym_id = match init {
             // Defined variable - allocate storage in .data or .bss
@@ -399,7 +401,7 @@ fn emit_object_with_labels(
     }
 
     // Add external function symbols and relocations
-    let mut external_symbols: HashMap<String, SymbolId> = HashMap::new();
+    let mut external_symbols: HashMap<Rc<str>, SymbolId> = HashMap::new();
     for (_ins_idx, func_name) in &external_calls {
         if !external_symbols.contains_key(func_name) {
             let symbol_id = obj.add_symbol(undefined_symbol(func_name, SymbolKind::Text));
@@ -487,12 +489,12 @@ fn emit_object_with_labels(
 fn emit_function_body(
     a: &mut CodeAssembler,
     fun_def: &codegen::FunctionDefinition,
-    fn_labels: &HashMap<String, CodeLabel>,
-    data_labels: &HashMap<String, CodeLabel>,
-    external_calls: &mut Vec<(usize, String)>,
-    data_relocs: &mut Vec<(usize, String)>,
-    labels: &mut HashMap<String, CodeLabel>,
-    label_idx: &mut HashMap<usize, String>,
+    fn_labels: &HashMap<Rc<str>, CodeLabel>,
+    data_labels: &HashMap<Rc<str>, CodeLabel>,
+    external_calls: &mut Vec<(usize, Rc<str>)>,
+    data_relocs: &mut Vec<(usize, Rc<str>)>,
+    labels: &mut HashMap<Rc<str>, CodeLabel>,
+    label_idx: &mut HashMap<usize, Rc<str>>,
 ) -> Result<(), IcedError> {
     a.push(gpr64::rbp)?;
     a.mov(gpr64::rbp, gpr64::rsp)?;
@@ -576,12 +578,12 @@ fn make_lbl_ptr(lbl: &CodeLabel, asm_ty: &AssemblyType) -> AsmMemoryOperand {
 fn emit_instruction(
     a: &mut CodeAssembler,
     ins: &Instruction,
-    labels: &mut HashMap<String, CodeLabel>,
-    label_idx: &mut HashMap<usize, String>,
-    fn_labels: &HashMap<String, CodeLabel>,
-    data_labels: &HashMap<String, CodeLabel>,
-    external_calls: &mut Vec<(usize, String)>,
-    data_relocs: &mut Vec<(usize, String)>,
+    labels: &mut HashMap<Rc<str>, CodeLabel>,
+    label_idx: &mut HashMap<usize, Rc<str>>,
+    fn_labels: &HashMap<Rc<str>, CodeLabel>,
+    data_labels: &HashMap<Rc<str>, CodeLabel>,
+    external_calls: &mut Vec<(usize, Rc<str>)>,
+    data_relocs: &mut Vec<(usize, Rc<str>)>,
 ) -> Result<(), IcedError> {
     match ins {
         Instruction::Mov { src, dst, size } => match (src, dst, size) {

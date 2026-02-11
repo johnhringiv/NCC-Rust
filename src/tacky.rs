@@ -36,6 +36,7 @@
 
 use std::cmp::PartialEq;
 use std::collections::HashMap;
+use std::rc::Rc;
 use crate::parser;
 use crate::parser::{Type, Declaration, Identifier, IncDec, UnaryOp, VarDeclaration, Const, SwitchIntType, AssignOp};
 use crate::validate::{Expr, TypedExpression, InitialValue, NameGenerator, SymbolTable, StaticInt, Stmt, ForInit, Block, BlockItem, TypedVarDeclaration, TypedFunction, TypedProgram, TypedDeclaration, get_common_type};
@@ -43,7 +44,7 @@ use crate::validate::{Expr, TypedExpression, InitialValue, NameGenerator, Symbol
 #[derive(Clone, Debug)]
 pub enum Val {
     Constant(Const),
-    Var(String),
+    Var(Rc<str>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,11 +164,11 @@ pub enum Instruction {
 
 #[derive(Debug)]
 pub struct FunctionDefinition {
-    pub name: String,
+    pub name: Rc<str>,
     pub params: Vec<Identifier>,
     pub body: Vec<Instruction>,
     pub global: bool,
-    pub temp_types: HashMap<String, Type>,
+    pub temp_types: HashMap<Rc<str>, Type>,
 }
 
 /// Storage initialization for static variables.
@@ -181,7 +182,7 @@ pub enum VarInit {
 
 #[derive(Debug, Clone)]
 pub struct StaticVariable {
-    pub name: String,
+    pub name: Rc<str>,
     pub global: bool,
     pub init: VarInit,
     pub var_type: Type,
@@ -214,10 +215,10 @@ fn emit_cast(src: Val, dst: Val, src_type: &Type, dst_type: &Type, instructions:
 /// - Postfix operators return the original value before modification
 /// - Prefix operators return the new value after modification
 /// - Lvalue expressions are currently limited to simple variables
-fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<String, Type>) -> Val {
+fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<Rc<str>, Type>) -> Val {
     let e_type = e.exp_type.clone();
     match &e.exp {
-        Expr::Const(c) => Val::Constant(c.clone()),
+        Expr::Const(c) => Val::Constant(*c),
         Expr::Cast(target_type, inner) => {
             let source_type = inner.exp_type.clone();
             let result = tackify_expr(inner, instructions, name_generator, temp_types);
@@ -225,7 +226,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 return result
             }
             let dst_name = name_generator.next("temp");
-            temp_types.insert(dst_name.to_string(), target_type.clone());
+            temp_types.insert(dst_name.clone(), target_type.clone());
             let dst = Val::Var(dst_name);
             emit_cast(result, dst.clone(), &source_type, target_type, instructions);
             dst
@@ -233,10 +234,10 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
         Expr::Unary(op, inner) => {
             let src = tackify_expr(inner, instructions, name_generator, temp_types);
             let dst_name = name_generator.next("temp");
-            temp_types.insert(dst_name.to_string(), e.exp_type.clone());
+            temp_types.insert(dst_name.clone(), e.exp_type.clone());
             let dst = Val::Var(dst_name);
             instructions.push(Instruction::Unary {
-                op: op.clone(),
+                op: *op,
                 src,
                 dst: dst.clone(),
             });
@@ -255,7 +256,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 target: false_label.clone(),
             });
             let result_name = name_generator.next("temp");
-            temp_types.insert(result_name.to_string(), e.exp_type.clone());
+            temp_types.insert(result_name.clone(), e.exp_type.clone());
             let result = Val::Var(result_name);
             instructions.push(Instruction::Copy {
                 src: Val::Constant(Const::ConstInt(1)),
@@ -286,7 +287,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 target: false_label.clone(),
             });
             let result_name = name_generator.next("temp");
-            temp_types.insert(result_name.to_string(), e.exp_type.clone());
+            temp_types.insert(result_name.clone(), e.exp_type.clone());
             let result = Val::Var(result_name);
             instructions.push(Instruction::Copy {
                 src: Val::Constant(Const::ConstInt(0)),
@@ -311,7 +312,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
             // before evaluating src2 (which might modify it)
             if let Val::Var(_) = &src1 {
                 let temp_name = name_generator.next("binary_left");
-                temp_types.insert(temp_name.to_string(), e1.exp_type.clone());
+                temp_types.insert(temp_name.clone(), e1.exp_type.clone());
                 let temp = Val::Var(temp_name);
                 instructions.push(Instruction::Copy {
                     src: src1.clone(),
@@ -321,7 +322,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
             }
             let src2 = tackify_expr(e2, instructions, name_generator, temp_types);
             let dst_name = name_generator.next("temp");
-            temp_types.insert(dst_name.to_string(), e.exp_type.clone());
+            temp_types.insert(dst_name.clone(), e.exp_type.clone());
             let dst = Val::Var(dst_name);
             instructions.push(Instruction::Binary {
                 op: BinOp::from(op),
@@ -351,7 +352,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 // Promote RHS to op_type if needed
                 let src2 = if *op_type != rhs.exp_type {
                     let cast_name = name_generator.next("cast_tmp");
-                    temp_types.insert(cast_name.to_string(), op_type.clone());
+                    temp_types.insert(cast_name.clone(), op_type.clone());
                     let cast_dst = Val::Var(cast_name);
                     emit_cast(rhs_val, cast_dst.clone(), &rhs.exp_type, op_type, instructions);
                     cast_dst
@@ -362,7 +363,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 // Promote LHS to op_type if needed
                 let src1 = if *op_type != lhs.exp_type {
                     let cast_name = name_generator.next("cast_tmp");
-                    temp_types.insert(cast_name.to_string(), op_type.clone());
+                    temp_types.insert(cast_name.clone(), op_type.clone());
                     let cast_dst = Val::Var(cast_name);
                     emit_cast(current_val.clone(), cast_dst.clone(), &lhs.exp_type, op_type, instructions);
                     cast_dst
@@ -373,7 +374,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 // Perform operation; use temp if result needs truncation
                 if *op_type != lhs.exp_type {
                     let dst_name = name_generator.next("compound_temp");
-                    temp_types.insert(dst_name.to_string(), op_type.clone());
+                    temp_types.insert(dst_name.clone(), op_type.clone());
                     let dst = Val::Var(dst_name);
                     instructions.push(Instruction::Binary {
                         op: op.into(),
@@ -398,7 +399,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
             Expr::Var(Identifier(name)) => {
                 let current_val = Val::Var(name.clone()); // get the original value
                 let org_tmp_name = name_generator.next("postfix_org");
-                temp_types.insert(org_tmp_name.to_string(), e.exp_type.clone());
+                temp_types.insert(org_tmp_name.clone(), e.exp_type.clone());
                 let org_tmp = Val::Var(org_tmp_name);
                 instructions.push(Instruction::Copy {
                     src: current_val.clone(),
@@ -438,7 +439,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
         Expr::Conditional(cond, e1, e2) => {
             let c = tackify_expr(cond, instructions, name_generator, temp_types);
             let result_name = name_generator.next("temp");
-            temp_types.insert(result_name.to_string(), e.exp_type.clone());
+            temp_types.insert(result_name.clone(), e.exp_type.clone());
             let result = Val::Var(result_name);
             let cond_false = Identifier(name_generator.next("cond_false"));
             let cond_end = Identifier(name_generator.next("cond_end"));
@@ -469,7 +470,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 let mut tacky_param = tackify_expr(param, instructions, name_generator, temp_types);
                 if let Val::Var(_) = &tacky_param {
                     let temp_name = name_generator.next("arg");
-                    temp_types.insert(temp_name.to_string(), param.exp_type.clone());
+                    temp_types.insert(temp_name.clone(), param.exp_type.clone());
                     let temp = Val::Var(temp_name);
                     instructions.push(Instruction::Copy {
                         src: tacky_param,
@@ -480,7 +481,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 tacky_params.push(tacky_param);
             }
             let dst_name = name_generator.next("call");
-            temp_types.insert(dst_name.to_string(), e.exp_type.clone());
+            temp_types.insert(dst_name.clone(), e.exp_type.clone());
             let dst = Val::Var(dst_name);
             instructions.push(Instruction::FunCall {
                 fun_name: fun_name.clone(),
@@ -492,7 +493,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
     }
 }
 
-fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<String, Type>) {
+fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<Rc<str>, Type>) {
     match stmt {
         Stmt::Return(expr) => {
             let val = tackify_expr(expr, instructions, name_generator, temp_types);
@@ -530,19 +531,19 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
             instructions.push(Instruction::Label(end_label.clone()));
         }
         Stmt::Labeled(label_name, stmt) => {
-            instructions.push(Instruction::Label(Identifier(label_name.to_string())));
+            instructions.push(Instruction::Label(label_name.clone()));
             tackify_stmt(stmt, instructions, name_generator, temp_types);
         }
         Stmt::Goto(label_name) => instructions.push(Instruction::Jump {
-            target: Identifier(label_name.to_string()),
+            target: label_name.clone(),
         }),
         Stmt::Compound(block) => tackify_block(block, instructions, name_generator, temp_types),
         Stmt::Break(target) | Stmt::Continue(target) => {
             instructions.push(Instruction::Jump { target: target.clone() })
         }
         Stmt::While(condition, body, label) => {
-            let continue_label = Identifier(format!("continue_loop.{label}"));
-            let break_label = Identifier(format!("break_loop.{label}"));
+            let continue_label = Identifier(Rc::from(format!("continue_loop.{label}")));
+            let break_label = Identifier(Rc::from(format!("break_loop.{label}")));
 
             instructions.push(Instruction::Label(continue_label.clone()));
             let c = tackify_expr(condition, instructions, name_generator, temp_types);
@@ -555,9 +556,9 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
             instructions.push(Instruction::Label(break_label));
         }
         Stmt::DoWhile(body, condition, label) => {
-            let start_label = Identifier(format!("start_loop.{label}"));
-            let continue_label = Identifier(format!("continue_loop.{label}"));
-            let break_label = Identifier(format!("break_loop.{label}"));
+            let start_label = Identifier(Rc::from(format!("start_loop.{label}")));
+            let continue_label = Identifier(Rc::from(format!("continue_loop.{label}")));
+            let break_label = Identifier(Rc::from(format!("break_loop.{label}")));
 
             instructions.push(Instruction::Label(start_label.clone()));
             tackify_stmt(body, instructions, name_generator, temp_types);
@@ -579,9 +580,9 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
                 }
             }
 
-            let start_label = Identifier(format!("start_loop.{label}"));
-            let continue_label = Identifier(format!("continue_loop.{label}"));
-            let break_label = Identifier(format!("break_loop.{label}"));
+            let start_label = Identifier(Rc::from(format!("start_loop.{label}")));
+            let continue_label = Identifier(Rc::from(format!("continue_loop.{label}")));
+            let break_label = Identifier(Rc::from(format!("break_loop.{label}")));
 
             instructions.push(Instruction::Label(start_label.clone()));
             if let Some(condition) = condition {
@@ -600,7 +601,7 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
             instructions.push(Instruction::Label(break_label));
         }
         Stmt::Switch(exp, stmt, switch_num, cases) => {
-            let end_label = Identifier(format!("break_switch.{switch_num}"));
+            let end_label = Identifier(Rc::from(format!("break_switch.{switch_num}")));
             let switch_val = tackify_expr(exp, instructions, name_generator, temp_types);
 
             // Build conditional jumps for each case
@@ -609,14 +610,14 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
             for case in cases {
                 match case {
                     SwitchIntType::Int(_) | SwitchIntType::Long(_) => {
-                        let case_label = Identifier(case.label_str(*switch_num));
+                        let case_label = Identifier(Rc::from(case.label_str(*switch_num)));
                         let case_const = match case {
                             SwitchIntType::Int(c) => Const::ConstInt(*c),
                             SwitchIntType::Long(c) => Const::ConstLong(*c),
                             SwitchIntType::Default => unreachable!()
                         };
                         let cond_name = name_generator.next("case_cond");
-                        temp_types.insert(cond_name.to_string(), Type::Int);
+                        temp_types.insert(cond_name.clone(), Type::Int);
                         let cond = Val::Var(cond_name);
                         instructions.push(Instruction::Binary {
                             op: BinOp::Equal,
@@ -630,7 +631,7 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
                         });
                     }
                     SwitchIntType::Default => {
-                        default_label = Some(Identifier(case.label_str(*switch_num)));
+                        default_label = Some(Identifier(Rc::from(case.label_str(*switch_num))));
                     }
                 }
             }
@@ -655,7 +656,7 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
     }
 }
 
-fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<String, Type>) {
+fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<Rc<str>, Type>) {
     for item in block {
         match item {
             BlockItem::Statement(stmt) => tackify_stmt(stmt, instructions, name_generator, temp_types),
@@ -675,7 +676,7 @@ fn tackify_var_declaration(
     declaration: &TypedVarDeclaration,
     instructions: &mut Vec<Instruction>,
     name_generator: &mut NameGenerator,
-    temp_types: &mut HashMap<String, Type>
+    temp_types: &mut HashMap<Rc<str>, Type>
 ) {
     if declaration.storage_class.is_none() {
         if let Some(init_exp) = &declaration.init {
