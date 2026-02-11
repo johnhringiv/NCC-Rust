@@ -1,4 +1,42 @@
-// Simple emitter using iced-x86 to generate machine code at runtime
+//! # Emitter (iced-x86) — Assembly AST to Relocatable Object File
+//!
+//! Primary emitter that encodes the assembly AST into machine code using
+//! [iced-x86](https://github.com/icedland/iced) and writes ELF (Linux) or
+//! Mach-O (macOS) object files using the [object](https://github.com/gimli-rs/object) crate.
+//!
+//! ## Technical Approach
+//!
+//! Labels are pre-created for all functions and static variables so that forward
+//! references resolve naturally. The [`CodeAssembler`] accumulates instructions, then
+//! the block encoder resolves label addresses and produces a flat code buffer with
+//! instruction-offset metadata. Relocations for external calls (`E8` + placeholder)
+//! and RIP-relative data accesses are computed from the offset metadata and added to
+//! the object file for the linker to patch.
+//!
+//! ## What This Pass Accomplishes
+//!
+//! - Encodes all x86-64 instructions to machine code (no external assembler needed)
+//! - Builds a complete object file with `.text`, `.data`, and `.bss` sections
+//! - Emits symbol table entries with correct scope (global vs file-local)
+//! - Emits relocations for external function calls and static variable references
+//! - Handles platform differences (ELF vs Mach-O implicit addend patching)
+//! - Provides [`get_instructions`] for disassembly/pretty-printing with symbol names
+//!
+//! ## Call Order
+//!
+//! ```text
+//! emit_object()                          — public entry point (returns object bytes)
+//!   └─ emit_object_with_labels()         — core: assemble + build object file
+//!        └─ emit_function_body()         — prologue + instruction loop
+//!             └─ emit_instruction()      — encode one instruction, track relocations
+//!                  ├─ gpr32() / gpr64_reg()  — register mapping helpers
+//!                  ├─ mem_rbp()              — [rbp+offset] memory operands
+//!                  └─ make_lbl_ptr()         — [label] RIP-relative operands
+//!
+//! get_instructions()                     — public (for pretty-printing)
+//!   └─ emit_object_with_labels()         — generate object, then decode back
+//! ```
+
 use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp, StaticVariable, AssemblyType};
 use crate::tacky::{VarInit,};
 use crate::validate::{StaticInt};

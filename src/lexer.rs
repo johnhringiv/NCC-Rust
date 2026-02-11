@@ -1,3 +1,30 @@
+//! # Lexer — Source Text to Tokens
+//!
+//! Converts raw C source text into a stream of [`SpannedToken`]s using regex-based
+//! pattern matching with maximal munch disambiguation.
+//!
+//! ## Technical Approach
+//!
+//! Token patterns are pre-compiled into regexes at startup via [`LazyLock`] and anchored
+//! with `^` so they match only at the current scan position. On each iteration the lexer
+//! tries every pattern, collects all matches, and picks the longest (maximal munch).
+//! This avoids keyword/identifier ambiguity (e.g. `int` vs `integer`) without reserved-word
+//! tables.
+//!
+//! ## What This Pass Accomplishes
+//!
+//! - Strips comments (`//`, `/* */`, `#` line directives)
+//! - Produces a [`VecDeque<SpannedToken>`] carrying line/column [`Span`]s for error reporting
+//! - Detects lexer errors (unexpected characters, unterminated comments) and exits with code 10
+//! - Promotes integer literals with an `L`/`l` suffix to [`Token::ConstantLong`]
+//!
+//! ## Call Order
+//!
+//! ```text
+//! tokenizer()          — public entry point, drives the scan loop
+//!   └─ next_token()    — tries all TOKEN_DEFS, returns longest match
+//! ```
+
 // todo: we should stream tokens to parser in a future refactor
 use colored::*;
 use regex::Regex;

@@ -1,15 +1,39 @@
-//! Parser for a subset of C using recursive descent with operator precedence climbing.
+//! # Parser — Tokens to Untyped AST
 //!
-//! The parser combines recursive descent for statement and declaration parsing with
-//! precedence climbing for expression parsing. This hybrid approach provides good
-//! performance while keeping the implementation straightforward.
+//! Recursive descent parser with precedence climbing for expressions.
+//! Consumes a [`VecDeque<SpannedToken>`] and produces an untyped AST ([`Program`]).
 //!
-//! # Architecture
+//! ## Technical Approach
 //!
-//! - [`parse_factor`] handles primary expressions and unary operators
-//! - [`parse_exp`] handles binary operators using precedence climbing
-//! - Assignment operators are treated as binary operators for parsing simplicity
-//!   but generate distinct AST nodes
+//! Statements, declarations, and top-level structure use classic recursive descent.
+//! Expressions use Pratt-style precedence climbing ([`parse_exp`]) with a minimum
+//! precedence parameter, which naturally handles left-associativity and precedence
+//! without separate functions per level. Assignment and compound-assignment operators
+//! are parsed as right-associative binary operators but produce distinct AST nodes.
+//!
+//! ## What This Pass Accomplishes
+//!
+//! - Builds a complete untyped AST: declarations, statements, and expressions
+//! - Validates syntactic structure (balanced braces, expected semicolons, etc.)
+//! - Resolves type specifier combinations order-independently (`long int` == `int long`)
+//! - Separates storage-class specifiers (`static`, `extern`) from type specifiers
+//! - Detects syntactic errors and exits with code 20
+//!
+//! ## Call Order
+//!
+//! ```text
+//! parse_program()                         — public entry point
+//!   ├─ parse_declaration()                — try declaration first (type specifier lookahead)
+//!   │    ├─ parse_type_and_storage_class()
+//!   │    ├─ parse_function_params()       — if '(' follows identifier
+//!   │    └─ parse_exp()                   — variable initializer
+//!   └─ parse_statement()                  — if not a declaration
+//!        ├─ parse_exp()                   — expression statements, conditions
+//!        │    ├─ parse_factor()           — literals, unary, casts, postfix, calls
+//!        │    │    └─ parse_constant()    — int/long literal with overflow promotion
+//!        │    └─ parse_exp() (recursive)  — binary operators via precedence climbing
+//!        └─ parse_block_item()            — compound statements (recursive)
+//! ```
 //!
 use crate::lexer::{Span, SpannedToken, Token};
 use colored::*;

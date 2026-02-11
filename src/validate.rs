@@ -1,3 +1,60 @@
+//! # Validator — Semantic Analysis (Resolution + Type Checking)
+//!
+//! Two-pass semantic analysis that transforms the untyped parser AST into a
+//! [`TypedProgram`] with fully resolved names and types.
+//!
+//! ## Technical Approach
+//!
+//! The validator runs two sequential passes over the AST, both orchestrated by
+//! [`resolve_program`] (the single public entry point called from `main`):
+//!
+//! **Pass 1 — Resolution** mutates the parser AST in place:
+//! - Renames local variables to unique identifiers (`x` -> `x.1`) via [`NameGenerator`]
+//! - Validates lvalue requirements (assignment/increment targets must be variables)
+//! - Labels loops and switches with unique IDs for break/continue/case
+//! - Validates goto targets exist, detects duplicate labels
+//! - Emits `-Wshadow` and `-Wunused-parameter` warnings
+//!
+//! **Pass 2 — Type Checking** consumes the mutated AST and produces typed output:
+//! - Builds the [`SymbolTable`] mapping identifiers to types, linkage, and initial values
+//! - Inserts implicit casts via common-type promotion (`int` + `long` -> `long`)
+//! - Validates function call arity and argument types
+//! - Evaluates constant expressions for static initializers and case labels
+//! - Enforces declaration consistency (linkage, types, single-definition rule)
+//!
+//! ## What This Pass Accomplishes
+//!
+//! - Produces a [`TypedProgram`] where every expression carries its resolved type
+//! - Produces a [`SymbolTable`] consumed by tackifier and codegen
+//! - Produces a [`NameGenerator`] with counters for the tackifier to continue from
+//! - Detects semantic errors and exits with code 30
+//!
+//! ## Call Order
+//!
+//! ```text
+//! resolve_program()                              — public entry point (Pass 1 + Pass 2)
+//!   │
+//!   │  ── Pass 1: Resolution ──
+//!   ├─ label_block()                             — assign loop/switch IDs
+//!   │    └─ label_statement()                    — break/continue/case label generation
+//!   ├─ resolve_file_var_declaration()            — register file-scope vars (no rename)
+//!   ├─ resolve_fun_decoration()                  — process each function
+//!   │    ├─ resolve_param()                      — rename parameters
+//!   │    └─ resolve_block()                      — process function body
+//!   │         ├─ resolve_local_var_decoration()  — rename locals, check shadowing
+//!   │         └─ resolve_statement()             — resolve expressions in statements
+//!   │              └─ resolve_exp()              — replace var names with unique renames
+//!   │
+//!   │  ── Pass 2: Type Checking ──
+//!   └─ typecheck_program()                       — called after resolution succeeds
+//!        ├─ typecheck_file_variable_declaration() — file-scope var rules
+//!        └─ typecheck_function_declaration()      — function type consistency
+//!             └─ typecheck_block()                — process function body
+//!                  ├─ typecheck_local_variable_declaration()
+//!                  └─ typecheck_stmt()            — recursive statement typing
+//!                       └─ typecheck_exp()        — core: assign types, insert casts
+//! ```
+
 use crate::lexer::Span;
 use crate::parser::{BinOp, Block as ParserBlock, BlockItem as ParserBlockItem, Declaration, Expr as ParserExpr, ForInit as ParserForInit, FunDeclaration, Identifier, Program, SpannedStmt, Stmt as ParserStmt, StorageClass, SwitchIntType, UnaryOp, VarDeclaration, Const, Type, AssignOp, IncDec};
 use colored::*;

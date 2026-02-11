@@ -1,3 +1,19 @@
+//! # Emitter (text) — Assembly AST to AT&T-Syntax Text Assembly
+//!
+//! Deprecated text-based emitter (enabled via `--no-iced`). Generates AT&T-syntax
+//! x86-64 assembly as a [`String`], intended to be written to a `.s` file and
+//! assembled by the system `as` assembler.
+//!
+//! ## Call Order
+//!
+//! ```text
+//! emit_program()                — public entry point, returns full assembly text
+//!   ├─ emit_function()          — .globl directive, prologue, instruction loop
+//!   │    └─ emit_instruction()  — single instruction to AT&T syntax
+//!   │         └─ emit_operand() — register/immediate/stack/data operand formatting
+//!   └─ emit_static_variable()   — .data/.bss directives for static vars
+//! ```
+
 use crate::codegen::{AssemblyType, BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, UnaryOp, StaticVariable};
 use crate::tacky::{VarInit};
 use crate::validate;

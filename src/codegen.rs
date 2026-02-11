@@ -1,3 +1,63 @@
+//! # Codegen — TACKY IR to x86-64 Assembly AST
+//!
+//! Lowers TACKY three-address code into an x86-64 assembly AST through a four-step
+//! pipeline, producing valid instruction sequences ready for machine code emission.
+//!
+//! ## Technical Approach
+//!
+//! The lowering runs four sequential passes, each refining the representation:
+//!
+//! 1. **Instruction selection** ([`convert_instruction`]) — pattern-matches each TACKY
+//!    instruction into one or more assembly instructions using pseudo-registers
+//! 2. **Pseudo-register replacement** ([`replace_pseudo_registers`]) — assigns stack
+//!    slots (negative RBP offsets) to locals, and RIP-relative [`Operand::Data`]
+//!    references to static/extern variables
+//! 3. **Instruction fix-up** ([`fix_invalid`]) — rewrites operand combinations that
+//!    violate x86-64 encoding rules (e.g. memory-to-memory moves) using scratch
+//!    registers R10/R11/CX, and inserts the stack allocation prologue
+//! 4. **Label coalescing** ([`coalesce_labels`]) — merges consecutive labels to reduce
+//!    redundant jump targets
+//!
+//! ## What This Pass Accomplishes
+//!
+//! - Translates all TACKY operations to concrete x86-64 instructions
+//! - Implements the System V AMD64 calling convention:
+//!   - Arguments 1-6 in RDI, RSI, RDX, RCX, R8, R9; remainder on stack
+//!   - 16-byte stack alignment before `call`
+//!   - Return value in RAX
+//! - Allocates stack frames: locals grow downward from RBP, 16-byte aligned
+//! - Produces a [`Program`] of [`FunctionDefinition`]s and [`StaticVariable`]s
+//! - Produces a [`BackendSymbolTable`] mapping names to assembly types
+//!
+//! ## Call Order
+//!
+//! ```text
+//! generate()                              — public entry point, orchestrates all 4 passes
+//!   ├─ build_backend_symbol_table()       — map all vars/fns to assembly types
+//!   ├─ convert_function()                 — per function: lower params + body
+//!   │    └─ convert_instruction()         — per instruction: TACKY -> assembly
+//!   │         └─ convert_function_call()  — System V ABI argument passing
+//!   ├─ convert_static_var()               — per static variable
+//!   ├─ replace_pseudo_registers()         — assign stack slots / data operands
+//!   ├─ fix_invalid()                      — rewrite illegal operand combos, add prologue
+//!   └─ coalesce_labels()                  — merge consecutive labels
+//! ```
+//!
+//! ## Stack Frame Layout
+//!
+//! ```text
+//!         ┌──────────────────┐  higher addresses
+//!         │ 8th+ arg (caller)│  RBP + 24, +32, ...
+//!         │ 7th arg (caller) │  RBP + 16
+//!         │ return address   │  RBP + 8
+//!         │ saved RBP        │  RBP + 0  <── RBP
+//!         │ local var (int)  │  RBP - 4
+//!         │ local var (long) │  RBP - 12
+//!         │ ...              │  ... grows downward
+//!         │ (16-byte aligned)│  <── RSP
+//!         └──────────────────┘  lower addresses
+//! ```
+
 use crate::parser;
 use crate::parser::{Const, Identifier, Type};
 use crate::tacky;

@@ -8,7 +8,8 @@ use crate::codegen::{
 };
 use crate::parser::{
     AssignOp, BinOp as ParserBinOp, BlockItem, Const, Declaration, Expr, ForInit, FunDeclaration, Identifier, IncDec,
-    Program as ParserProgram, SpannedStmt, Stmt, Type, UnaryOp as ParserUnaryOp, VarDeclaration,
+    Program as ParserProgram, SpannedStmt, Stmt, StorageClass, SwitchIntType, Type, UnaryOp as ParserUnaryOp,
+    VarDeclaration,
 };
 use crate::tacky::{
     BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction, Program as TackyProgram,
@@ -158,12 +159,27 @@ colored_node!(
 // TACKY function definition - compact format
 impl ItfDisplay for TackyFunctionDefinition {
     fn itf_node(&self) -> Node {
+        let global_str = if self.global {
+            String::new()
+        } else {
+            format!(", {}", "local".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2))
+        };
+        let params_str = if self.params.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = self.params.iter().map(|p| {
+                p.0.truecolor(CREAM.0, CREAM.1, CREAM.2).to_string()
+            }).collect();
+            format!("({})", names.join(", "))
+        };
         let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
         Node::branch(
             format!(
-                "{}: {}",
+                "{}: {}{}{}",
                 "FunctionDefinition".truecolor(TEAL.0, TEAL.1, TEAL.2),
-                self.name
+                self.name.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2),
+                params_str,
+                global_str
             ),
             body_children,
         )
@@ -173,12 +189,18 @@ impl ItfDisplay for TackyFunctionDefinition {
 // Codegen function definition - compact format
 impl ItfDisplay for CodegenFunctionDefinition {
     fn itf_node(&self) -> Node {
+        let global_str = if self.global {
+            String::new()
+        } else {
+            format!(", {}", "local".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2))
+        };
         let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
         Node::branch(
             format!(
-                "{}: {}",
+                "{}: {}{}",
                 "FunctionDefinition".truecolor(TEAL.0, TEAL.1, TEAL.2),
-                self.name
+                self.name.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2),
+                global_str
             ),
             body_children,
         )
@@ -323,6 +345,20 @@ impl ItfDisplay for Type {
                 )
             }
         }
+    }
+}
+
+impl ItfDisplay for StorageClass {
+    fn itf_node(&self) -> Node {
+        let label = match self {
+            StorageClass::Static => "static",
+            StorageClass::Extern => "extern",
+        };
+        Node::leaf(
+            format!("storage_class: {}", label)
+                .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2)
+                .to_string(),
+        )
     }
 }
 
@@ -508,17 +544,36 @@ impl ItfDisplay for Stmt {
                     children,
                 )
             }
-            Stmt::Switch(expr, body, label, _) => Node::branch(
-                format!(
-                    "{} [label: {}]",
-                    "Switch".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
-                    label
-                ),
-                vec![
+            Stmt::Switch(expr, body, label, cases) => {
+                let cases_str = cases
+                    .iter()
+                    .map(|(c, _span)| match c {
+                        SwitchIntType::Int(v) => format!("{v}"),
+                        SwitchIntType::Long(v) => format!("{v}L"),
+                        SwitchIntType::Default => "default".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut children = vec![
                     Node::branch("expr:", vec![expr.itf_node()]),
                     Node::branch("body:", vec![body.stmt.itf_node()]),
-                ],
-            ),
+                ];
+                if !cases.is_empty() {
+                    children.push(Node::leaf(
+                        format!("cases: [{}]", cases_str)
+                            .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+                            .to_string(),
+                    ));
+                }
+                Node::branch(
+                    format!(
+                        "{} [label: {}]",
+                        "Switch".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                        label
+                    ),
+                    children,
+                )
+            }
             Stmt::Case(expr, stmt, label) => {
                 let header = if label.0.is_empty() {
                     "Case".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()
@@ -561,6 +616,9 @@ impl ItfDisplay for VarDeclaration {
             Node::leaf(format!("name: {}", self.name.itf_node().text)),
             Node::branch("type:", vec![self.var_type.itf_node()]),
         ];
+        if let Some(sc) = &self.storage_class {
+            children.push(sc.itf_node());
+        }
         if let Some(init_expr) = &self.init {
             children.push(Node::branch("init:", vec![init_expr.itf_node()]));
         }
@@ -577,6 +635,9 @@ impl ItfDisplay for FunDeclaration {
             Node::leaf(format!("name: {}", self.name.itf_node().text)),
             Node::branch("type:", vec![self.fun_type.itf_node()]),
         ];
+        if let Some(sc) = &self.storage_class {
+            children.push(sc.itf_node());
+        }
         if !self.params.is_empty() {
             let param_nodes: Vec<Node> = self.params.iter().map(|p| p.itf_node()).collect();
             children.push(Node::branch("params:", param_nodes));
@@ -693,15 +754,26 @@ impl ItfDisplay for TackyInstruction {
 
 impl ItfDisplay for StaticVariable {
     fn itf_node(&self) -> Node {
+        let type_str = format!("{:?}", self.var_type)
+            .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2);
         let init_str = match &self.init {
-            VarInit::Defined(v) => format!("init: {:?}", v),
-            VarInit::Extern => "extern".to_string(),
+            VarInit::Defined(v) => format!("init: {:?}", v)
+                .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+                .to_string(),
+            VarInit::Extern => "extern"
+                .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2)
+                .to_string(),
         };
-        let global_str = if self.global { ", global" } else { "" };
+        let global_str = if self.global {
+            format!(", {}", "global".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2))
+        } else {
+            String::new()
+        };
         Node::leaf(format!(
-            "{}: {} ({}{})",
+            "{}: {} ({}, {}{})",
             "StaticVariable".truecolor(TEAL.0, TEAL.1, TEAL.2),
-            self.name,
+            self.name.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2),
+            type_str,
             init_str,
             global_str
         ))
@@ -711,15 +783,23 @@ impl ItfDisplay for StaticVariable {
 impl ItfDisplay for crate::codegen::StaticVariable {
     fn itf_node(&self) -> Node {
         let init_str = match &self.init {
-            VarInit::Defined(v) => format!("init: {:?}", v),
-            VarInit::Extern => "extern".to_string(),
+            VarInit::Defined(v) => format!("init: {:?}", v)
+                .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
+                .to_string(),
+            VarInit::Extern => "extern"
+                .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2)
+                .to_string(),
         };
-        let global_str = if self.global { ", global" } else { "" };
+        let global_str = if self.global {
+            format!(", {}", "global".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2))
+        } else {
+            String::new()
+        };
         Node::leaf(format!(
             "{}: {} (align: {}, {}{})",
             "StaticVariable".truecolor(TEAL.0, TEAL.1, TEAL.2),
-            self.name,
-            self.alignment,
+            self.name.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2),
+            self.alignment.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2),
             init_str,
             global_str
         ))

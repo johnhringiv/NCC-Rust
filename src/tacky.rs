@@ -1,3 +1,39 @@
+//! # Tackifier — Typed AST to Three-Address Code IR (TACKY)
+//!
+//! Flattens the typed AST into TACKY, a linear three-address code intermediate
+//! representation with explicit control flow via jumps and labels.
+//!
+//! ## Technical Approach
+//!
+//! Each nested expression is recursively decomposed into a sequence of simple
+//! [`Instruction`]s that operate on at most two source [`Val`]s and one destination.
+//! Temporaries are generated via [`NameGenerator`] and tracked in `temp_types` for
+//! downstream passes. Control flow (if/while/for/switch) is lowered to conditional
+//! and unconditional jumps with generated labels.
+//!
+//! ## What This Pass Accomplishes
+//!
+//! - Flattens nested expressions into linear instruction sequences
+//! - Makes all control flow explicit (no structured if/while/for in output)
+//! - Implements short-circuit evaluation for `&&` and `||`
+//! - Implements left-to-right evaluation by capturing operands to temporaries
+//! - Lowers switch statements to cascading equality comparisons with jumps
+//! - Extracts static variables from the [`SymbolTable`] into [`StaticVariable`] entries
+//! - Ensures every function ends with a `Return` (inserts default `return 0` if missing)
+//!
+//! ## Call Order
+//!
+//! ```text
+//! tackify_program()                     — public entry point
+//!   ├─ tackify_function()               — per function (with body only)
+//!   │    └─ tackify_block()             — process compound statements
+//!   │         ├─ tackify_var_declaration() — emit local var initializers (skip static/extern)
+//!   │         └─ tackify_stmt()         — lower statements to jumps/labels
+//!   │              └─ tackify_expr()    — core: flatten expressions to instructions
+//!   │                   └─ emit_cast()  — int<->long conversion instructions
+//!   └─ convert_symbols_to_tacky()       — extract static vars from symbol table
+//! ```
+
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 use crate::parser;
