@@ -685,12 +685,12 @@ fn tackify_function(
 
 /// Converts static variables from the symbol table into TACKY IR definitions.
 ///
-/// Iterates through all symbols and emits `StaticVariable` entries for variables
-/// with static storage duration:
-/// - `VarInit::Defined(value)` for defined variables (Initial or Tentative)
-/// - `VarInit::Extern` for extern declarations (defined elsewhere)
+/// Extracts static variables from the symbol table into TACKY IR `StaticVariable` entries.
 ///
-/// Tentative definitions are initialized to 0.
+/// - `Initial` → `VarInit::Defined(value)`
+/// - `Tentative` → `VarInit::Defined(0)` (zero-initialized)
+/// - `NoInitializer` → `VarInit::Extern` (resolved by linker), but only for file-scope
+///   names (skips renamed locals like `i.1` which contain a dot)
 fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
     let mut tacky_defs = vec![];
     for (name, entry) in symbols.iter() {

@@ -173,6 +173,12 @@ fn get_assembly_type(
     }
 }
 
+/// Emits instructions for a function call following the System V AMD64 ABI.
+///
+/// First 6 integer arguments go in registers (RDI, RSI, RDX, RCX, R8, R9).
+/// Remaining arguments are pushed onto the stack in reverse order.
+/// Stack is padded to maintain 16-byte alignment before the call.
+/// The return value is moved from RAX to the destination.
 fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val, symbols: &BackendSymbolTable) -> Vec<Instruction> {
     let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
     let (register_args, stack_args) = args.split_at(args.len().min(6));
@@ -417,6 +423,11 @@ fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
     }
 }
 
+/// Converts a TACKY function definition to x86-64 assembly instructions.
+///
+/// Emits parameter moves (from registers/stack to pseudo-registers) followed
+/// by the converted body instructions. First 6 params come from registers,
+/// the rest from stack positions above the saved RBP and return address.
 //todo should this consume FunctionDefination
 fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTable) -> FunctionDefinition {
     let tacky::FunctionDefinition {
@@ -461,6 +472,10 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
     }
 }
 
+/// Backend symbol table entry mapping identifiers to their assembly-level properties.
+///
+/// Tracks whether a symbol is an object (variable) or function, along with
+/// the assembly type (Longword/Quadword) needed for instruction sizing.
 pub enum AsmSymbolEntry {
     Obj {
         asm_type: AssemblyType,
@@ -486,6 +501,10 @@ impl BackendSymbolTableExt for BackendSymbolTable {
     }
 }
 
+/// Builds the backend symbol table from the frontend symbol table and TACKY IR.
+///
+/// Maps all symbols to their assembly types: frontend symbols (variables and functions)
+/// from the validator's symbol table, plus TACKY temporaries from each function definition.
 fn build_backend_symbol_table(ast: &tacky::Program, symbols: &SymbolTable) -> BackendSymbolTable {
     let mut backend = BackendSymbolTable::new();
     let static_names: HashSet<&str> = ast.static_vars.iter()
@@ -527,28 +546,13 @@ fn convert_static_var(static_var:TackyStaticVariable) -> StaticVariable {
     }
 }
 
-// //todo use this and refactor backend generation
-// fn convert_static_vars(static_vars: Vec<tacky::StaticVariable>) -> (Vec<StaticVariable>, HashSet<String>) {
-//     static_vars.into_iter()
-//         .map(|sv| {
-//             let name = sv.name.clone();
-//             let converted = StaticVariable {
-//                 name: sv.name,
-//                 global: sv.global,
-//                 alignment: AssemblyType::from(&sv.var_type).size(),
-//                 init: sv.init,
-//             };
-//             (converted, name)
-//         })
-//         .unzip()
-// }
-
-
 /// Converts TACKY IR to x86-64 assembly AST.
 ///
-/// Performs several passes: converts TACKY to assembly instructions,
-/// replaces pseudo-registers with stack slots (or Data operands for statics),
-/// fixes invalid instruction operand combinations, and coalesces consecutive labels.
+/// Performs four passes:
+/// 1. Instruction selection: converts TACKY instructions to assembly
+/// 2. Pseudo-register replacement: assigns stack slots to locals, Data operands to statics
+/// 3. Fix-up: rewrites invalid x86-64 operand combinations (e.g., memory-to-memory)
+/// 4. Label coalescing: merges consecutive labels to reduce jump targets
 pub fn generate(ast: tacky::Program, symbols: &SymbolTable) -> (Program, BackendSymbolTable) {
     let backend_symbol_table = build_backend_symbol_table(&ast, symbols);
     let functions = ast.function_defs.iter().map(|f| {convert_function(f, &backend_symbol_table)}).collect();
@@ -578,6 +582,9 @@ impl<'a> StackMapping<'a> {
         }
     }
 
+    /// Returns the stack operand for a pseudo-register, allocating a new slot if needed.
+    ///
+    /// Stack grows downward: each new allocation decrements the offset by the type's size.
     fn get_stack_location(&mut self, pseudo: &str, asm_type: AssemblyType ) -> Operand {
         let offset_option = self.stack_mapping.get(pseudo);
         let offset = match offset_option {

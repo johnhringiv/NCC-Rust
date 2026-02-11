@@ -116,6 +116,10 @@ pub enum InitialValue {
     NoInitializer,
 }
 
+/// A compile-time integer value for static variable initializers.
+///
+/// Carries both the value and its type so that zero-initialized `.bss` vs
+/// initialized `.data` placement can be decided later in emission.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StaticInt {
     IntInit(i32),
@@ -622,6 +626,12 @@ fn convert_to(exp: TypedExpression, t: &Type) -> TypedExpression {
     }
 }
 
+/// Type-checks an expression, returning a `TypedExpression` with a resolved type.
+///
+/// Inserts implicit casts where operand types differ (using the common-type rule),
+/// with special cases: logical ops always produce `Int`, bitshifts keep the left operand's
+/// type, comparisons produce `Int`, and assignments convert the RHS to the LHS type.
+/// Validates function call arity and argument types against the symbol table.
 fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpression, SemanticError> {
     match exp {
         ParserExpr::Var(Identifier(name), span) => {
@@ -879,6 +889,10 @@ fn typecheck_function_declaration(decl: &FunDeclaration, symbols: &mut SymbolTab
     }
 }
 
+/// Type-checks a block (compound statement), processing declarations and statements in order.
+///
+/// Variable declarations are type-checked as locals; function declarations in blocks
+/// are validated but produce no output (bodies are forbidden, enforced in the resolve phase).
 fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Type) -> Result<Block, SemanticError> {
     let mut typed_items = Vec::with_capacity(block.len());
     for item in block {
@@ -900,6 +914,11 @@ fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Typ
     Ok(typed_items)
 }
 
+/// Type-checks a statement, recursively processing nested expressions and sub-statements.
+///
+/// `ret_type` is the enclosing function's return type, used to insert implicit casts
+/// on `return` expressions. Switch statements normalize case values to the controlling
+/// expression's type and check for duplicates.
 fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) -> Result<Stmt, SemanticError> {
     match stmt {
         ParserStmt::Return(e1) => {
@@ -1004,6 +1023,12 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
     }
 }
 
+/// Resolves variable names in an expression to their unique renamed identifiers.
+///
+/// Mutates the AST in place, replacing each `Var` name with its renamed counterpart
+/// from `variable_map`. Tracks used variables in `used_vars` (for `-Wunused-parameter`).
+/// Also validates lvalue requirements: assignments and pre/postfix operators must
+/// target variables. Function calls are checked for shadowing by local variables.
 fn resolve_exp(
     exp: &mut ParserExpr,
     variable_map: &HashMap<String, VarInfo>,

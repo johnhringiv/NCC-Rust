@@ -8,8 +8,9 @@ A (**N**ot **C**ompletely) **C** compiler written in Rust, inspired by Sandler's
 NCC is a full pipeline compiler, going from lexing all the way down to x86-64 machine code emission and linking.
 Machine code is encoded directly using [iced-x86](https://github.com/icedland/iced) and emitted to ELF/Mach-O
 object files via the [object](https://github.com/gimli-rs/object) crate—no external assembler required.
-A substantial subset of C is supported, including functions, static variables, all control flow statements, and
-bitwise operations. Additionally, NCC supports developer-friendly warnings and pretty-printing of each compiler pass.
+A substantial subset of C is supported, including `int` and `long` types, functions, static variables, all control
+flow statements, and bitwise operations. Additionally, NCC supports developer-friendly warnings and pretty-printing
+of each compiler pass.
 Runs on Linux and macOS (Intel).
 
 ## Example
@@ -211,8 +212,9 @@ The compiler currently implements a subset of C with the following grammar:
 <declaration> ::= <variable-declaration> | <function-declaration>
 <variable-declaration> ::= { <specifier> }+ <identifier> [ "=" <exp> ] ";"
 <function-declaration> ::= { <specifier> }+ <identifier> "(" <param-list> ")" ( <block> | ";" )
-<param-list> ::= "void" | "int" <identifier> { "," "int" <identifier> }
-<specifier> ::= "int" | "static" | "extern"
+<param-list> ::= "void" | <type> <identifier> { "," <type> <identifier> }
+<type> ::= "int" | "long"
+<specifier> ::= <type> | "static" | "extern"
 <block> ::= "{" { <block-item> } "}"
 <block-item> ::= <statement> | <declaration>
 <for-init> ::= <variable-declaration> | [ <exp> ] ";"
@@ -233,7 +235,8 @@ The compiler currently implements a subset of C with the following grammar:
             | ";"
 <exp> ::= <factor> | <exp> <binop> <exp> | <exp> <assign-op> <exp>
        | <exp> "?" <exp> ":" <exp> | <exp> "++" | <exp> "--"
-<factor> ::= <int> | <identifier> | <unop> <factor> | "++" <factor> | "--" <factor> | "(" <exp> ")"
+<factor> ::= <int> | <long> | <identifier> | <unop> <factor> | "++" <factor> | "--" <factor>
+          | "(" <type> ")" <factor> | "(" <exp> ")"
           | <identifier> "(" [ <argument-list> ] ")"
 <argument-list> ::= <exp> { "," <exp> }
 <unop> ::= "-" | "~" | "!"
@@ -241,7 +244,8 @@ The compiler currently implements a subset of C with the following grammar:
          | "==" | "!=" | "<" | "<=" | ">" | ">="
 <assign-op> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
 <identifier> ::= ? An identifier token ?
-<int> ::= ? A constant token ?
+<int> ::= ? An integer constant token ?
+<long> ::= ? A long integer constant token (suffix 'l' or 'L') ?
 ```
 
 ### Supported Features
@@ -257,6 +261,7 @@ The compiler supports:
   functions
 - **Compound statements (blocks)**: `{ ... }` with proper scoping
 - **Variable scoping**: Block-local variables with shadowing support
+- **Type system**: `int` (32-bit) and `long` (64-bit) with implicit conversions and explicit casts
 - **Integer arithmetic**: addition, subtraction, multiplication, division, modulo
 - **Bitwise operations**: AND (`&`), OR (`|`), XOR (`^`), complement (`~`), left/right shift (`<<`, `>>`)
 - **Logical operations**: AND (`&&`), OR (`||`), NOT (`!`) with short-circuit evaluation
@@ -282,8 +287,8 @@ NCC provides several safety features and guarantees to help developers write mor
 
 #### Guaranteed Behaviors
 
-- **Deterministic integer overflow**: Integer arithmetic uses two's complement wrapping (32-bit). For example,
-  `INT_MAX + 1` reliably wraps to `INT_MIN`.
+- **Deterministic integer overflow**: Integer arithmetic uses two's complement wrapping (`int`: 32-bit, `long`: 64-bit).
+  For example, `INT_MAX + 1` reliably wraps to `INT_MIN`.
 - **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from
   evaluation order.
 - **Type conversions**: Converting `long` to `int` truncates to the lower 32 bits using two's complement representation,

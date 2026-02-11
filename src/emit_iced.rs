@@ -505,6 +505,10 @@ fn gpr64_reg(reg: &Reg) -> AsmRegister64 {
     }
 }
 
+/// Constructs a sized memory operand for a stack slot at `[rbp + offset]`.
+///
+/// Returns a `dword ptr` (Longword) or `qword ptr` (Quadword) memory reference.
+/// Handles negative offsets via subtraction to satisfy iced-x86's operand API.
 fn mem_rbp(offset: i32, asm_ty: AssemblyType) -> AsmMemoryOperand {
     let pos = if offset >= 0 {
         gpr64::rbp + offset

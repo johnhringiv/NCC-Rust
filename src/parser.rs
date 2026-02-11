@@ -398,6 +398,11 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
     }
 }
 
+/// Parses an integer literal token into a constant expression.
+///
+/// `ConstantInt` tokens (no suffix) try `i32` first, promoting to `i64` on overflow.
+/// `ConstantLong` tokens (e.g., `L` suffix) parse directly as `i64`.
+/// Returns an error if the value doesn't fit in 64 bits.
 fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
     match &token.token {
         Token::ConstantInt(value_str) => {
@@ -598,6 +603,10 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
     Ok(left)
 }
 
+/// Resolves a list of type-specifier tokens into a `Type`.
+///
+/// Accepts `int`, `long`, `long int`, and `int long` (order-independent).
+/// Returns an error for empty or invalid specifier combinations.
 fn parse_type(specifier_list: &Vec<Token>, err_span: &Option<Span>) -> Result<Type, SyntaxError> {
     match specifier_list.as_slice() {
         [Token::IntKeyword] => Ok(Type::Int),
@@ -608,6 +617,10 @@ fn parse_type(specifier_list: &Vec<Token>, err_span: &Option<Span>) -> Result<Ty
     }
 }
 
+/// Splits a declaration's specifier list into a `Type` and an optional `StorageClass`.
+///
+/// Separates type specifiers (`int`, `long`) from storage-class specifiers (`static`, `extern`),
+/// then delegates to `parse_type` for type resolution. Errors on duplicate storage classes.
 fn parse_type_and_storage_class(
     specifier_list: &Vec<SpannedToken>,
 ) -> Result<(Type, Option<StorageClass>), SyntaxError> {
@@ -898,6 +911,10 @@ fn switch_unreachable_check(stmt: &SpannedStmt) {
     }
 }
 
+/// Guards against declarations appearing where only statements are allowed.
+///
+/// Peeks at the next token and returns an error if it starts a declaration (type or
+/// storage-class keyword). Used after labels, where C requires a statement, not a declaration.
 fn declaration_check(tokens: &VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
     if matches!(
         tokens.front().map(|t| &t.token),
@@ -1002,6 +1019,10 @@ fn parse_arg_comma(tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxErro
     Ok(())
 }
 
+/// Parses a function's parameter list (after the opening parenthesis).
+///
+/// Handles `void` for no parameters, or a comma-separated list of typed parameters.
+/// Consumes the closing `)`. Returns parallel vecs of parameter names and their types.
 fn parse_function_params(
     tokens: &mut VecDeque<SpannedToken>,
     err_span: &Option<Span>,

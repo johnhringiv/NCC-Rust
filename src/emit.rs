@@ -112,6 +112,10 @@ fn emit_operand(operand: &Operand, reg_width: &RegWidth) -> String {
     output
 }
 
+/// Emits AT&T-syntax x86-64 assembly text for a single instruction.
+///
+/// `fn_name` is used to prefix labels and jump targets, ensuring they are scoped
+/// to the enclosing function (e.g., `main.label0`).
 fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
     let mut output = String::new();
     match ins {
@@ -236,6 +240,12 @@ fn emit_function(fun_def: &FunctionDefinition) -> String {
     output
 }
 
+/// Emits a static variable as AT&T-syntax assembly directives.
+///
+/// Places zero-initialized variables in `.bss` and non-zero variables in `.data`,
+/// with appropriate alignment and size directives (`.long` for int, `.quad` for long).
+/// Extern variables (unresolved by the linker) produce no output.
+/// On macOS, symbol names are prefixed with `_`.
 fn emit_static_variable(sv: &StaticVariable) -> String {
     let mut output = String::new();
     let StaticVariable { name, global, init, alignment } = sv;
