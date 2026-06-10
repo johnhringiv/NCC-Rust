@@ -11,7 +11,7 @@ object files via the [object](https://github.com/gimli-rs/object) crate—no ext
 A substantial subset of C is supported, including `int` and `long` types, functions, static variables, all control
 flow statements, and bitwise operations. Additionally, NCC supports developer-friendly warnings and pretty-printing
 of each compiler pass.
-Runs on Linux and macOS (Intel).
+Runs on Linux and macOS.
 
 ## Example
 

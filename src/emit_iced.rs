@@ -319,7 +319,17 @@ fn emit_object_with_labels(
         obj.append_section_data(note_stack, &[], 1);
         obj
     } else {
-        Object::new(BinaryFormat::MachO, Architecture::X86_64, Endianness::Little)
+        let mut obj = Object::new(BinaryFormat::MachO, Architecture::X86_64, Endianness::Little);
+        // Without an LC_BUILD_VERSION load command, macOS `ld` warns
+        // "no platform load command found ... assuming: macOS". Emit one targeting
+        // macOS 11.0. MachOBuildVersion is #[non_exhaustive], so build via Default
+        // then set fields. minos/sdk use the nibble-packed XXXX.YY.ZZ form (11.0 = 11 << 16).
+        let mut build_version = object::write::MachOBuildVersion::default();
+        build_version.platform = object::macho::PLATFORM_MACOS;
+        build_version.minos = 11 << 16;
+        build_version.sdk = 11 << 16;
+        obj.set_macho_build_version(build_version);
+        obj
     };
 
     obj.add_file_symbol(b"ncc".to_vec());

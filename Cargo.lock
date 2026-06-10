@@ -731,6 +731,7 @@ dependencies = [
  "iced-x86",
  "libwild",
  "object 0.38.0",
+ "rayon",
  "regex",
  "serde_json",
 ]

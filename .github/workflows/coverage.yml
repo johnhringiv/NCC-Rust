@@ -10,13 +10,26 @@ env:
 
 jobs:
   coverage:
-    runs-on: ubuntu-latest
-    
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            flag: linux
+          - os: macos-latest
+            flag: macos
+
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
-    
+
+    # ncc emits x86-64 machine code; on arm64 macOS runners the test binaries run under Rosetta.
+    - name: Install Rosetta
+      if: matrix.os == 'macos-latest'
+      run: softwareupdate --install-rosetta --agree-to-license
+
     - name: Cache cargo and build
       uses: actions/cache@v4
       with:
@@ -28,15 +41,14 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-
-    
+
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: llvm-tools-preview
-    
-    # Generate code coverage with llvm-cov
+
     - name: Install cargo-llvm-cov
-      run: if ! command -v cargo-llvm-cov >/dev/null; then cargo install cargo-llvm-cov; fi
-    
+      uses: taiki-e/install-action@cargo-llvm-cov
+
     - name: Run tests with coverage
       working-directory: ${{ github.workspace }}
       run: cargo llvm-cov --ignore-filename-regex pretty.rs --lcov --output-path lcov.info --workspace --all-features --no-fail-fast
@@ -46,5 +58,6 @@ jobs:
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ./lcov.info
+        flags: ${{ matrix.flag }}
         verbose: true
         slug: johnhringiv/NCC-Rust

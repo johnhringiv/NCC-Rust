@@ -418,7 +418,11 @@ fn main() {
             let asm_file = path.with_extension("s").to_string_lossy().to_string();
             fs::write(&asm_file, asm).expect("Failed to write assembly file");
 
-            let status = std::process::Command::new("as")
+            let mut cmd = std::process::Command::new("as");
+            // On arm64 hosts the system assembler must be told to target x86_64.
+            #[cfg(target_arch = "aarch64")]
+            cmd.args(["-arch", "x86_64"]);
+            let status = cmd
                 .arg(&asm_file)
                 .arg("-o")
                 .arg(&obj_file)
@@ -443,7 +447,11 @@ fn main() {
         let path = Path::new(asm_file);
         let obj_file = path.with_extension("o").to_string_lossy().to_string();
 
-        let status = std::process::Command::new("as")
+        let mut cmd = std::process::Command::new("as");
+        // On arm64 hosts the system assembler must be told to target x86_64.
+        #[cfg(target_arch = "aarch64")]
+        cmd.args(["-arch", "x86_64"]);
+        let status = cmd
             .arg(asm_file)
             .arg("-o")
             .arg(&obj_file)

@@ -23,6 +23,22 @@ struct TestCase {
     output: ProgramOutput,
 }
 
+/// Accumulated pass/fail tallies for a single case (a case may run several sub-tests).
+#[derive(Debug, Default)]
+struct CaseResult {
+    passed: usize,
+    failed: usize,
+    failures: Vec<String>,
+}
+
+impl CaseResult {
+    fn merge(&mut self, other: CaseResult) {
+        self.passed += other.passed;
+        self.failed += other.failed;
+        self.failures.extend(other.failures);
+    }
+}
+
 /// Load assembly_libs from test_properties.json
 fn load_assembly_libs() -> HashMap<String, Vec<String>> {
     let json_content = fs::read_to_string("writing-a-c-compiler-tests/test_properties.json").unwrap_or_default();
@@ -246,14 +262,7 @@ fn load_expected(json_path: &str) -> Result<HashMap<String, ExpectedResult>, Box
     Ok(results)
 }
 
-fn run_test(
-    case: &TestCase,
-    total_passed: &mut usize,
-    total_failed: &mut usize,
-    failed_tests: &mut Vec<String>,
-    extra_args: &[String],
-    test_label: &str,
-) {
+fn run_test(case: &TestCase, result: &mut CaseResult, extra_args: &[String], test_label: &str) {
     let path = std::path::Path::new(&case.c_file);
     let binary_path = path.with_extension("");
     let binary_path_str = binary_path.to_str().unwrap();
@@ -324,15 +333,17 @@ fn run_test(
     };
 
     if passed {
-        *total_passed += 1;
+        result.passed += 1;
     } else {
-        *total_failed += 1;
+        result.failed += 1;
         let label = if test_label.is_empty() {
             case.c_file.clone()
         } else {
             format!("{} [{}]", case.c_file, test_label)
         };
-        failed_tests.push(format!("{} (expected {:?}, got {:?})", label, case.output, actual));
+        result
+            .failures
+            .push(format!("{} (expected {:?}, got {:?})", label, case.output, actual));
     }
 }
 
@@ -342,9 +353,7 @@ fn run_library_cross_test(
     client_file: &str,
     library_file: &str,
     expected: &ProgramOutput,
-    total_passed: &mut usize,
-    total_failed: &mut usize,
-    failed_tests: &mut Vec<String>,
+    result: &mut CaseResult,
     ncc_compiles_client: bool,
 ) {
     let ncc_path = get_ncc_binary_path();
@@ -371,28 +380,28 @@ fn run_library_cross_test(
             .arg(&client_obj)
             .status()
     } else {
-        std::process::Command::new("gcc")
-            .arg("-c")
-            .arg(client_file)
-            .arg("-o")
-            .arg(&client_obj)
-            .status()
+        let mut cmd = std::process::Command::new("gcc");
+        // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
+        #[cfg(target_arch = "aarch64")]
+        cmd.args(["-arch", "x86_64"]);
+        cmd.arg("-c").arg(client_file).arg("-o").arg(&client_obj).status()
     };
 
     if client_status.is_err() || !client_status.unwrap().success() {
-        *total_failed += 1;
-        failed_tests.push(format!("{} [{}] (client compilation failed)", client_file, test_label));
+        result.failed += 1;
+        result
+            .failures
+            .push(format!("{} [{}] (client compilation failed)", client_file, test_label));
         return;
     }
 
     // Compile library
     let library_status = if ncc_compiles_client {
-        std::process::Command::new("gcc")
-            .arg("-c")
-            .arg(library_file)
-            .arg("-o")
-            .arg(&library_obj)
-            .status()
+        let mut cmd = std::process::Command::new("gcc");
+        // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
+        #[cfg(target_arch = "aarch64")]
+        cmd.args(["-arch", "x86_64"]);
+        cmd.arg("-c").arg(library_file).arg("-o").arg(&library_obj).status()
     } else {
         std::process::Command::new(&ncc_path)
             .arg("-c")
@@ -404,13 +413,19 @@ fn run_library_cross_test(
 
     if library_status.is_err() || !library_status.unwrap().success() {
         std::fs::remove_file(&client_obj).ok();
-        *total_failed += 1;
-        failed_tests.push(format!("{} [{}] (library compilation failed)", client_file, test_label));
+        result.failed += 1;
+        result
+            .failures
+            .push(format!("{} [{}] (library compilation failed)", client_file, test_label));
         return;
     }
 
     // Link with gcc
-    let link_status = std::process::Command::new("gcc")
+    let mut link_cmd = std::process::Command::new("gcc");
+    // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
+    #[cfg(target_arch = "aarch64")]
+    link_cmd.args(["-arch", "x86_64"]);
+    let link_status = link_cmd
         .arg(&client_obj)
         .arg(&library_obj)
         .arg("-o")
@@ -421,8 +436,10 @@ fn run_library_cross_test(
     std::fs::remove_file(&library_obj).ok();
 
     if link_status.is_err() || !link_status.unwrap().success() {
-        *total_failed += 1;
-        failed_tests.push(format!("{} [{}] (linking failed)", client_file, test_label));
+        result.failed += 1;
+        result
+            .failures
+            .push(format!("{} [{}] (linking failed)", client_file, test_label));
         return;
     }
 
@@ -470,94 +487,95 @@ fn run_library_cross_test(
     };
 
     if passed {
-        *total_passed += 1;
+        result.passed += 1;
     } else {
-        *total_failed += 1;
-        failed_tests.push(format!(
+        result.failed += 1;
+        result.failures.push(format!(
             "{} [{}] (expected {:?}, got {:?})",
             client_file, test_label, expected, actual
         ));
     }
 }
 
-fn run_cases(cases: Vec<TestCase>) {
-    let mut total_passed = 0;
-    let mut total_failed = 0;
-    let mut failed_tests = Vec::new();
+/// Runs all sub-tests for a single case and returns its tally. Pure with respect to shared
+/// state (output files are derived from the case's own source path, so cases don't collide),
+/// which lets `run_cases` evaluate cases concurrently.
+fn run_one_case(case: &TestCase) -> CaseResult {
+    let mut result = CaseResult::default();
+    let is_library_test = case.c_file.contains("/libraries/") && case.c_file.ends_with("_client.c");
 
-    for case in &cases {
-        let is_library_test = case.c_file.contains("/libraries/") && case.c_file.ends_with("_client.c");
-
-        match &case.output {
-            ProgramOutput::Error(_) => {
-                run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[], "");
-            }
-            ProgramOutput::Result { .. } => {
-                // For library tests, use cross-compilation to validate ABI compliance
-                if is_library_test {
-                    if let Some(library_file) = case.extra_files.first() {
-                        // Test 1: ncc compiles client, gcc compiles library (validates ncc as caller)
-                        run_library_cross_test(
-                            &case.c_file,
-                            library_file,
-                            &case.output,
-                            &mut total_passed,
-                            &mut total_failed,
-                            &mut failed_tests,
-                            true,
-                        );
-                        // Test 2: gcc compiles client, ncc compiles library (validates ncc as callee)
-                        run_library_cross_test(
-                            &case.c_file,
-                            library_file,
-                            &case.output,
-                            &mut total_passed,
-                            &mut total_failed,
-                            &mut failed_tests,
-                            false,
-                        );
-                    }
-                } else {
-                    // Standard test: compile everything with ncc
-                    run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[], "");
-                    run_test(
-                        case,
-                        &mut total_passed,
-                        &mut total_failed,
-                        &mut failed_tests,
-                        &["--no-iced".to_string()],
-                        "no-iced",
-                    );
+    match &case.output {
+        ProgramOutput::Error(_) => {
+            run_test(case, &mut result, &[], "");
+        }
+        ProgramOutput::Result { .. } => {
+            // For library tests, use cross-compilation to validate ABI compliance
+            if is_library_test {
+                if let Some(library_file) = case.extra_files.first() {
+                    // Test 1: ncc compiles client, gcc compiles library (validates ncc as caller)
+                    run_library_cross_test(&case.c_file, library_file, &case.output, &mut result, true);
+                    // Test 2: gcc compiles client, ncc compiles library (validates ncc as callee)
+                    run_library_cross_test(&case.c_file, library_file, &case.output, &mut result, false);
                 }
+            } else {
+                // Standard test: compile everything with ncc
+                run_test(case, &mut result, &[], "");
+                // The --no-iced text emitter forks an extra `as` per test, doubling
+                // process count. Codecov unions coverage across the CI matrix, so emit.rs
+                // stays fully covered by the Linux job; only run it there. (A single
+                // non-linux --no-iced smoke test below keeps the arm64 `as` shim covered.)
+                #[cfg(target_os = "linux")]
+                run_test(case, &mut result, &["--no-iced".to_string()], "no-iced");
             }
         }
     }
-    // takes too long to do this for all cases
+
+    result
+}
+
+fn run_cases(cases: Vec<TestCase>) {
+    use rayon::prelude::*;
+
+    // Evaluate cases in parallel. rayon's global pool bounds total concurrency across all
+    // test functions. `collect` preserves input order, so the sequential merge below lists
+    // failures deterministically regardless of completion order.
+    let per_case: Vec<CaseResult> = cases.par_iter().map(run_one_case).collect();
+    let mut tally = CaseResult::default();
+    for r in per_case {
+        tally.merge(r);
+    }
+
+    // takes too long to do this for all cases.
+    // On macOS the default linker is already external `ld` (libwild is linux-only), so this
+    // case is a redundant no-op there — only exercise it on Linux.
+    #[cfg(target_os = "linux")]
     run_test(
         cases.first().unwrap(),
-        &mut total_passed,
-        &mut total_failed,
-        &mut failed_tests,
+        &mut tally,
         &["--external-linker".to_string()],
         "external-linker",
     );
 
-    println!("\n=== C Programs Test Results ===");
-    println!("Passed: {total_passed}");
-    println!("Failed: {total_failed}");
-
-    if !failed_tests.is_empty() {
-        println!("\nFailed tests:");
-        for test in &failed_tests {
-            println!("  - {test}");
-        }
+    // On non-Linux hosts the per-test --no-iced runs are skipped above to avoid forking an
+    // extra `as` per test. Run exactly ONE here so the arm64 `as --arch x86_64` cross-assembly
+    // shim still gets coverage. Pick the first case whose output is a Result and isn't a
+    // _client.c library test (those go through the cross-compilation path, not run_test).
+    #[cfg(not(target_os = "linux"))]
+    if let Some(case) = cases.iter().find(|c| {
+        matches!(c.output, ProgramOutput::Result { .. })
+            && !(c.c_file.contains("/libraries/") && c.c_file.ends_with("_client.c"))
+    }) {
+        run_test(case, &mut tally, &["--no-iced".to_string()], "no-iced-smoke");
     }
 
-    if total_failed > 0 {
-        println!("{total_failed} tests failed")
-    }
-    assert_eq!(total_failed, 0);
-    assert!(total_passed > 0)
+    assert!(
+        tally.failed == 0,
+        "{} of {} sub-tests failed:\n{}",
+        tally.failed,
+        tally.passed + tally.failed,
+        tally.failures.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n")
+    );
+    assert!(tally.passed > 0, "no test cases ran");
 }
 
 #[test]

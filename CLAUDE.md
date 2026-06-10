@@ -112,7 +112,7 @@ Returns `(NameGenerator, SymbolTable)` needed by subsequent passes. Exit code 30
 
 Alternative: `emit.rs` (deprecated `--no-iced` flag) generates text assembly for `as`.
 
-**Linker** (`main.rs`): On Linux, uses [wild](https://github.com/nicholasbishop/wild) for in-process linking. On macOS, shells out to system `ld`. Locates CRT files and libc via the `cc` compiler.
+**Linker** (`main.rs`): On Linux, uses [wild](https://github.com/wild-linker/wild) for in-process linking. On macOS, shells out to system `ld`. Locates CRT files and libc via the `cc` compiler.
 
 ### Key Data Structures
 
@@ -134,7 +134,8 @@ The `pretty.rs` module provides tree-view debug output via the `ItfDisplay` trai
 ## Platform Support
 
 - **Linux**: Full support with libwild linker and static linking
-- **macOS**: Intel Macs only, requires system `ld` linker
+- **macOS**: Intel and Apple Silicon (arm64), requires system `ld` linker. NCC emits x86-64, so on
+  Apple Silicon the external assembler/linker are invoked with `-arch x86_64` and binaries run under Rosetta 2
 - **Windows**: Not supported (WSL works)
 
 ## Testing Strategy
