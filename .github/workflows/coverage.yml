@@ -38,9 +38,9 @@ jobs:
           ~/.cargo/git
           ~/.cargo/bin
           target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-
+          ${{ runner.os }}-cargo-coverage-
 
     - uses: dtolnay/rust-toolchain@stable
       with:
