@@ -550,7 +550,7 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
         params,
         body,
         global,
-        temp_types,
+        temp_types: _,
     } = ast;
     let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
     let mut instructions = vec![];
@@ -590,8 +590,17 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
 /// Tracks whether a symbol is an object (variable) or function, along with
 /// the assembly type (Longword/Quadword) needed for instruction sizing.
 pub enum AsmSymbolEntry {
-    Obj { asm_type: AssemblyType, is_static: bool },
-    Fun { defined: bool },
+    // `is_static` and `defined` are tracked for future use (e.g. RIP-relative
+    // addressing decisions, link-time checks) but not yet read.
+    Obj {
+        asm_type: AssemblyType,
+        #[allow(dead_code)]
+        is_static: bool,
+    },
+    Fun {
+        #[allow(dead_code)]
+        defined: bool,
+    },
 }
 
 pub type BackendSymbolTable = HashMap<Rc<str>, AsmSymbolEntry>;
@@ -918,7 +927,7 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     src,
                     dst,
                     size,
-                } if src.is_memory() || matches!(src, Operand::Imm(val) if val > 255 || val < 0) => {
+                } if src.is_memory() || matches!(src, Operand::Imm(val) if !(0..=255).contains(&val)) => {
                     new_ins.push(Instruction::Mov {
                         src,
                         dst: Operand::Reg(Reg::CX),

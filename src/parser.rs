@@ -234,6 +234,7 @@ impl SwitchIntType {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::enum_variant_names)] // `FunType` reads clearly despite the `Type` suffix
 pub enum Type {
     Int,
     Long,

@@ -359,10 +359,10 @@ fn main() {
             if defined_vars.peek().is_some() {
                 println!();
                 for (sv, init_val) in defined_vars {
-                    let is_zero = match init_val {
-                        validate::StaticInt::IntInit(0) | validate::StaticInt::LongInit(0) => true,
-                        _ => false,
-                    };
+                    let is_zero = matches!(
+                        init_val,
+                        validate::StaticInt::IntInit(0) | validate::StaticInt::LongInit(0)
+                    );
                     let section = if is_zero { ".bss" } else { ".data" };
                     println!("{}", section.cyan());
                     if sv.global {

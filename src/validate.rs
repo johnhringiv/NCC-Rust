@@ -108,7 +108,7 @@ pub enum Stmt {
     While(TypedExpression, Box<Stmt>, u64),
     DoWhile(Box<Stmt>, TypedExpression, u64),
     For(
-        ForInit,
+        Box<ForInit>,
         Option<TypedExpression>,
         Option<TypedExpression>,
         Box<Stmt>,
@@ -205,10 +205,10 @@ impl StaticInt {
         }
     }
 
-    fn to_const(&self) -> Const {
+    fn to_const(self) -> Const {
         match self {
-            StaticInt::IntInit(i) => Const::ConstInt(*i),
-            StaticInt::LongInit(l) => Const::ConstLong(*l),
+            StaticInt::IntInit(i) => Const::ConstInt(i),
+            StaticInt::LongInit(l) => Const::ConstLong(l),
         }
     }
 
@@ -758,7 +758,8 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
             warn_sequence_point(inner, *span, region);
         }
         ParserExpr::Binary(op, lhs, rhs, _) => {
-            if matches!(op, BinOp::And | BinOp::Or) { // sequence points
+            if matches!(op, BinOp::And | BinOp::Or) {
+                // sequence points
                 check_sequence_points(lhs);
                 check_sequence_points(rhs);
             } else {
@@ -772,7 +773,8 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
             check_sequence_points(t);
             check_sequence_points(f);
         }
-        ParserExpr::FunctionCall(_, args, _) => { // args have no sequence points between them
+        ParserExpr::FunctionCall(_, args, _) => {
+            // args have no sequence points between them
             let mut arg_region = HashMap::new();
             for a in args {
                 walk_region(a, &mut arg_region);
@@ -786,8 +788,16 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
 /// subset). A second modification of the same object in the current region is an unsequenced
 /// double-modification — emit `-Wsequence-point`.
 fn warn_sequence_point(target: &ParserExpr, span: Span, region: &mut HashMap<Rc<str>, Span>) {
-    if let ParserExpr::Var(Identifier(name), _) = target && region.insert(name.clone(), span).is_some() {
-        eprintln!("{}: {}: '{}' modified more than once between sequence points (undefined in standard C; NCC evaluates left-to-right) {}", span, "warning".purple(), name, "[-Wsequence-point]".purple())
+    if let ParserExpr::Var(Identifier(name), _) = target
+        && region.insert(name.clone(), span).is_some()
+    {
+        eprintln!(
+            "{}: {}: '{}' modified more than once between sequence points (undefined in standard C; NCC evaluates left-to-right) {}",
+            span,
+            "warning".purple(),
+            name,
+            "[-Wsequence-point]".purple()
+        )
     }
 }
 
@@ -1347,7 +1357,13 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
             let typed_cond = cond.map(|e| typecheck_exp(e, symbols)).transpose()?;
             let typed_post = post.map(|e| typecheck_exp(e, symbols)).transpose()?;
             let typed_body = typecheck_stmt(body.stmt, symbols, ret_type)?;
-            Ok(Stmt::For(typed_init, typed_cond, typed_post, Box::new(typed_body), lbl))
+            Ok(Stmt::For(
+                Box::new(typed_init),
+                typed_cond,
+                typed_post,
+                Box::new(typed_body),
+                lbl,
+            ))
         }
     }
 }
@@ -1617,7 +1633,7 @@ fn resolve_local_var_decoration(
                 ext_link: false,
             },
         );
-        warn_shadow(&name, dec.span, shadow.map(|s| s.span));
+        warn_shadow(name, dec.span, shadow.map(|s| s.span));
         if let Some(init_expr) = &mut dec.init {
             check_sequence_points(init_expr);
             resolve_exp(init_expr, variable_map, used_vars)?;
@@ -1647,11 +1663,11 @@ fn resolve_statement(
         ParserStmt::Return(e) => {
             check_sequence_points(e);
             resolve_exp(e, variable_map, used_vars)
-        },
+        }
         ParserStmt::Expression(e) => {
             check_sequence_points(e);
             resolve_exp(e, variable_map, used_vars)
-        },
+        }
         ParserStmt::Null => Ok(()),
         ParserStmt::If(e, then_stmt, else_stmt) => {
             check_sequence_points(e);

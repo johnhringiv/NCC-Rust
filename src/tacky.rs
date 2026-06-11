@@ -588,7 +588,7 @@ fn tackify_stmt(
             instructions.push(Instruction::Label(break_label));
         }
         Stmt::For(init, condition, post, body, label) => {
-            match init {
+            match init.as_ref() {
                 ForInit::InitDecl(dec) => tackify_var_declaration(dec, instructions, name_generator, temp_types),
                 ForInit::InitExp(exp) => {
                     if let Some(e) = exp {
@@ -702,14 +702,14 @@ fn tackify_var_declaration(
     name_generator: &mut NameGenerator,
     temp_types: &mut HashMap<Rc<str>, Type>,
 ) {
-    if declaration.storage_class.is_none() {
-        if let Some(init_exp) = &declaration.init {
-            let res = tackify_expr(init_exp, instructions, name_generator, temp_types);
-            instructions.push(Instruction::Copy {
-                src: res,
-                dst: Val::Var(declaration.name.0.clone()),
-            });
-        }
+    if declaration.storage_class.is_none()
+        && let Some(init_exp) = &declaration.init
+    {
+        let res = tackify_expr(init_exp, instructions, name_generator, temp_types);
+        instructions.push(Instruction::Copy {
+            src: res,
+            dst: Val::Var(declaration.name.0.clone()),
+        });
     }
 }
 
