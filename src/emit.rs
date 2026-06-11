@@ -14,8 +14,10 @@
 //!   └─ emit_static_variable()   — .data/.bss directives for static vars
 //! ```
 
-use crate::codegen::{AssemblyType, BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, UnaryOp, StaticVariable};
-use crate::tacky::{VarInit};
+use crate::codegen::{
+    AssemblyType, BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, StaticVariable, UnaryOp,
+};
+use crate::tacky::VarInit;
 use crate::validate;
 
 enum RegWidth {
@@ -76,7 +78,7 @@ fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
             Reg::R9 => "r9",
             Reg::R10 => "r10",
             Reg::R11 => "r11",
-            Reg::SP  => "rsp",
+            Reg::SP => "rsp",
         },
     }
 }
@@ -264,7 +266,12 @@ fn emit_function(fun_def: &FunctionDefinition) -> String {
 /// On macOS, symbol names are prefixed with `_`.
 fn emit_static_variable(sv: &StaticVariable) -> String {
     let mut output = String::new();
-    let StaticVariable { name, global, init, alignment } = sv;
+    let StaticVariable {
+        name,
+        global,
+        init,
+        alignment,
+    } = sv;
     let processed_name = if cfg!(target_os = "macos") {
         format!("_{name}")
     } else {

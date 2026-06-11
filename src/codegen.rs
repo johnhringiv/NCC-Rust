@@ -61,10 +61,10 @@
 use crate::parser;
 use crate::parser::{Const, Identifier, Type};
 use crate::tacky;
-use crate::tacky::{BinOp, Val, VarInit, StaticVariable as TackyStaticVariable};
+use crate::tacky::{BinOp, StaticVariable as TackyStaticVariable, Val, VarInit};
+use crate::validate::SymbolTable;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use crate::validate::SymbolTable;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reg {
@@ -77,13 +77,13 @@ pub enum Reg {
     R9,
     R10,
     R11,
-    SP
+    SP,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AssemblyType {
     Longword,
-    Quadword
+    Quadword,
 }
 
 impl AssemblyType {
@@ -166,16 +166,42 @@ pub enum BinaryOp {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
-    Mov { src: Operand, dst: Operand, size: AssemblyType },
-    Movsx { src: Operand, dst: Operand },
-    Unary { op: UnaryOp, dst: Operand, size: AssemblyType },
-    Binary { op: BinaryOp, src: Operand, dst: Operand, size: AssemblyType },
-    Cmp { v1: Operand, v2: Operand, size: AssemblyType },
+    Mov {
+        src: Operand,
+        dst: Operand,
+        size: AssemblyType,
+    },
+    Movsx {
+        src: Operand,
+        dst: Operand,
+    },
+    Unary {
+        op: UnaryOp,
+        dst: Operand,
+        size: AssemblyType,
+    },
+    Binary {
+        op: BinaryOp,
+        src: Operand,
+        dst: Operand,
+        size: AssemblyType,
+    },
+    Cmp {
+        v1: Operand,
+        v2: Operand,
+        size: AssemblyType,
+    },
     Idiv(Operand, AssemblyType),
     Cdq(AssemblyType),
     Jmp(Identifier),
-    JmpCC { code: CondCode, label: Identifier },
-    SetCC { code: CondCode, op: Operand },
+    JmpCC {
+        code: CondCode,
+        label: Identifier,
+    },
+    SetCC {
+        code: CondCode,
+        op: Operand,
+    },
     Label(Identifier),
     Push(Operand),
     Call(Identifier),
@@ -218,19 +244,14 @@ pub struct Program {
     pub static_vars: Vec<StaticVariable>,
 }
 
-fn get_assembly_type(
-    val: &Val,
-    symbols: &BackendSymbolTable
-) -> AssemblyType {
+fn get_assembly_type(val: &Val, symbols: &BackendSymbolTable) -> AssemblyType {
     match val {
         Val::Constant(Const::ConstInt(_)) => AssemblyType::Longword,
         Val::Constant(Const::ConstLong(_)) => AssemblyType::Quadword,
-        Val::Var(name) => {
-            match symbols.get(name).expect("Variable should be in backend symbol table") {
-                AsmSymbolEntry::Obj { asm_type, .. } => *asm_type,
-                AsmSymbolEntry::Fun { .. } => unreachable!("Cannot use function as value"),
-            }
-        }
+        Val::Var(name) => match symbols.get(name).expect("Variable should be in backend symbol table") {
+            AsmSymbolEntry::Obj { asm_type, .. } => *asm_type,
+            AsmSymbolEntry::Fun { .. } => unreachable!("Cannot use function as value"),
+        },
     }
 }
 
@@ -240,17 +261,22 @@ fn get_assembly_type(
 /// Remaining arguments are pushed onto the stack in reverse order.
 /// Stack is padded to maintain 16-byte alignment before the call.
 /// The return value is moved from RAX to the destination.
-fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val, symbols: &BackendSymbolTable) -> Vec<Instruction> {
+fn convert_function_call(
+    fun_name: &Identifier,
+    args: &[Val],
+    dst: &Val,
+    symbols: &BackendSymbolTable,
+) -> Vec<Instruction> {
     let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
     let (register_args, stack_args) = args.split_at(args.len().min(6));
     let mut instructions = Vec::new();
     let stack_padding = if stack_args.len() % 2 != 0 {
         instructions.push(Instruction::Binary {
-                    op: BinaryOp::Sub,
-                    src: Operand::Imm(8),
-                    dst: Operand::Reg(Reg::SP),
-                    size: AssemblyType::Quadword
-                });
+            op: BinaryOp::Sub,
+            src: Operand::Imm(8),
+            dst: Operand::Reg(Reg::SP),
+            size: AssemblyType::Quadword,
+        });
         8
     } else {
         0
@@ -259,7 +285,7 @@ fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val, symbols
         instructions.push(Instruction::Mov {
             src: tacky_arg.into(),
             dst: Operand::Reg(reg),
-            size: get_assembly_type(tacky_arg, symbols)
+            size: get_assembly_type(tacky_arg, symbols),
         });
     }
     for tacky_arg in stack_args.iter().rev() {
@@ -280,12 +306,17 @@ fn convert_function_call(fun_name: &Identifier, args: &[Val], dst: &Val, symbols
 
     let bytes_to_remove = 8 * stack_args.len() as i64 + stack_padding;
     if bytes_to_remove > 0 {
-        instructions.push(Instruction::Binary {op: BinaryOp::Add, src: Operand::Imm(bytes_to_remove), dst: Operand::Reg(Reg::SP), size: AssemblyType::Quadword});
+        instructions.push(Instruction::Binary {
+            op: BinaryOp::Add,
+            src: Operand::Imm(bytes_to_remove),
+            dst: Operand::Reg(Reg::SP),
+            size: AssemblyType::Quadword,
+        });
     }
     instructions.push(Instruction::Mov {
         src: Operand::Reg(Reg::AX),
         dst: dst.into(),
-        size: get_assembly_type(dst, symbols)
+        size: get_assembly_type(dst, symbols),
     });
 
     instructions
@@ -331,8 +362,16 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
             let size = get_assembly_type(src, symbols);
             let op = convert_unary_op(op);
             vec![
-                Instruction::Mov { src: src.into(), dst: dst.into(), size },
-                Instruction::Unary { op, dst: dst.into(), size },
+                Instruction::Mov {
+                    src: src.into(),
+                    dst: dst.into(),
+                    size,
+                },
+                Instruction::Unary {
+                    op,
+                    dst: dst.into(),
+                    size,
+                },
             ]
         }
         tacky::Instruction::Binary { op, src1, src2, dst } => {
@@ -350,13 +389,13 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                         Instruction::Mov {
                             src: src1.into(),
                             dst: dst.into(),
-                            size
+                            size,
                         },
                         Instruction::Binary {
                             op: BinaryOp::from(op),
                             src: src2.into(),
                             dst: dst.into(),
-                            size
+                            size,
                         },
                     ]
                 }
@@ -366,14 +405,14 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                         Instruction::Mov {
                             src: src1.into(),
                             dst: Operand::Reg(Reg::AX),
-                            size
+                            size,
                         },
                         Instruction::Cdq(size),
                         Instruction::Idiv(src2.into(), size),
                         Instruction::Mov {
                             src: Operand::Reg(result_reg),
                             dst: dst.into(),
-                            size
+                            size,
                         },
                     ]
                 }
@@ -393,11 +432,15 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                         _ => unreachable!(),
                     };
                     vec![
-                        Instruction::Cmp { v1: src2.into(), v2: src1.into(), size },
+                        Instruction::Cmp {
+                            v1: src2.into(),
+                            v2: src1.into(),
+                            size,
+                        },
                         Instruction::Mov {
                             src: Operand::Imm(0),
                             dst: dst.into(),
-                            size
+                            size,
                         },
                         Instruction::SetCC { code, op: dst.into() },
                     ]
@@ -410,7 +453,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                 Instruction::Cmp {
                     v1: Operand::Imm(0),
                     v2: condition.into(),
-                    size
+                    size,
                 },
                 Instruction::JmpCC {
                     code: CondCode::E,
@@ -424,7 +467,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                 Instruction::Cmp {
                     v1: Operand::Imm(0),
                     v2: condition.into(),
-                    size
+                    size,
                 },
                 Instruction::JmpCC {
                     code: CondCode::NE,
@@ -440,14 +483,25 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
         }
         tacky::Instruction::Copy { src, dst } => {
             let size = get_assembly_type(src, symbols);
-            vec![Instruction::Mov { src: src.into(), dst: dst.into(), size }]
+            vec![Instruction::Mov {
+                src: src.into(),
+                dst: dst.into(),
+                size,
+            }]
         }
         tacky::Instruction::FunCall { fun_name, args, dst } => convert_function_call(fun_name, args, dst, symbols),
         tacky::Instruction::SignExtend { src, dst } => {
-            vec![Instruction::Movsx {src: src.into(), dst: dst.into()}]
+            vec![Instruction::Movsx {
+                src: src.into(),
+                dst: dst.into(),
+            }]
         }
         tacky::Instruction::Truncate { src, dst } => {
-            vec![Instruction::Mov {src: src.into(), dst: dst.into(), size: AssemblyType::Longword}]
+            vec![Instruction::Mov {
+                src: src.into(),
+                dst: dst.into(),
+                size: AssemblyType::Longword,
+            }]
         }
     }
 }
@@ -496,7 +550,7 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
         params,
         body,
         global,
-        temp_types
+        temp_types,
     } = ast;
     let arg_registers = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
     let mut instructions = vec![];
@@ -507,7 +561,7 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
         instructions.push(Instruction::Mov {
             src: Operand::Reg(reg),
             dst: Operand::Pseudo(param.clone()),
-            size: *param_ty
+            size: *param_ty,
         });
     }
 
@@ -517,13 +571,11 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
         instructions.push(Instruction::Mov {
             src: Operand::Stack(stack_offset),
             dst: Operand::Pseudo(param.clone()),
-            size: *param_ty
+            size: *param_ty,
         });
     }
 
-    instructions.extend(body.iter().flat_map(|ins| {
-        convert_instruction(ins, symbols)
-    }  ));
+    instructions.extend(body.iter().flat_map(|ins| convert_instruction(ins, symbols)));
     {
         FunctionDefinition {
             name: name.clone(),
@@ -538,13 +590,8 @@ fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTabl
 /// Tracks whether a symbol is an object (variable) or function, along with
 /// the assembly type (Longword/Quadword) needed for instruction sizing.
 pub enum AsmSymbolEntry {
-    Obj {
-        asm_type: AssemblyType,
-        is_static: bool
-    },
-    Fun {
-        defined: bool
-    },
+    Obj { asm_type: AssemblyType, is_static: bool },
+    Fun { defined: bool },
 }
 
 pub type BackendSymbolTable = HashMap<Rc<str>, AsmSymbolEntry>;
@@ -568,41 +615,45 @@ impl BackendSymbolTableExt for BackendSymbolTable {
 /// from the validator's symbol table, plus TACKY temporaries from each function definition.
 fn build_backend_symbol_table(ast: &tacky::Program, symbols: &SymbolTable) -> BackendSymbolTable {
     let mut backend = BackendSymbolTable::new();
-    let static_names: HashSet<&str> = ast.static_vars.iter()
-        .map(|sv| &*sv.name)
-        .collect();
+    let static_names: HashSet<&str> = ast.static_vars.iter().map(|sv| &*sv.name).collect();
 
     for (name, symbol) in symbols.iter() {
         let backend_entry = match &symbol.symbol_type {
-            Type::FunType { defined, .. } => AsmSymbolEntry::Fun {
-                defined: *defined,
-            },
+            Type::FunType { defined, .. } => AsmSymbolEntry::Fun { defined: *defined },
             ty => AsmSymbolEntry::Obj {
-                    asm_type: ty.into(),
-                    is_static: static_names.contains(&**name),
-            }
+                asm_type: ty.into(),
+                is_static: static_names.contains(&**name),
+            },
         };
         backend.insert(name.clone(), backend_entry);
     }
 
     for func in &ast.function_defs {
         for (temp_name, temp_type) in &func.temp_types {
-            backend.insert(temp_name.clone(), AsmSymbolEntry::Obj {
-                asm_type: temp_type.into(),
-                is_static: false,
-            });
+            backend.insert(
+                temp_name.clone(),
+                AsmSymbolEntry::Obj {
+                    asm_type: temp_type.into(),
+                    is_static: false,
+                },
+            );
         }
     }
 
     backend
 }
 
-fn convert_static_var(static_var:TackyStaticVariable) -> StaticVariable {
-    let TackyStaticVariable{ name, global, init, var_type } = static_var;
+fn convert_static_var(static_var: TackyStaticVariable) -> StaticVariable {
+    let TackyStaticVariable {
+        name,
+        global,
+        init,
+        var_type,
+    } = static_var;
     StaticVariable {
         name,
         global,
-        alignment:  AssemblyType::from(&var_type).size(),
+        alignment: AssemblyType::from(&var_type).size(),
         init,
     }
 }
@@ -616,7 +667,11 @@ fn convert_static_var(static_var:TackyStaticVariable) -> StaticVariable {
 /// 4. Label coalescing: merges consecutive labels to reduce jump targets
 pub fn generate(ast: tacky::Program, symbols: &SymbolTable) -> (Program, BackendSymbolTable) {
     let backend_symbol_table = build_backend_symbol_table(&ast, symbols);
-    let functions = ast.function_defs.iter().map(|f| {convert_function(f, &backend_symbol_table)}).collect();
+    let functions = ast
+        .function_defs
+        .iter()
+        .map(|f| convert_function(f, &backend_symbol_table))
+        .collect();
     let static_vars = ast.static_vars.into_iter().map(convert_static_var).collect();
 
     let mut p = Program { functions, static_vars };
@@ -646,7 +701,7 @@ impl<'a> StackMapping<'a> {
     /// Returns the stack operand for a pseudo-register, allocating a new slot if needed.
     ///
     /// Stack grows downward: each new allocation decrements the offset by the type's size.
-    fn get_stack_location(&mut self, pseudo: &str, asm_type: AssemblyType ) -> Operand {
+    fn get_stack_location(&mut self, pseudo: &str, asm_type: AssemblyType) -> Operand {
         let offset_option = self.stack_mapping.get(pseudo);
         let offset = match offset_option {
             Some(offset) => offset,
@@ -708,15 +763,13 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
                     *v1 = stack_mapping.replace_pseudo(v1, *size);
                     *v2 = stack_mapping.replace_pseudo(v2, *size);
                 }
-                Instruction::SetCC{ op, ..} => {
+                Instruction::SetCC { op, .. } => {
                     if let Operand::Pseudo(name) = op {
                         let size = *symbols.get_obj_type(name);
                         *op = stack_mapping.replace_pseudo(op, size);
                     }
                 }
-                Instruction::Push(op) => {
-                    *op = stack_mapping.replace_pseudo(op, AssemblyType::Quadword)
-                }
+                Instruction::Push(op) => *op = stack_mapping.replace_pseudo(op, AssemblyType::Quadword),
                 _ => {}
             }
         }
@@ -751,7 +804,7 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                 op: BinaryOp::Sub,
                 src: Operand::Imm(positive_offset as i64),
                 dst: Operand::Reg(Reg::SP),
-                size: AssemblyType::Quadword
+                size: AssemblyType::Quadword,
             })
         }
         for ins in body.drain(..) {
@@ -768,19 +821,26 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                         size,
                     });
                 }
-                Instruction::Mov { src: Operand::Imm(val), dst, size: AssemblyType::Longword } if val < i32::MIN as i64 || val > i32::MAX as i64 => { // handle case where quadwords imm are being moved into longword. Avoids linker warnings
+                Instruction::Mov {
+                    src: Operand::Imm(val),
+                    dst,
+                    size: AssemblyType::Longword,
+                } if val < i32::MIN as i64 || val > i32::MAX as i64 => {
+                    // handle case where quadwords imm are being moved into longword. Avoids linker warnings
                     new_ins.push(Instruction::Mov {
                         src: Operand::Imm(val as i32 as i64),
                         dst,
                         size: AssemblyType::Longword,
                     });
                 }
-                Instruction::Mov { // iced caught this missing case, can't mov imm quadword to memory
+                Instruction::Mov {
+                    // iced caught this missing case, can't mov imm quadword to memory
                     src: Operand::Imm(val),
                     ref dst,
                     size: AssemblyType::Quadword,
                 } if matches!(dst, Operand::Stack(_) | Operand::Data(_))
-                    && (val < i32::MIN as i64 || val > i32::MAX as i64) => {
+                    && (val < i32::MIN as i64 || val > i32::MAX as i64) =>
+                {
                     new_ins.push(Instruction::Mov {
                         src: Operand::Imm(val),
                         dst: Operand::Reg(Reg::R10),
@@ -796,7 +856,7 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     new_ins.push(Instruction::Mov {
                         src: Operand::Imm(c),
                         dst: Operand::Reg(Reg::R10),
-                        size
+                        size,
                     });
                     new_ins.push(Instruction::Idiv(Operand::Reg(Reg::R10), size));
                 }
@@ -804,13 +864,14 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     op: BinaryOp::Mult,
                     ref src,
                     ref dst,
-                    size
+                    size,
                 } if dst.is_memory() => {
-                    let new_src = if matches!(src, Operand::Imm(val) if *val < i32::MIN as i64 || *val > i32::MAX as i64) {
+                    let new_src = if matches!(src, Operand::Imm(val) if *val < i32::MIN as i64 || *val > i32::MAX as i64)
+                    {
                         new_ins.push(Instruction::Mov {
                             src: src.clone(),
                             dst: Operand::Reg(Reg::R10),
-                            size: AssemblyType::Quadword
+                            size: AssemblyType::Quadword,
                         });
                         Operand::Reg(Reg::R10)
                     } else {
@@ -820,13 +881,13 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     new_ins.push(Instruction::Mov {
                         src: dst.clone(),
                         dst: Operand::Reg(Reg::R11),
-                        size
+                        size,
                     });
                     new_ins.push(Instruction::Binary {
                         op: BinaryOp::Mult,
                         src: new_src,
                         dst: Operand::Reg(Reg::R11),
-                        size
+                        size,
                     });
                     new_ins.push(Instruction::Mov {
                         src: Operand::Reg(Reg::R11),
@@ -838,45 +899,53 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr),
                     src,
                     ref dst,
-                    size
+                    size,
                 } if src.is_memory() && dst.is_memory() => {
                     new_ins.push(Instruction::Mov {
                         src,
                         dst: Operand::Reg(Reg::R10),
-                        size
+                        size,
                     });
                     new_ins.push(Instruction::Binary {
                         op,
                         src: Operand::Reg(Reg::R10),
                         dst: dst.clone(),
-                        size
+                        size,
                     });
                 }
                 Instruction::Binary {
                     op: op @ (BinaryOp::BitShl | BinaryOp::BitSar),
                     src,
                     dst,
-                    size
+                    size,
                 } if src.is_memory() || matches!(src, Operand::Imm(val) if val > 255 || val < 0) => {
                     new_ins.push(Instruction::Mov {
                         src,
                         dst: Operand::Reg(Reg::CX),
-                        size
+                        size,
                     });
                     new_ins.push(Instruction::Binary {
                         op,
                         src: Operand::Reg(Reg::CX),
                         dst,
-                        size
+                        size,
                     });
                 }
                 Instruction::Binary {
                     op,
                     src: Operand::Imm(val),
                     dst,
-                    size: AssemblyType::Quadword
-                } if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mult | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXOr)
-                    && (val < i32::MIN as i64 || val > i32::MAX as i64) => {
+                    size: AssemblyType::Quadword,
+                } if matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mult
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXOr
+                ) && (val < i32::MIN as i64 || val > i32::MAX as i64) =>
+                {
                     new_ins.push(Instruction::Mov {
                         src: Operand::Imm(val),
                         dst: Operand::Reg(Reg::R10),
@@ -889,16 +958,19 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                         size: AssemblyType::Quadword,
                     })
                 }
-                Instruction::Cmp {ref v1, ref v2, size} => {
+                Instruction::Cmp { ref v1, ref v2, size } => {
                     let new_v1 = if (v1.is_memory() && v2.is_memory())
-                        || matches!((v1, size), (Operand::Imm(c), AssemblyType::Quadword) if *c < i32::MIN as i64 || *c > i32::MAX as i64) {
+                        || matches!((v1, size), (Operand::Imm(c), AssemblyType::Quadword) if *c < i32::MIN as i64 || *c > i32::MAX as i64)
+                    {
                         new_ins.push(Instruction::Mov {
                             src: v1.clone(),
                             dst: Operand::Reg(Reg::R10),
                             size,
                         });
                         Operand::Reg(Reg::R10)
-                    } else { v1.clone() };
+                    } else {
+                        v1.clone()
+                    };
 
                     let new_v2 = if matches!(v2, Operand::Imm(_)) {
                         new_ins.push(Instruction::Mov {
@@ -907,7 +979,9 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                             size,
                         });
                         Operand::Reg(Reg::R11)
-                    } else { v2.clone() };
+                    } else {
+                        v2.clone()
+                    };
 
                     new_ins.push(Instruction::Cmp {
                         v1: new_v1,
@@ -923,30 +997,46 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     });
                     new_ins.push(Instruction::Push(Operand::Reg(Reg::R10)));
                 }
-                Instruction::Movsx {ref src, ref dst} => { //extends longword src to quadword dst
+                Instruction::Movsx { ref src, ref dst } => {
+                    //extends longword src to quadword dst
                     if let &Operand::Imm(val) = src {
-                        new_ins.push(Instruction::Mov { // move src to r10
+                        new_ins.push(Instruction::Mov {
+                            // move src to r10
                             src: Operand::Imm(val),
                             dst: Operand::Reg(Reg::R10),
                             size: AssemblyType::Longword,
                         });
-                        if dst.is_memory() { // src and dst are invalid
-                            new_ins.push(Instruction::Movsx { src: Operand::Reg(Reg::R10), dst: Operand::Reg(Reg::R11)  });
+                        if dst.is_memory() {
+                            // src and dst are invalid
+                            new_ins.push(Instruction::Movsx {
+                                src: Operand::Reg(Reg::R10),
+                                dst: Operand::Reg(Reg::R11),
+                            });
                             new_ins.push(Instruction::Mov {
                                 src: Operand::Reg(Reg::R11),
                                 dst: dst.clone(),
                                 size: AssemblyType::Quadword,
                             })
-                        } else  { // just src is invalid
-                            new_ins.push(Instruction::Movsx {src: Operand::Reg(Reg::R10), dst: dst.clone() });
+                        } else {
+                            // just src is invalid
+                            new_ins.push(Instruction::Movsx {
+                                src: Operand::Reg(Reg::R10),
+                                dst: dst.clone(),
+                            });
                         }
-                    } else if dst.is_memory() { // just dst is invalid, put result in r10 then mov to dst
+                    } else if dst.is_memory() {
+                        // just dst is invalid, put result in r10 then mov to dst
                         new_ins.push(Instruction::Movsx {
                             src: src.clone(),
-                            dst: Operand::Reg(Reg::R11)
+                            dst: Operand::Reg(Reg::R11),
                         });
-                        new_ins.push(Instruction::Mov {src: Operand::Reg(Reg::R11), dst: dst.clone(), size: AssemblyType::Quadword });
-                    } else { // valid
+                        new_ins.push(Instruction::Mov {
+                            src: Operand::Reg(Reg::R11),
+                            dst: dst.clone(),
+                            size: AssemblyType::Quadword,
+                        });
+                    } else {
+                        // valid
                         new_ins.push(ins);
                     }
                 }

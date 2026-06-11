@@ -37,7 +37,7 @@
 //!
 use crate::lexer::{Span, SpannedToken, Token};
 use colored::*;
-use std::collections::{VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::hash::Hash;
 use std::rc::Rc;
@@ -100,7 +100,7 @@ pub enum Expr {
     Var(Identifier, Span),
     Cast(Type, Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
-    Binary(BinOp, Box<Expr>, Box<Expr>),
+    Binary(BinOp, Box<Expr>, Box<Expr>, Span),
     Assignment(Box<Expr>, Box<Expr>, Span),
     CompoundAssignment(AssignOp, Box<Expr>, Box<Expr>, Span),
     PostFixOp(IncDec, Box<Expr>, Span),
@@ -188,7 +188,6 @@ pub enum SwitchIntType {
 }
 
 impl SwitchIntType {
-
     /// Normalize case value to the switch expression's type.
     ///
     /// This handles overflow/truncation when the case constant's type differs
@@ -201,7 +200,7 @@ impl SwitchIntType {
                 Type::FunType { .. } => unreachable!("Cannot switch on function type"),
             },
             SwitchIntType::Long(v) => match switch_type {
-                Type::Int => Some((*v as i32) as i64),  // Truncate to int, then extend
+                Type::Int => Some((*v as i32) as i64), // Truncate to int, then extend
                 Type::Long => Some(*v),
                 Type::FunType { .. } => unreachable!("Cannot switch on function type"),
             },
@@ -242,7 +241,7 @@ pub enum Type {
         params: Vec<Type>,
         ret: Box<Type>,
         defined: bool,
-    }
+    },
 }
 
 impl Type {
@@ -250,7 +249,7 @@ impl Type {
         match self {
             Type::Int => Const::ConstInt(1),
             Type::Long => Const::ConstLong(1),
-            Type::FunType { .. } => unreachable!("Cannot increment function type")
+            Type::FunType { .. } => unreachable!("Cannot increment function type"),
         }
     }
 }
@@ -430,24 +429,20 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
 /// Returns an error if the value doesn't fit in 64 bits.
 fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
     match &token.token {
-        Token::ConstantInt(value_str) => {
-            match value_str.parse::<i32>() {
-                Ok(val) => Ok(Expr::Constant(Const::ConstInt(val))),
-                Err(_) => parse_constant(&SpannedToken {
-                    token: Token::ConstantLong(value_str.clone()),
-                    span: token.span,
-                })
-            }
+        Token::ConstantInt(value_str) => match value_str.parse::<i32>() {
+            Ok(val) => Ok(Expr::Constant(Const::ConstInt(val))),
+            Err(_) => parse_constant(&SpannedToken {
+                token: Token::ConstantLong(value_str.clone()),
+                span: token.span,
+            }),
         },
-        Token::ConstantLong(value_str) => {
-            match value_str.parse::<i64>() {
-                Ok(val) => Ok(Expr::Constant(Const::ConstLong(val))),
-                Err(_) => Err(SyntaxError::with_span(
-                    format!("Integer constant '{}' does not fit in 64-bit int", value_str.bold()),
-                    Some(token.span),
-                )),
-            }
-        }
+        Token::ConstantLong(value_str) => match value_str.parse::<i64>() {
+            Ok(val) => Ok(Expr::Constant(Const::ConstLong(val))),
+            Err(_) => Err(SyntaxError::with_span(
+                format!("Integer constant '{}' does not fit in 64-bit int", value_str.bold()),
+                Some(token.span),
+            )),
+        },
         _ => unreachable!(),
     }
 }
@@ -516,8 +511,11 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             }
             Token::OpenParen => {
                 tokens.pop_front();
-                let mut type_specifiers =  vec![];
-                while matches!(tokens.front().map(|t| &t.token), Some(Token::LongKeyword | Token::IntKeyword)) {
+                let mut type_specifiers = vec![];
+                while matches!(
+                    tokens.front().map(|t| &t.token),
+                    Some(Token::LongKeyword | Token::IntKeyword)
+                ) {
                     type_specifiers.push(tokens.front().unwrap().token.clone());
                     tokens.pop_front();
                 }
@@ -539,7 +537,11 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                         tokens.pop_front();
                         // parse the function call
                         let params = parse_function_args(tokens, &Some(spanned.span))?;
-                        Ok(Expr::FunctionCall(Identifier(Rc::from(name.as_str())), params, spanned.span))
+                        Ok(Expr::FunctionCall(
+                            Identifier(Rc::from(name.as_str())),
+                            params,
+                            spanned.span,
+                        ))
                     } else {
                         Ok(Expr::Var(Identifier(Rc::from(name.as_str())), spanned.span))
                     }
@@ -547,7 +549,7 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                     Err(SyntaxError::expression(next_token))
                 }
             }
-            _ => Err(SyntaxError::expression(next_token))
+            _ => Err(SyntaxError::expression(next_token)),
         },
         _ => Err(SyntaxError::expression(next_token)),
     }?;
@@ -616,9 +618,9 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
                     left = Expr::Conditional(Box::from(left), Box::from(middle), Box::from(right))
                 }
                 _ => {
-                    tokens.pop_front();
+                    let span = tokens.pop_front().unwrap().span;
                     let right = parse_exp(tokens, prec + 1)?;
-                    left = Expr::Binary(operator, Box::from(left), Box::from(right));
+                    left = Expr::Binary(operator, Box::from(left), Box::from(right), span);
                 }
             }
         } else {
@@ -635,10 +637,14 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
 fn parse_type(specifier_list: &Vec<Token>, err_span: &Option<Span>) -> Result<Type, SyntaxError> {
     match specifier_list.as_slice() {
         [Token::IntKeyword] => Ok(Type::Int),
-        [Token::LongKeyword] | [Token::IntKeyword, Token::LongKeyword] | [Token::LongKeyword, Token::IntKeyword]  => Ok(Type::Long),
+        [Token::LongKeyword] | [Token::IntKeyword, Token::LongKeyword] | [Token::LongKeyword, Token::IntKeyword] => {
+            Ok(Type::Long)
+        }
         [] => Err(SyntaxError::with_span("Missing type specifier".to_string(), *err_span)),
         _ => Err(SyntaxError::with_span(
-            "Invalid type specifier combination".to_string(), *err_span))
+            "Invalid type specifier combination".to_string(),
+            *err_span,
+        )),
     }
 }
 
@@ -902,7 +908,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             expect(&Token::CloseParen, tokens)?;
             let stmt = parse_statement(tokens)?;
             // check for stmt before first case
-            switch_unreachable_check(&stmt);
+            warn_switch_unreachable(&stmt);
             Ok(SpannedStmt {
                 stmt: Stmt::Switch(exp, Box::from(stmt), 0, Vec::new()),
                 span,
@@ -919,12 +925,14 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
     }
 }
 
-fn switch_unreachable_check(stmt: &SpannedStmt) {
+/// `-Wswitch-unreachable`: a statement before the first `case`/`default` label, which can never be
+/// executed. Recurses into a leading compound block to find the first real statement.
+fn warn_switch_unreachable(stmt: &SpannedStmt) {
     match &stmt.stmt {
         Stmt::Case(..) | Stmt::Default(..) | Stmt::Null => {}
         Stmt::Compound(block) => {
             if let Some(BlockItem::Statement(s)) = block.first() {
-                switch_unreachable_check(s)
+                warn_switch_unreachable(s)
             }
         }
         _ => eprintln!(
@@ -1002,7 +1010,11 @@ fn parse_declaration(
                 name,
                 params,
                 body,
-                fun_type: Type::FunType {params: types, ret: Box::from(type_class), defined},
+                fun_type: Type::FunType {
+                    params: types,
+                    ret: Box::from(type_class),
+                    defined,
+                },
                 storage_class,
                 span,
             })))

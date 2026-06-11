@@ -34,12 +34,15 @@
 //!   └─ convert_symbols_to_tacky()       — extract static vars from symbol table
 //! ```
 
+use crate::parser;
+use crate::parser::{Const, Identifier, IncDec, SwitchIntType, Type, UnaryOp};
+use crate::validate::{
+    Block, BlockItem, Expr, ForInit, InitialValue, NameGenerator, StaticInt, Stmt, SymbolTable, TypedDeclaration,
+    TypedExpression, TypedFunction, TypedProgram, TypedVarDeclaration,
+};
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 use std::rc::Rc;
-use crate::parser;
-use crate::parser::{Type, Declaration, Identifier, IncDec, UnaryOp, VarDeclaration, Const, SwitchIntType, AssignOp};
-use crate::validate::{Expr, TypedExpression, InitialValue, NameGenerator, SymbolTable, StaticInt, Stmt, ForInit, Block, BlockItem, TypedVarDeclaration, TypedFunction, TypedProgram, TypedDeclaration, get_common_type};
 
 #[derive(Clone, Debug)]
 pub enum Val {
@@ -215,7 +218,12 @@ fn emit_cast(src: Val, dst: Val, src_type: &Type, dst_type: &Type, instructions:
 /// - Postfix operators return the original value before modification
 /// - Prefix operators return the new value after modification
 /// - Lvalue expressions are currently limited to simple variables
-fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<Rc<str>, Type>) -> Val {
+fn tackify_expr(
+    e: &TypedExpression,
+    instructions: &mut Vec<Instruction>,
+    name_generator: &mut NameGenerator,
+    temp_types: &mut HashMap<Rc<str>, Type>,
+) -> Val {
     let e_type = e.exp_type.clone();
     match &e.exp {
         Expr::Const(c) => Val::Constant(*c),
@@ -223,7 +231,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
             let source_type = inner.exp_type.clone();
             let result = tackify_expr(inner, instructions, name_generator, temp_types);
             if *target_type == source_type {
-                return result
+                return result;
             }
             let dst_name = name_generator.next("temp");
             temp_types.insert(dst_name.clone(), target_type.clone());
@@ -343,7 +351,7 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                 Val::Var(name.clone())
             }
             _ => unreachable!("Assignment to non-lvalue"),
-        }
+        },
         Expr::CompoundAssignment(op, lhs, rhs, op_type) => match &lhs.exp {
             Expr::Var(Identifier(name)) => {
                 let current_val = Val::Var(name.clone());
@@ -365,7 +373,13 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
                     let cast_name = name_generator.next("cast_tmp");
                     temp_types.insert(cast_name.clone(), op_type.clone());
                     let cast_dst = Val::Var(cast_name);
-                    emit_cast(current_val.clone(), cast_dst.clone(), &lhs.exp_type, op_type, instructions);
+                    emit_cast(
+                        current_val.clone(),
+                        cast_dst.clone(),
+                        &lhs.exp_type,
+                        op_type,
+                        instructions,
+                    );
                     cast_dst
                 } else {
                     current_val.clone()
@@ -493,7 +507,12 @@ fn tackify_expr(e: &TypedExpression, instructions: &mut Vec<Instruction>, name_g
     }
 }
 
-fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<Rc<str>, Type>) {
+fn tackify_stmt(
+    stmt: &Stmt,
+    instructions: &mut Vec<Instruction>,
+    name_generator: &mut NameGenerator,
+    temp_types: &mut HashMap<Rc<str>, Type>,
+) {
     match stmt {
         Stmt::Return(expr) => {
             let val = tackify_expr(expr, instructions, name_generator, temp_types);
@@ -538,9 +557,7 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
             target: label_name.clone(),
         }),
         Stmt::Compound(block) => tackify_block(block, instructions, name_generator, temp_types),
-        Stmt::Break(target) | Stmt::Continue(target) => {
-            instructions.push(Instruction::Jump { target: target.clone() })
-        }
+        Stmt::Break(target) | Stmt::Continue(target) => instructions.push(Instruction::Jump { target: target.clone() }),
         Stmt::While(condition, body, label) => {
             let continue_label = Identifier(Rc::from(format!("continue_loop.{label}")));
             let break_label = Identifier(Rc::from(format!("break_loop.{label}")));
@@ -614,7 +631,7 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
                         let case_const = match case {
                             SwitchIntType::Int(c) => Const::ConstInt(*c),
                             SwitchIntType::Long(c) => Const::ConstLong(*c),
-                            SwitchIntType::Default => unreachable!()
+                            SwitchIntType::Default => unreachable!(),
                         };
                         let cond_name = name_generator.next("case_cond");
                         temp_types.insert(cond_name.clone(), Type::Int);
@@ -656,13 +673,20 @@ fn tackify_stmt(stmt: &Stmt, instructions: &mut Vec<Instruction>, name_generator
     }
 }
 
-fn tackify_block(block: &Block, instructions: &mut Vec<Instruction>, name_generator: &mut NameGenerator, temp_types: &mut HashMap<Rc<str>, Type>) {
+fn tackify_block(
+    block: &Block,
+    instructions: &mut Vec<Instruction>,
+    name_generator: &mut NameGenerator,
+    temp_types: &mut HashMap<Rc<str>, Type>,
+) {
     for item in block {
         match item {
             BlockItem::Statement(stmt) => tackify_stmt(stmt, instructions, name_generator, temp_types),
             BlockItem::Declaration(dec) => match dec {
-                TypedDeclaration::Variable(var) => tackify_var_declaration(var, instructions, name_generator, temp_types),
-                TypedDeclaration::Function(_) => {}  // Function declarations in blocks have no body
+                TypedDeclaration::Variable(var) => {
+                    tackify_var_declaration(var, instructions, name_generator, temp_types)
+                }
+                TypedDeclaration::Function(_) => {} // Function declarations in blocks have no body
             },
         }
     }
@@ -676,20 +700,20 @@ fn tackify_var_declaration(
     declaration: &TypedVarDeclaration,
     instructions: &mut Vec<Instruction>,
     name_generator: &mut NameGenerator,
-    temp_types: &mut HashMap<Rc<str>, Type>
+    temp_types: &mut HashMap<Rc<str>, Type>,
 ) {
     if declaration.storage_class.is_none() {
         if let Some(init_exp) = &declaration.init {
             let res = tackify_expr(init_exp, instructions, name_generator, temp_types);
-            instructions.push(Instruction::Copy { src: res, dst: Val::Var(declaration.name.0.clone()) });
+            instructions.push(Instruction::Copy {
+                src: res,
+                dst: Val::Var(declaration.name.0.clone()),
+            });
         }
     }
 }
 
-fn tackify_function(
-    func: &TypedFunction,
-    name_generator: &mut NameGenerator,
-) -> FunctionDefinition {
+fn tackify_function(func: &TypedFunction, name_generator: &mut NameGenerator) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let mut temp_types = HashMap::new();
     let Identifier(name) = &func.name;
@@ -752,7 +776,7 @@ fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
                             init: VarInit::Defined(zero),
                             var_type: entry.symbol_type.clone(),
                         })
-                    },
+                    }
                     InitialValue::NoInitializer => {
                         // Only add extern vars if it's not a renamed local variable.
                         // Renamed locals have dots in their names (e.g., "i.1").
@@ -780,18 +804,19 @@ fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
 ///
 /// Processes all function definitions (skipping declarations without bodies) and
 /// combines them with static variable definitions from the symbol table.
-pub fn tackify_program(
-    program: TypedProgram,
-    name_generator: &mut NameGenerator,
-    symbols: &SymbolTable,
-) -> Program {
+pub fn tackify_program(program: TypedProgram, name_generator: &mut NameGenerator, symbols: &SymbolTable) -> Program {
     let mut function_defs = Vec::new();
     for decl in &program.declarations {
-        if let TypedDeclaration::Function(func) = decl && func.body.is_some() {
+        if let TypedDeclaration::Function(func) = decl
+            && func.body.is_some()
+        {
             function_defs.push(tackify_function(func, name_generator));
         }
     }
 
     let static_vars = convert_symbols_to_tacky(symbols);
-    Program { function_defs, static_vars }
+    Program {
+        function_defs,
+        static_vars,
+    }
 }

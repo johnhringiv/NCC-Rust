@@ -573,7 +573,12 @@ fn run_cases(cases: Vec<TestCase>) {
         "{} of {} sub-tests failed:\n{}",
         tally.failed,
         tally.passed + tally.failed,
-        tally.failures.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n")
+        tally
+            .failures
+            .iter()
+            .map(|f| format!("  - {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(tally.passed > 0, "no test cases ran");
 }
@@ -881,4 +886,291 @@ fn test_no_warning_on_declaration() {
     );
 
     println!("✓ No warning on declaration test passed");
+}
+
+#[test]
+fn test_division_by_zero_warning() {
+    let test_file = "tests/c_programs/warnings/division_by_zero.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr_output.contains("-Wdiv-by-zero"),
+        "Expected -Wdiv-by-zero warning, but stderr was: {}",
+        stderr_output
+    );
+
+    // Both the `/` and `%` cases should be reported with their distinct wording
+    assert!(
+        stderr_output.contains("division by zero"),
+        "Warning should mention division by zero, but stderr was: {}",
+        stderr_output
+    );
+    assert!(
+        stderr_output.contains("remainder by zero"),
+        "Warning should mention remainder by zero, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Division-by-zero warning test passed");
+}
+
+#[test]
+fn test_no_division_by_zero_on_nonconstant() {
+    let test_file = "tests/c_programs/warnings/no_division_by_zero.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // Non-constant and non-zero constant divisors must not warn
+    assert!(
+        !stderr_output.contains("-Wdiv-by-zero"),
+        "Non-constant / non-zero divisors should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No division-by-zero on non-constant divisor test passed");
+}
+
+#[test]
+fn test_shift_count_warning() {
+    let test_file = "tests/c_programs/warnings/shift_count.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // Both the overflow (count >= width) and negative-count cases should be reported
+    assert!(
+        stderr_output.contains("-Wshift-count-overflow"),
+        "Expected -Wshift-count-overflow warning, but stderr was: {}",
+        stderr_output
+    );
+    assert!(
+        stderr_output.contains("-Wshift-count-negative"),
+        "Expected -Wshift-count-negative warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Shift-count warning test passed");
+}
+
+#[test]
+fn test_no_shift_count_on_valid_shifts() {
+    let test_file = "tests/c_programs/warnings/no_shift_count.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // In-range and non-constant shift counts must not warn
+    assert!(
+        !stderr_output.contains("-Wshift-count"),
+        "In-range / non-constant shift counts should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No shift-count warning on valid shifts test passed");
+}
+
+#[test]
+fn test_div_by_zero_in_constant_context_error() {
+    // A constant zero divisor in a context requiring a constant expression is a hard error
+    // (exit 30) reported specifically as "division by zero in constant expression", not the
+    // generic "not a constant expression" / "not an integer constant expression".
+    let test_file = "tests/c_programs/switch/invalid_semantics/case_div_by_zero.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert_eq!(
+        output.status.code(),
+        Some(30),
+        "Expected exit code 30 for a div-by-zero case label"
+    );
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("division by zero in constant expression"),
+        "Expected a specific division-by-zero message, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Division-by-zero in constant context error test passed");
+}
+
+#[test]
+fn test_overflow_warning() {
+    // Folds that leave the result type warn with -Woverflow. The `-INT_MIN`, `INT_MIN / -1`,
+    // and `INT_MIN % -1` cases in this fixture previously *panicked* the compiler, so asserting a
+    // clean exit (not 101) is also the no-panic regression check.
+    let test_file = "tests/c_programs/warnings/overflow.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "ncc panicked on a constant overflow fold (regression)"
+    );
+    assert_eq!(output.status.code(), Some(0), "expected --validate to succeed");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("-Woverflow"),
+        "Expected -Woverflow warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Overflow warning + no-panic regression test passed");
+}
+
+#[test]
+fn test_no_overflow_on_in_range() {
+    let test_file = "tests/c_programs/warnings/no_overflow.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr_output.contains("-Woverflow"),
+        "In-range constant folds should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No overflow warning on in-range folds test passed");
+}
+
+#[test]
+fn test_constant_conversion_warning() {
+    let test_file = "tests/c_programs/warnings/constant_conversion.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("-Wconstant-conversion"),
+        "Expected -Wconstant-conversion warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Constant-conversion warning test passed");
+}
+
+#[test]
+fn test_no_constant_conversion_on_cast_or_fit() {
+    let test_file = "tests/c_programs/warnings/no_constant_conversion.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    // Explicit casts and conversions that don't lose value must not warn
+    assert!(
+        !stderr_output.contains("-Wconstant-conversion"),
+        "Explicit casts / in-range conversions should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No constant-conversion on cast/fit test passed");
+}
+
+#[test]
+fn test_sequence_point_warning() {
+    let test_file = "tests/c_programs/warnings/sequence_point.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("-Wsequence-point"),
+        "Expected -Wsequence-point warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Sequence-point warning test passed");
+}
+
+#[test]
+fn test_no_sequence_point_on_sequenced() {
+    let test_file = "tests/c_programs/warnings/no_sequence_point.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    // Single modifications and sequenced operators (?:, &&, separate statements) must not warn
+    assert!(
+        !stderr_output.contains("-Wsequence-point"),
+        "Sequenced / single modifications should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No sequence-point on sequenced expressions test passed");
 }

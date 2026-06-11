@@ -3,8 +3,8 @@ use std::fmt;
 use colored::Colorize;
 
 use crate::codegen::{
-    AssemblyType, BinaryOp, CondCode, FunctionDefinition as CodegenFunctionDefinition, Instruction as CodegenInstruction, Operand,
-    Program as CodegenProgram, Reg, UnaryOp,
+    AssemblyType, BinaryOp, CondCode, FunctionDefinition as CodegenFunctionDefinition,
+    Instruction as CodegenInstruction, Operand, Program as CodegenProgram, Reg, UnaryOp,
 };
 use crate::parser::{
     AssignOp, BinOp as ParserBinOp, BlockItem, Const, Declaration, Expr, ForInit, FunDeclaration, Identifier, IncDec,
@@ -16,9 +16,8 @@ use crate::tacky::{
     StaticVariable, Val, VarInit,
 };
 use crate::validate::{
-    BlockItem as ValidatedBlockItem, Expr as ValidatedExpr, ForInit as ValidatedForInit,
-    Stmt as ValidatedStmt, TypedDeclaration, TypedExpression, TypedFunction, TypedProgram,
-    TypedVarDeclaration,
+    BlockItem as ValidatedBlockItem, Expr as ValidatedExpr, ForInit as ValidatedForInit, Stmt as ValidatedStmt,
+    TypedDeclaration, TypedExpression, TypedFunction, TypedProgram, TypedVarDeclaration,
 };
 
 // =============================================================================
@@ -172,9 +171,11 @@ impl ItfDisplay for TackyFunctionDefinition {
         let params_str = if self.params.is_empty() {
             String::new()
         } else {
-            let names: Vec<String> = self.params.iter().map(|p| {
-                p.0.truecolor(CREAM.0, CREAM.1, CREAM.2).to_string()
-            }).collect();
+            let names: Vec<String> = self
+                .params
+                .iter()
+                .map(|p| p.0.truecolor(CREAM.0, CREAM.1, CREAM.2).to_string())
+                .collect();
             format!("({})", names.join(", "))
         };
         let body_children: Vec<Node> = self.body.iter().map(|i| i.itf_node()).collect();
@@ -380,7 +381,7 @@ impl ItfDisplay for Expr {
                         .truecolor(YELLOW_GOLD.0, YELLOW_GOLD.1, YELLOW_GOLD.2)
                         .to_string(),
                 )
-            },
+            }
             Expr::Var(id, _span) => id.itf_node(),
             Expr::Cast(target_type, e) => Node::branch(
                 "Cast".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
@@ -393,7 +394,7 @@ impl ItfDisplay for Expr {
                 format!("Unary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
                 vec![e.itf_node()],
             ),
-            Expr::Binary(op, e1, e2) => Node::branch(
+            Expr::Binary(op, e1, e2, _span) => Node::branch(
                 format!("Binary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
                 vec![e1.itf_node(), e2.itf_node()],
             ),
@@ -627,10 +628,7 @@ impl ItfDisplay for VarDeclaration {
         if let Some(init_expr) = &self.init {
             children.push(Node::branch("init:", vec![init_expr.itf_node()]));
         }
-        Node::branch(
-            "VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
-            children,
-        )
+        Node::branch("VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), children)
     }
 }
 
@@ -695,11 +693,7 @@ impl ItfDisplay for TypedFunction {
             children.push(Node::branch("body:", body_nodes));
         }
         Node::branch(
-            format!(
-                "{}{}",
-                "FunDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2),
-                global_str
-            ),
+            format!("{}{}", "FunDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2), global_str),
             children,
         )
     }
@@ -717,22 +711,15 @@ impl ItfDisplay for TypedVarDeclaration {
         if let Some(init_expr) = &self.init {
             children.push(Node::branch("init:", vec![init_expr.itf_node()]));
         }
-        Node::branch(
-            "VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
-            children,
-        )
+        Node::branch("VarDeclaration".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), children)
     }
 }
 
 impl ItfDisplay for TypedExpression {
     fn itf_node(&self) -> Node {
-        let type_str = format!("{:?}", self.exp_type)
-            .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2);
+        let type_str = format!("{:?}", self.exp_type).truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2);
         let inner = self.exp.itf_node();
-        Node::branch(
-            format!("{}: {}", inner.text, type_str),
-            inner.children,
-        )
+        Node::branch(format!("{}: {}", inner.text, type_str), inner.children)
     }
 }
 
@@ -783,9 +770,7 @@ impl ItfDisplay for ValidatedExpr {
                 vec![e.itf_node()],
             ),
             ValidatedExpr::PreFixOp(op, e) => Node::branch(
-                format!("PreFix ({op:?})")
-                    .truecolor(TEAL.0, TEAL.1, TEAL.2)
-                    .to_string(),
+                format!("PreFix ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
                 vec![e.itf_node()],
             ),
             ValidatedExpr::Conditional(cond, then_expr, else_expr) => Node::branch(
@@ -816,7 +801,9 @@ impl ItfDisplay for ValidatedStmt {
                 vec![expr.itf_node()],
             ),
             ValidatedStmt::Expression(expr) => Node::branch(
-                "Expression".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
+                "Expression"
+                    .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                    .to_string(),
                 vec![expr.itf_node()],
             ),
             ValidatedStmt::If(condition, then_stmt, else_stmt) => {
@@ -832,21 +819,23 @@ impl ItfDisplay for ValidatedStmt {
                     children,
                 )
             }
-            ValidatedStmt::Null => Node::leaf(
-                "Null".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
-            ),
+            ValidatedStmt::Null => Node::leaf("Null".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()),
             ValidatedStmt::Goto(label) => Node::branch(
                 "Goto".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
                 vec![label.itf_node()],
             ),
             ValidatedStmt::Labeled(label, stmt) => Node::branch(
-                "Labeled".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
+                "Labeled"
+                    .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                    .to_string(),
                 vec![label.itf_node(), stmt.itf_node()],
             ),
             ValidatedStmt::Compound(block) => {
                 let children: Vec<Node> = block.iter().map(|item| item.itf_node()).collect();
                 Node::branch(
-                    "Compound".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string(),
+                    "Compound"
+                        .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                        .to_string(),
                     children,
                 )
             }
@@ -864,7 +853,9 @@ impl ItfDisplay for ValidatedStmt {
             }
             ValidatedStmt::Continue(target) => {
                 let label_str = if target.0.is_empty() {
-                    "Continue".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()
+                    "Continue"
+                        .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                        .to_string()
                 } else {
                     format!(
                         "{} [{}]",
@@ -964,7 +955,9 @@ impl ItfDisplay for ValidatedStmt {
             }
             ValidatedStmt::Default(stmt, label) => {
                 let header = if label.0.is_empty() {
-                    "Default".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()
+                    "Default"
+                        .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                        .to_string()
                 } else {
                     format!(
                         "{} [{}]",
@@ -1103,15 +1096,12 @@ impl ItfDisplay for TackyInstruction {
 
 impl ItfDisplay for StaticVariable {
     fn itf_node(&self) -> Node {
-        let type_str = format!("{:?}", self.var_type)
-            .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2);
+        let type_str = format!("{:?}", self.var_type).truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2);
         let init_str = match &self.init {
             VarInit::Defined(v) => format!("init: {:?}", v)
                 .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
                 .to_string(),
-            VarInit::Extern => "extern"
-                .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2)
-                .to_string(),
+            VarInit::Extern => "extern".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string(),
         };
         let global_str = if self.global {
             format!(", {}", "global".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2))
@@ -1135,9 +1125,7 @@ impl ItfDisplay for crate::codegen::StaticVariable {
             VarInit::Defined(v) => format!("init: {:?}", v)
                 .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
                 .to_string(),
-            VarInit::Extern => "extern"
-                .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2)
-                .to_string(),
+            VarInit::Extern => "extern".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string(),
         };
         let global_str = if self.global {
             format!(", {}", "global".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2))
@@ -1148,7 +1136,9 @@ impl ItfDisplay for crate::codegen::StaticVariable {
             "{}: {} (align: {}, {}{})",
             "StaticVariable".truecolor(TEAL.0, TEAL.1, TEAL.2),
             self.name.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2),
-            self.alignment.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2),
+            self.alignment
+                .to_string()
+                .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2),
             init_str,
             global_str
         ))

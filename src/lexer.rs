@@ -234,8 +234,8 @@ fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
                 Token::ConstantInt(_) => Token::ConstantInt(mat.as_str().to_string()),
                 Token::ConstantLong(_) => {
                     let s = mat.as_str();
-                    Token::ConstantLong(s[..s.len()-1].to_string())
-                },
+                    Token::ConstantLong(s[..s.len() - 1].to_string())
+                }
                 other => other.clone(),
             };
             matches.push(TokenMatch {

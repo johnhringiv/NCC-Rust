@@ -304,10 +304,25 @@ NCC provides several safety features and guarantees to help developers write mor
 
 - **Variable shadowing** (`-Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer
   scope
-- **Duplicate switch cases** (`-Wswitch-unreachable`): Detects and reports duplicate case values in switch statements,
-  including those from constant expressions
+- **Unreachable switch code** (`-Wswitch-unreachable`): Warns about statements before the first `case` label in a
+  switch, which can never be executed
 - **Unused parameters** (`-Wunused-parameter`): Warns when a function parameter is declared but never used in the
   function body
+- **Division by zero** (`-Wdiv-by-zero`): Warns when `/` or `%`, including the compound forms `/=` and `%=`, has
+  a constant zero divisor (e.g. `x / 0`, `x % 0`, `x /= 0`, `x %= 0`). A constant zero divisor in a context that
+  requires a constant expression (such as a static initializer) is a hard error instead
+- **Out-of-range shift count** (`-Wshift-count-overflow`, `-Wshift-count-negative`): Warns when a `<<` or `>>`
+  (including `<<=` / `>>=`) has a constant shift count that is negative or `>=` the width of the left operand's type
+  (32 for `int`, 64 for `long`), e.g. `1 << 32` or `1 << -1`
+- **Integer overflow in a constant expression** (`-Woverflow`): Warns when folding a constant expression in a static
+  initializer or case label leaves the result type (e.g. `int x = 2147483647 + 1;`). NCC wraps deterministically
+  (two's complement) rather than treating it as undefined, so this flags non-portable code instead of erroring
+- **Constant changed by an implicit conversion** (`-Wconstant-conversion`): Warns when a constant initializer is
+  implicitly narrowed to a type that can't hold it (e.g. `int x = 2147483648;`, which truncates to `-2147483648`).
+  An explicit cast (`int x = (int)2147483648;`) silences it
+- **Unsequenced modification** (`-Wsequence-point`): Warns when the same object is modified more than once between
+  sequence points (e.g. `i = i++`, `i++ + i++`, `f(i++, i++)`) — undefined in standard C. NCC evaluates left-to-right
+  so the result is well-defined, but the code is non-portable
 
 #### Developer Experience
 

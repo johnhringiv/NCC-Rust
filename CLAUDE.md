@@ -100,7 +100,9 @@ Source .c → Lexer → Parser → Validator → Tackifier → Codegen → Emitt
 
 **Validator** (`validate.rs`): Two-pass semantic analysis:
 1. **Resolution pass**: Renames variables to unique identifiers, labels loops/switches for break/continue, validates goto targets
-2. **Type checking pass**: Builds symbol table, checks types, evaluates constant expressions (for static initializers and case labels), emits warnings (-Wshadow, -Wswitch-unreachable, -Wunused-parameter)
+2. **Type checking pass**: Builds symbol table, checks types, evaluates constant expressions (for static initializers and case labels)
+
+Both passes emit developer-friendly warnings; see the README's "Compile-Time Warnings" section for the catalog. **Warning conventions**: each `-W` warning is emitted through a single `warn_*` helper (so its wording/format lives in one place), and any function that emits one says "emits `-W…`" in its doc comment (keeps `grep -i emit` an accurate audit).
 
 Returns `(NameGenerator, SymbolTable)` needed by subsequent passes. Exit code 30 on error.
 

@@ -37,9 +37,9 @@
 //!   └─ emit_object_with_labels()         — generate object, then decode back
 //! ```
 
-use crate::codegen::{self, BinaryOp, CondCode, Instruction, Operand, Reg, UnaryOp, StaticVariable, AssemblyType};
-use crate::tacky::{VarInit,};
-use crate::validate::{StaticInt};
+use crate::codegen::{self, AssemblyType, BinaryOp, CondCode, Instruction, Operand, Reg, StaticVariable, UnaryOp};
+use crate::tacky::VarInit;
+use crate::validate::StaticInt;
 use iced_x86::{BlockEncoderOptions, IcedError, SymbolResolver, SymbolResult, code_asm::*};
 use object::write::{
     Object, Relocation, RelocationFlags, StandardSection, StandardSegment, Symbol, SymbolFlags, SymbolId, SymbolKind,
@@ -362,7 +362,13 @@ fn emit_object_with_labels(
     let mut data_offset: u64 = 0;
     let mut bss_offset: u64 = 0;
     let mut static_var_symbols: HashMap<Rc<str>, SymbolId> = HashMap::new();
-    for StaticVariable { name, global, init, alignment } in &program.static_vars {
+    for StaticVariable {
+        name,
+        global,
+        init,
+        alignment,
+    } in &program.static_vars
+    {
         let sym_id = match init {
             // Defined variable - allocate storage in .data or .bss
             VarInit::Defined(init_val) => {
@@ -535,7 +541,7 @@ fn gpr32(reg: &Reg) -> AsmRegister32 {
         SI => registers::gpr32::esi,
         R8 => registers::gpr32::r8d,
         R9 => registers::gpr32::r9d,
-        SP => registers::gpr32::esp
+        SP => registers::gpr32::esp,
     }
 }
 
@@ -551,7 +557,7 @@ fn gpr64_reg(reg: &Reg) -> AsmRegister64 {
         SI => gpr64::rsi,
         R8 => gpr64::r8,
         R9 => gpr64::r9,
-        SP => gpr64::rsp
+        SP => gpr64::rsp,
     }
 }
 
@@ -604,16 +610,20 @@ fn emit_instruction(
             (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.mov(gpr64_reg(d), gpr64_reg(s))?,
 
             (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => a.mov(mem_rbp(*off, *size), gpr32(s))?,
-            (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => a.mov(mem_rbp(*off, *size), gpr64_reg(s))?,
+            (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => {
+                a.mov(mem_rbp(*off, *size), gpr64_reg(s))?
+            }
 
             (Operand::Stack(off), Operand::Reg(d), AssemblyType::Longword) => a.mov(gpr32(d), mem_rbp(*off, *size))?,
-            (Operand::Stack(off), Operand::Reg(d), AssemblyType::Quadword) => a.mov(gpr64_reg(d), mem_rbp(*off, *size))?,
+            (Operand::Stack(off), Operand::Reg(d), AssemblyType::Quadword) => {
+                a.mov(gpr64_reg(d), mem_rbp(*off, *size))?
+            }
             (Operand::Data(name), Operand::Reg(d), _) => {
                 let lbl = data_labels.get(name).unwrap();
                 data_relocs.push((a.instructions().len(), name.clone()));
                 match size {
                     AssemblyType::Longword => a.mov(gpr32(d), dword_ptr(*lbl))?,
-                    AssemblyType::Quadword => a.mov(gpr64_reg(d), qword_ptr(*lbl))?
+                    AssemblyType::Quadword => a.mov(gpr64_reg(d), qword_ptr(*lbl))?,
                 }
             }
 
@@ -630,11 +640,11 @@ fn emit_instruction(
                 data_relocs.push((a.instructions().len(), name.clone()));
                 match size {
                     AssemblyType::Longword => a.mov(dword_ptr(*lbl), gpr32(s))?,
-                    AssemblyType::Quadword => a.mov(qword_ptr(*lbl), gpr64_reg(s))?
+                    AssemblyType::Quadword => a.mov(qword_ptr(*lbl), gpr64_reg(s))?,
                 }
             }
             _ => unreachable!("unsupported mov combination: {:?}", ins),
-        }
+        },
         Instruction::Movsx { src, dst } => match (src, dst) {
             (Operand::Reg(s), Operand::Reg(d)) => a.movsxd(gpr64_reg(d), gpr32(s))?,
             (Operand::Stack(off), Operand::Reg(d)) => a.movsxd(gpr64_reg(d), mem_rbp(*off, AssemblyType::Longword))?,
@@ -644,7 +654,7 @@ fn emit_instruction(
                 a.movsxd(gpr64_reg(d), dword_ptr(*lbl))?;
             }
             _ => unreachable!("unsupported movsx combination: {:?}", ins),
-        }
+        },
         Instruction::Unary { op, dst, size } => match op {
             UnaryOp::Neg => match (dst, size) {
                 (Operand::Reg(r), AssemblyType::Longword) => a.neg(gpr32(r))?,
@@ -674,14 +684,18 @@ fn emit_instruction(
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Longword) => a.add(gpr32(d), gpr32(s))?,
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.add(gpr64_reg(d), gpr64_reg(s))?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => a.add(gpr32(d), *v as i32)?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => a.add(mem_rbp(*off, *size), gpr32(s))?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => a.add(mem_rbp(*off, *size), gpr64_reg(s))?,
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => {
+                    a.add(mem_rbp(*off, *size), gpr32(s))?
+                }
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => {
+                    a.add(mem_rbp(*off, *size), gpr64_reg(s))?
+                }
                 (Operand::Reg(s), Operand::Data(name), _) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
                     match size {
                         AssemblyType::Longword => a.add(dword_ptr(*lbl), gpr32(s))?,
-                        AssemblyType::Quadword => a.add(qword_ptr(*lbl), gpr64_reg(s))?
+                        AssemblyType::Quadword => a.add(qword_ptr(*lbl), gpr64_reg(s))?,
                     }
                 }
 
@@ -699,8 +713,12 @@ fn emit_instruction(
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Longword) => a.sub(gpr32(d), gpr32(s))?,
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.sub(gpr64_reg(d), gpr64_reg(s))?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => a.sub(gpr32(d), *v as i32)?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => a.sub(mem_rbp(*off, *size), gpr32(s))?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => a.sub(mem_rbp(*off, *size), gpr64_reg(s))?,
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => {
+                    a.sub(mem_rbp(*off, *size), gpr32(s))?
+                }
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => {
+                    a.sub(mem_rbp(*off, *size), gpr64_reg(s))?
+                }
                 (Operand::Reg(s), Operand::Data(name), _) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
@@ -723,8 +741,12 @@ fn emit_instruction(
             BinaryOp::Mult => match (src, dst, size) {
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Longword) => a.imul_2(gpr32(d), gpr32(s))?,
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.imul_2(gpr64_reg(d), gpr64_reg(s))?,
-                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Longword) => a.imul_2(gpr32(d), mem_rbp(*off, *size))?,
-                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Quadword) => a.imul_2(gpr64_reg(d), mem_rbp(*off, *size))?,
+                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Longword) => {
+                    a.imul_2(gpr32(d), mem_rbp(*off, *size))?
+                }
+                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Quadword) => {
+                    a.imul_2(gpr64_reg(d), mem_rbp(*off, *size))?
+                }
                 (Operand::Data(name), Operand::Reg(d), _) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
@@ -735,8 +757,12 @@ fn emit_instruction(
                 }
 
                 // large imm is rewritten in fix_invalid, downcast is safe
-                (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => a.imul_3(gpr32(d), gpr32(d), *v as i32)?,
-                (Operand::Imm(v), Operand::Reg(d), AssemblyType::Quadword) => a.imul_3(gpr64_reg(d), gpr64_reg(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => {
+                    a.imul_3(gpr32(d), gpr32(d), *v as i32)?
+                }
+                (Operand::Imm(v), Operand::Reg(d), AssemblyType::Quadword) => {
+                    a.imul_3(gpr64_reg(d), gpr64_reg(d), *v as i32)?
+                }
                 _ => unreachable!("Mult {:?}, {:?}", src, dst),
             },
             BinaryOp::BitAnd => match (src, dst, size) {
@@ -744,14 +770,18 @@ fn emit_instruction(
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.and(gpr64_reg(d), gpr64_reg(s))?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => a.and(gpr32(d), *v as i32)?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Quadword) => a.and(gpr64_reg(d), *v as i32)?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => a.and(mem_rbp(*off, *size), gpr32(s))?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => a.and(mem_rbp(*off, *size), gpr64_reg(s))?,
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => {
+                    a.and(mem_rbp(*off, *size), gpr32(s))?
+                }
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => {
+                    a.and(mem_rbp(*off, *size), gpr64_reg(s))?
+                }
                 (Operand::Reg(s), Operand::Data(name), _) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
                     match size {
                         AssemblyType::Longword => a.and(dword_ptr(*lbl), gpr32(s))?,
-                        AssemblyType::Quadword => a.and(qword_ptr(*lbl), gpr64_reg(s))?
+                        AssemblyType::Quadword => a.and(qword_ptr(*lbl), gpr64_reg(s))?,
                     }
                 }
 
@@ -769,14 +799,18 @@ fn emit_instruction(
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.or(gpr64_reg(d), gpr64_reg(s))?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => a.or(gpr32(d), *v as i32)?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Quadword) => a.or(gpr64_reg(d), *v as i32)?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => a.or(mem_rbp(*off, *size), gpr32(s))?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => a.or(mem_rbp(*off, *size), gpr64_reg(s))?,
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => {
+                    a.or(mem_rbp(*off, *size), gpr32(s))?
+                }
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => {
+                    a.or(mem_rbp(*off, *size), gpr64_reg(s))?
+                }
                 (Operand::Reg(s), Operand::Data(name), _) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
                     match size {
                         AssemblyType::Longword => a.or(dword_ptr(*lbl), gpr32(s))?,
-                        AssemblyType::Quadword => a.or(qword_ptr(*lbl), gpr64_reg(s))?
+                        AssemblyType::Quadword => a.or(qword_ptr(*lbl), gpr64_reg(s))?,
                     }
                 }
 
@@ -794,14 +828,18 @@ fn emit_instruction(
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.xor(gpr64_reg(d), gpr64_reg(s))?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => a.xor(gpr32(d), *v as i32)?,
                 (Operand::Imm(v), Operand::Reg(d), AssemblyType::Quadword) => a.xor(gpr64_reg(d), *v as i32)?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => a.xor(mem_rbp(*off, *size), gpr32(s))?,
-                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => a.xor(mem_rbp(*off, *size), gpr64_reg(s))?,
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Longword) => {
+                    a.xor(mem_rbp(*off, *size), gpr32(s))?
+                }
+                (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => {
+                    a.xor(mem_rbp(*off, *size), gpr64_reg(s))?
+                }
                 (Operand::Reg(s), Operand::Data(name), _) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
                     match size {
                         AssemblyType::Longword => a.xor(dword_ptr(*lbl), gpr32(s))?,
-                        AssemblyType::Quadword => a.xor(qword_ptr(*lbl), gpr64_reg(s))?
+                        AssemblyType::Quadword => a.xor(qword_ptr(*lbl), gpr64_reg(s))?,
                     }
                 }
 
@@ -856,24 +894,30 @@ fn emit_instruction(
         Instruction::Cmp { v1, v2, size } => match (v1, v2, size) {
             (Operand::Reg(r1), Operand::Reg(r2), AssemblyType::Longword) => a.cmp(gpr32(r2), gpr32(r1))?,
             (Operand::Reg(r1), Operand::Reg(r2), AssemblyType::Quadword) => a.cmp(gpr64_reg(r2), gpr64_reg(r1))?,
-            (Operand::Reg(r1), Operand::Stack(off), AssemblyType::Longword) => a.cmp(mem_rbp(*off, *size), gpr32(r1))?,
-            (Operand::Reg(r1), Operand::Stack(off), AssemblyType::Quadword) => a.cmp(mem_rbp(*off, *size), gpr64_reg(r1))?,
+            (Operand::Reg(r1), Operand::Stack(off), AssemblyType::Longword) => {
+                a.cmp(mem_rbp(*off, *size), gpr32(r1))?
+            }
+            (Operand::Reg(r1), Operand::Stack(off), AssemblyType::Quadword) => {
+                a.cmp(mem_rbp(*off, *size), gpr64_reg(r1))?
+            }
             (Operand::Reg(r1), Operand::Data(name), _) => {
                 let lbl = data_labels.get(name).unwrap();
                 data_relocs.push((a.instructions().len(), name.clone()));
                 match size {
                     AssemblyType::Longword => a.cmp(dword_ptr(*lbl), gpr32(r1))?,
-                    AssemblyType::Quadword => a.cmp(qword_ptr(*lbl), gpr64_reg(r1))?
+                    AssemblyType::Quadword => a.cmp(qword_ptr(*lbl), gpr64_reg(r1))?,
                 }
             }
             (Operand::Stack(off), Operand::Reg(r), AssemblyType::Longword) => a.cmp(gpr32(r), mem_rbp(*off, *size))?,
-            (Operand::Stack(off), Operand::Reg(r), AssemblyType::Quadword) => a.cmp(gpr64_reg(r), mem_rbp(*off, *size))?,
+            (Operand::Stack(off), Operand::Reg(r), AssemblyType::Quadword) => {
+                a.cmp(gpr64_reg(r), mem_rbp(*off, *size))?
+            }
             (Operand::Data(name), Operand::Reg(r), _) => {
                 let lbl = data_labels.get(name).unwrap();
                 data_relocs.push((a.instructions().len(), name.clone()));
                 match size {
                     AssemblyType::Longword => a.cmp(gpr32(r), dword_ptr(*lbl))?,
-                    AssemblyType::Quadword => a.cmp(gpr64_reg(r), qword_ptr(*lbl))?
+                    AssemblyType::Quadword => a.cmp(gpr64_reg(r), qword_ptr(*lbl))?,
                 }
             }
             (Operand::Imm(v), Operand::Reg(r), AssemblyType::Longword) => a.cmp(gpr32(r), *v as i32)?,
