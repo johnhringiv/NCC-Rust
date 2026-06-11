@@ -3,6 +3,13 @@ name = "ncc"
 version = "0.1.0"
 edition = "2024"
 
+# All tests live in tests/ (integration). The binary has no unit tests, so skip its
+# (empty) test harness to avoid a redundant "running 0 tests" summary under `cargo test`.
+[[bin]]
+name = "ncc"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 clap = { version = "4.5.39", features = ["derive"] }
 colored = "3.0.0"
@@ -13,4 +20,5 @@ regex = "1.11.1"
 
 [dev-dependencies]
 glob = "0.3.2"
+rayon = "1.10"
 serde_json = "1.0"

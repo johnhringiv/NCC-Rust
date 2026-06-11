@@ -289,27 +289,25 @@ fn main() {
             std::process::exit(0);
         }
 
-        let mut ast = ast;
-        let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+        let validated_result = validate::resolve_program(ast).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(30);
         });
 
+        let (mut name_gen, typed_program, symbols) = validated_result;
+
         if args.validate {
-            println!("Program Valid");
-            println!("{}", ast.itf_string());
+            println!("{}", typed_program.itf_string());
             std::process::exit(0);
         }
-
-        let (mut name_gen, symbols) = validated_result;
-        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen, &symbols);
+        let tacky_ast = tacky::tackify_program(typed_program, &mut name_gen, &symbols);
 
         if args.tacky {
             println!("{}", tacky_ast.itf_string());
             std::process::exit(0);
         }
 
-        let code_ast = codegen::generate(&tacky_ast);
+        let (code_ast, _backend_symbols) = codegen::generate(tacky_ast, &symbols);
         if args.codegen {
             println!("{}", code_ast.itf_string());
             std::process::exit(0);
@@ -361,16 +359,20 @@ fn main() {
             if defined_vars.peek().is_some() {
                 println!();
                 for (sv, init_val) in defined_vars {
-                    let section = if init_val == 0 { ".bss" } else { ".data" };
+                    let is_zero = matches!(
+                        init_val,
+                        validate::StaticInt::IntInit(0) | validate::StaticInt::LongInit(0)
+                    );
+                    let section = if is_zero { ".bss" } else { ".data" };
                     println!("{}", section.cyan());
                     if sv.global {
                         println!("  {}", format!(".globl {}", sv.name).dimmed());
                     }
                     println!("{}:", sv.name.green());
-                    if init_val == 0 {
+                    if is_zero {
                         println!("  {}", ".zero 4".yellow());
                     } else {
-                        println!("  {} {}", ".long".yellow(), init_val.to_string().cyan());
+                        println!("  {} {:?}", ".long".yellow(), init_val);
                     }
                 }
             }
@@ -399,15 +401,14 @@ fn main() {
             std::process::exit(20)
         });
 
-        let mut ast = ast;
-        let validated_result = validate::resolve_program(&mut ast).unwrap_or_else(|e| {
+        let validated_result = validate::resolve_program(ast).unwrap_or_else(|e| {
             eprintln!("{e:?}");
             std::process::exit(30);
         });
 
-        let (mut name_gen, symbols) = validated_result;
-        let tacky_ast = tacky::tackify_program(&ast, &mut name_gen, &symbols);
-        let code_ast = codegen::generate(&tacky_ast);
+        let (mut name_gen, typed_program, symbols) = validated_result;
+        let tacky_ast = tacky::tackify_program(typed_program, &mut name_gen, &symbols);
+        let (code_ast, _backend_symbols) = codegen::generate(tacky_ast, &symbols);
 
         let path = Path::new(c_file);
         let obj_file = path.with_extension("o").to_string_lossy().to_string();
@@ -417,7 +418,11 @@ fn main() {
             let asm_file = path.with_extension("s").to_string_lossy().to_string();
             fs::write(&asm_file, asm).expect("Failed to write assembly file");
 
-            let status = std::process::Command::new("as")
+            let mut cmd = std::process::Command::new("as");
+            // On arm64 hosts the system assembler must be told to target x86_64.
+            #[cfg(target_arch = "aarch64")]
+            cmd.args(["-arch", "x86_64"]);
+            let status = cmd
                 .arg(&asm_file)
                 .arg("-o")
                 .arg(&obj_file)
@@ -442,7 +447,11 @@ fn main() {
         let path = Path::new(asm_file);
         let obj_file = path.with_extension("o").to_string_lossy().to_string();
 
-        let status = std::process::Command::new("as")
+        let mut cmd = std::process::Command::new("as");
+        // On arm64 hosts the system assembler must be told to target x86_64.
+        #[cfg(target_arch = "aarch64")]
+        cmd.args(["-arch", "x86_64"]);
+        let status = cmd
             .arg(asm_file)
             .arg("-o")
             .arg(&obj_file)

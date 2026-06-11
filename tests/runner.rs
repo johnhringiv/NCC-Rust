@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-static CHAPTER_COMPLETED: i32 = 10;
-static EXTRA_COMPLETED: i32 = 10;
+static CHAPTER_COMPLETED: i32 = 11;
+static EXTRA_COMPLETED: i32 = 11;
 
 #[derive(Debug, PartialEq, Clone)]
 enum ProgramOutput {
@@ -21,6 +21,22 @@ struct TestCase {
     c_file: String,
     extra_files: Vec<String>, // Library files or assembly files
     output: ProgramOutput,
+}
+
+/// Accumulated pass/fail tallies for a single case (a case may run several sub-tests).
+#[derive(Debug, Default)]
+struct CaseResult {
+    passed: usize,
+    failed: usize,
+    failures: Vec<String>,
+}
+
+impl CaseResult {
+    fn merge(&mut self, other: CaseResult) {
+        self.passed += other.passed;
+        self.failed += other.failed;
+        self.failures.extend(other.failures);
+    }
 }
 
 /// Load assembly_libs from test_properties.json
@@ -246,14 +262,7 @@ fn load_expected(json_path: &str) -> Result<HashMap<String, ExpectedResult>, Box
     Ok(results)
 }
 
-fn run_test(
-    case: &TestCase,
-    total_passed: &mut usize,
-    total_failed: &mut usize,
-    failed_tests: &mut Vec<String>,
-    extra_args: &[String],
-    test_label: &str,
-) {
+fn run_test(case: &TestCase, result: &mut CaseResult, extra_args: &[String], test_label: &str) {
     let path = std::path::Path::new(&case.c_file);
     let binary_path = path.with_extension("");
     let binary_path_str = binary_path.to_str().unwrap();
@@ -324,15 +333,17 @@ fn run_test(
     };
 
     if passed {
-        *total_passed += 1;
+        result.passed += 1;
     } else {
-        *total_failed += 1;
+        result.failed += 1;
         let label = if test_label.is_empty() {
             case.c_file.clone()
         } else {
             format!("{} [{}]", case.c_file, test_label)
         };
-        failed_tests.push(format!("{} (expected {:?}, got {:?})", label, case.output, actual));
+        result
+            .failures
+            .push(format!("{} (expected {:?}, got {:?})", label, case.output, actual));
     }
 }
 
@@ -342,9 +353,7 @@ fn run_library_cross_test(
     client_file: &str,
     library_file: &str,
     expected: &ProgramOutput,
-    total_passed: &mut usize,
-    total_failed: &mut usize,
-    failed_tests: &mut Vec<String>,
+    result: &mut CaseResult,
     ncc_compiles_client: bool,
 ) {
     let ncc_path = get_ncc_binary_path();
@@ -371,28 +380,28 @@ fn run_library_cross_test(
             .arg(&client_obj)
             .status()
     } else {
-        std::process::Command::new("gcc")
-            .arg("-c")
-            .arg(client_file)
-            .arg("-o")
-            .arg(&client_obj)
-            .status()
+        let mut cmd = std::process::Command::new("gcc");
+        // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
+        #[cfg(target_arch = "aarch64")]
+        cmd.args(["-arch", "x86_64"]);
+        cmd.arg("-c").arg(client_file).arg("-o").arg(&client_obj).status()
     };
 
     if client_status.is_err() || !client_status.unwrap().success() {
-        *total_failed += 1;
-        failed_tests.push(format!("{} [{}] (client compilation failed)", client_file, test_label));
+        result.failed += 1;
+        result
+            .failures
+            .push(format!("{} [{}] (client compilation failed)", client_file, test_label));
         return;
     }
 
     // Compile library
     let library_status = if ncc_compiles_client {
-        std::process::Command::new("gcc")
-            .arg("-c")
-            .arg(library_file)
-            .arg("-o")
-            .arg(&library_obj)
-            .status()
+        let mut cmd = std::process::Command::new("gcc");
+        // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
+        #[cfg(target_arch = "aarch64")]
+        cmd.args(["-arch", "x86_64"]);
+        cmd.arg("-c").arg(library_file).arg("-o").arg(&library_obj).status()
     } else {
         std::process::Command::new(&ncc_path)
             .arg("-c")
@@ -404,13 +413,19 @@ fn run_library_cross_test(
 
     if library_status.is_err() || !library_status.unwrap().success() {
         std::fs::remove_file(&client_obj).ok();
-        *total_failed += 1;
-        failed_tests.push(format!("{} [{}] (library compilation failed)", client_file, test_label));
+        result.failed += 1;
+        result
+            .failures
+            .push(format!("{} [{}] (library compilation failed)", client_file, test_label));
         return;
     }
 
     // Link with gcc
-    let link_status = std::process::Command::new("gcc")
+    let mut link_cmd = std::process::Command::new("gcc");
+    // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
+    #[cfg(target_arch = "aarch64")]
+    link_cmd.args(["-arch", "x86_64"]);
+    let link_status = link_cmd
         .arg(&client_obj)
         .arg(&library_obj)
         .arg("-o")
@@ -421,8 +436,10 @@ fn run_library_cross_test(
     std::fs::remove_file(&library_obj).ok();
 
     if link_status.is_err() || !link_status.unwrap().success() {
-        *total_failed += 1;
-        failed_tests.push(format!("{} [{}] (linking failed)", client_file, test_label));
+        result.failed += 1;
+        result
+            .failures
+            .push(format!("{} [{}] (linking failed)", client_file, test_label));
         return;
     }
 
@@ -470,94 +487,100 @@ fn run_library_cross_test(
     };
 
     if passed {
-        *total_passed += 1;
+        result.passed += 1;
     } else {
-        *total_failed += 1;
-        failed_tests.push(format!(
+        result.failed += 1;
+        result.failures.push(format!(
             "{} [{}] (expected {:?}, got {:?})",
             client_file, test_label, expected, actual
         ));
     }
 }
 
-fn run_cases(cases: Vec<TestCase>) {
-    let mut total_passed = 0;
-    let mut total_failed = 0;
-    let mut failed_tests = Vec::new();
+/// Runs all sub-tests for a single case and returns its tally. Pure with respect to shared
+/// state (output files are derived from the case's own source path, so cases don't collide),
+/// which lets `run_cases` evaluate cases concurrently.
+fn run_one_case(case: &TestCase) -> CaseResult {
+    let mut result = CaseResult::default();
+    let is_library_test = case.c_file.contains("/libraries/") && case.c_file.ends_with("_client.c");
 
-    for case in &cases {
-        let is_library_test = case.c_file.contains("/libraries/") && case.c_file.ends_with("_client.c");
-
-        match &case.output {
-            ProgramOutput::Error(_) => {
-                run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[], "");
-            }
-            ProgramOutput::Result { .. } => {
-                // For library tests, use cross-compilation to validate ABI compliance
-                if is_library_test {
-                    if let Some(library_file) = case.extra_files.first() {
-                        // Test 1: ncc compiles client, gcc compiles library (validates ncc as caller)
-                        run_library_cross_test(
-                            &case.c_file,
-                            library_file,
-                            &case.output,
-                            &mut total_passed,
-                            &mut total_failed,
-                            &mut failed_tests,
-                            true,
-                        );
-                        // Test 2: gcc compiles client, ncc compiles library (validates ncc as callee)
-                        run_library_cross_test(
-                            &case.c_file,
-                            library_file,
-                            &case.output,
-                            &mut total_passed,
-                            &mut total_failed,
-                            &mut failed_tests,
-                            false,
-                        );
-                    }
-                } else {
-                    // Standard test: compile everything with ncc
-                    run_test(case, &mut total_passed, &mut total_failed, &mut failed_tests, &[], "");
-                    run_test(
-                        case,
-                        &mut total_passed,
-                        &mut total_failed,
-                        &mut failed_tests,
-                        &["--no-iced".to_string()],
-                        "no-iced",
-                    );
+    match &case.output {
+        ProgramOutput::Error(_) => {
+            run_test(case, &mut result, &[], "");
+        }
+        ProgramOutput::Result { .. } => {
+            // For library tests, use cross-compilation to validate ABI compliance
+            if is_library_test {
+                if let Some(library_file) = case.extra_files.first() {
+                    // Test 1: ncc compiles client, gcc compiles library (validates ncc as caller)
+                    run_library_cross_test(&case.c_file, library_file, &case.output, &mut result, true);
+                    // Test 2: gcc compiles client, ncc compiles library (validates ncc as callee)
+                    run_library_cross_test(&case.c_file, library_file, &case.output, &mut result, false);
                 }
+            } else {
+                // Standard test: compile everything with ncc
+                run_test(case, &mut result, &[], "");
+                // The --no-iced text emitter forks an extra `as` per test, doubling
+                // process count. Codecov unions coverage across the CI matrix, so emit.rs
+                // stays fully covered by the Linux job; only run it there. (A single
+                // non-linux --no-iced smoke test below keeps the arm64 `as` shim covered.)
+                #[cfg(target_os = "linux")]
+                run_test(case, &mut result, &["--no-iced".to_string()], "no-iced");
             }
         }
     }
-    // takes too long to do this for all cases
+
+    result
+}
+
+fn run_cases(cases: Vec<TestCase>) {
+    use rayon::prelude::*;
+
+    // Evaluate cases in parallel. rayon's global pool bounds total concurrency across all
+    // test functions. `collect` preserves input order, so the sequential merge below lists
+    // failures deterministically regardless of completion order.
+    let per_case: Vec<CaseResult> = cases.par_iter().map(run_one_case).collect();
+    let mut tally = CaseResult::default();
+    for r in per_case {
+        tally.merge(r);
+    }
+
+    // takes too long to do this for all cases.
+    // On macOS the default linker is already external `ld` (libwild is linux-only), so this
+    // case is a redundant no-op there — only exercise it on Linux.
+    #[cfg(target_os = "linux")]
     run_test(
         cases.first().unwrap(),
-        &mut total_passed,
-        &mut total_failed,
-        &mut failed_tests,
+        &mut tally,
         &["--external-linker".to_string()],
         "external-linker",
     );
 
-    println!("\n=== C Programs Test Results ===");
-    println!("Passed: {total_passed}");
-    println!("Failed: {total_failed}");
-
-    if !failed_tests.is_empty() {
-        println!("\nFailed tests:");
-        for test in &failed_tests {
-            println!("  - {test}");
-        }
+    // On non-Linux hosts the per-test --no-iced runs are skipped above to avoid forking an
+    // extra `as` per test. Run exactly ONE here so the arm64 `as --arch x86_64` cross-assembly
+    // shim still gets coverage. Pick the first case whose output is a Result and isn't a
+    // _client.c library test (those go through the cross-compilation path, not run_test).
+    #[cfg(not(target_os = "linux"))]
+    if let Some(case) = cases.iter().find(|c| {
+        matches!(c.output, ProgramOutput::Result { .. })
+            && !(c.c_file.contains("/libraries/") && c.c_file.ends_with("_client.c"))
+    }) {
+        run_test(case, &mut tally, &["--no-iced".to_string()], "no-iced-smoke");
     }
 
-    if total_failed > 0 {
-        println!("{total_failed} tests failed")
-    }
-    assert_eq!(total_failed, 0);
-    assert!(total_passed > 0)
+    assert!(
+        tally.failed == 0,
+        "{} of {} sub-tests failed:\n{}",
+        tally.failed,
+        tally.passed + tally.failed,
+        tally
+            .failures
+            .iter()
+            .map(|f| format!("  - {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(tally.passed > 0, "no test cases ran");
 }
 
 #[test]
@@ -863,4 +886,291 @@ fn test_no_warning_on_declaration() {
     );
 
     println!("✓ No warning on declaration test passed");
+}
+
+#[test]
+fn test_division_by_zero_warning() {
+    let test_file = "tests/c_programs/warnings/division_by_zero.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr_output.contains("-Wdiv-by-zero"),
+        "Expected -Wdiv-by-zero warning, but stderr was: {}",
+        stderr_output
+    );
+
+    // Both the `/` and `%` cases should be reported with their distinct wording
+    assert!(
+        stderr_output.contains("division by zero"),
+        "Warning should mention division by zero, but stderr was: {}",
+        stderr_output
+    );
+    assert!(
+        stderr_output.contains("remainder by zero"),
+        "Warning should mention remainder by zero, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Division-by-zero warning test passed");
+}
+
+#[test]
+fn test_no_division_by_zero_on_nonconstant() {
+    let test_file = "tests/c_programs/warnings/no_division_by_zero.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // Non-constant and non-zero constant divisors must not warn
+    assert!(
+        !stderr_output.contains("-Wdiv-by-zero"),
+        "Non-constant / non-zero divisors should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No division-by-zero on non-constant divisor test passed");
+}
+
+#[test]
+fn test_shift_count_warning() {
+    let test_file = "tests/c_programs/warnings/shift_count.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // Both the overflow (count >= width) and negative-count cases should be reported
+    assert!(
+        stderr_output.contains("-Wshift-count-overflow"),
+        "Expected -Wshift-count-overflow warning, but stderr was: {}",
+        stderr_output
+    );
+    assert!(
+        stderr_output.contains("-Wshift-count-negative"),
+        "Expected -Wshift-count-negative warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Shift-count warning test passed");
+}
+
+#[test]
+fn test_no_shift_count_on_valid_shifts() {
+    let test_file = "tests/c_programs/warnings/no_shift_count.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // In-range and non-constant shift counts must not warn
+    assert!(
+        !stderr_output.contains("-Wshift-count"),
+        "In-range / non-constant shift counts should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No shift-count warning on valid shifts test passed");
+}
+
+#[test]
+fn test_div_by_zero_in_constant_context_error() {
+    // A constant zero divisor in a context requiring a constant expression is a hard error
+    // (exit 30) reported specifically as "division by zero in constant expression", not the
+    // generic "not a constant expression" / "not an integer constant expression".
+    let test_file = "tests/c_programs/switch/invalid_semantics/case_div_by_zero.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert_eq!(
+        output.status.code(),
+        Some(30),
+        "Expected exit code 30 for a div-by-zero case label"
+    );
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("division by zero in constant expression"),
+        "Expected a specific division-by-zero message, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Division-by-zero in constant context error test passed");
+}
+
+#[test]
+fn test_overflow_warning() {
+    // Folds that leave the result type warn with -Woverflow. The `-INT_MIN`, `INT_MIN / -1`,
+    // and `INT_MIN % -1` cases in this fixture previously *panicked* the compiler, so asserting a
+    // clean exit (not 101) is also the no-panic regression check.
+    let test_file = "tests/c_programs/warnings/overflow.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "ncc panicked on a constant overflow fold (regression)"
+    );
+    assert_eq!(output.status.code(), Some(0), "expected --validate to succeed");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("-Woverflow"),
+        "Expected -Woverflow warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Overflow warning + no-panic regression test passed");
+}
+
+#[test]
+fn test_no_overflow_on_in_range() {
+    let test_file = "tests/c_programs/warnings/no_overflow.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr_output.contains("-Woverflow"),
+        "In-range constant folds should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No overflow warning on in-range folds test passed");
+}
+
+#[test]
+fn test_constant_conversion_warning() {
+    let test_file = "tests/c_programs/warnings/constant_conversion.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("-Wconstant-conversion"),
+        "Expected -Wconstant-conversion warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Constant-conversion warning test passed");
+}
+
+#[test]
+fn test_no_constant_conversion_on_cast_or_fit() {
+    let test_file = "tests/c_programs/warnings/no_constant_conversion.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    // Explicit casts and conversions that don't lose value must not warn
+    assert!(
+        !stderr_output.contains("-Wconstant-conversion"),
+        "Explicit casts / in-range conversions should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No constant-conversion on cast/fit test passed");
+}
+
+#[test]
+fn test_sequence_point_warning() {
+    let test_file = "tests/c_programs/warnings/sequence_point.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_output.contains("-Wsequence-point"),
+        "Expected -Wsequence-point warning, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ Sequence-point warning test passed");
+}
+
+#[test]
+fn test_no_sequence_point_on_sequenced() {
+    let test_file = "tests/c_programs/warnings/no_sequence_point.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    // Single modifications and sequenced operators (?:, &&, separate statements) must not warn
+    assert!(
+        !stderr_output.contains("-Wsequence-point"),
+        "Sequenced / single modifications should not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No sequence-point on sequenced expressions test passed");
 }

@@ -1,10 +1,45 @@
-use crate::codegen::{BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, UnaryOp};
-use crate::tacky::{StaticVariable, VarInit};
+//! # Emitter (text) — Assembly AST to AT&T-Syntax Text Assembly
+//!
+//! Deprecated text-based emitter (enabled via `--no-iced`). Generates AT&T-syntax
+//! x86-64 assembly as a [`String`], intended to be written to a `.s` file and
+//! assembled by the system `as` assembler.
+//!
+//! ## Call Order
+//!
+//! ```text
+//! emit_program()                — public entry point, returns full assembly text
+//!   ├─ emit_function()          — .globl directive, prologue, instruction loop
+//!   │    └─ emit_instruction()  — single instruction to AT&T syntax
+//!   │         └─ emit_operand() — register/immediate/stack/data operand formatting
+//!   └─ emit_static_variable()   — .data/.bss directives for static vars
+//! ```
+
+use crate::codegen::{
+    AssemblyType, BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, StaticVariable, UnaryOp,
+};
+use crate::tacky::VarInit;
+use crate::validate;
 
 enum RegWidth {
     Byte,
     DWord,
     QWord,
+}
+
+impl RegWidth {
+    fn from_size(size: &AssemblyType) -> Self {
+        match size {
+            AssemblyType::Longword => RegWidth::DWord,
+            AssemblyType::Quadword => RegWidth::QWord,
+        }
+    }
+}
+
+fn size_suffix(size: &AssemblyType) -> &'static str {
+    match size {
+        AssemblyType::Longword => "l",
+        AssemblyType::Quadword => "q",
+    }
 }
 
 fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
@@ -19,6 +54,7 @@ fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
             Reg::R9 => "r9b",
             Reg::R10 => "r10b",
             Reg::R11 => "r11b",
+            Reg::SP => "spl",
         },
         RegWidth::DWord => match reg {
             Reg::AX => "eax",
@@ -30,6 +66,7 @@ fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
             Reg::R9 => "r9d",
             Reg::R10 => "r10d",
             Reg::R11 => "r11d",
+            Reg::SP => "esp",
         },
         RegWidth::QWord => match reg {
             Reg::AX => "rax",
@@ -41,27 +78,30 @@ fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
             Reg::R9 => "r9",
             Reg::R10 => "r10",
             Reg::R11 => "r11",
+            Reg::SP => "rsp",
         },
     }
 }
 
-fn emit_unaryop(op: &UnaryOp) -> &'static str {
+fn emit_unaryop(op: &UnaryOp, size: &AssemblyType) -> String {
+    let suffix = size_suffix(size);
     match op {
-        UnaryOp::Neg => "negl",
-        UnaryOp::Not => "notl",
+        UnaryOp::Neg => format!("neg{suffix}"),
+        UnaryOp::Not => format!("not{suffix}"),
     }
 }
 
-fn emit_binaryop(op: &BinaryOp) -> &'static str {
+fn emit_binaryop(op: &BinaryOp, size: &AssemblyType) -> String {
+    let suffix = size_suffix(size);
     match op {
-        BinaryOp::Add => "addl",
-        BinaryOp::Sub => "subl",
-        BinaryOp::Mult => "imull",
-        BinaryOp::BitAnd => "andl",
-        BinaryOp::BitOr => "orl",
-        BinaryOp::BitXOr => "xorl",
-        BinaryOp::BitShl => "shll",
-        BinaryOp::BitSar => "sarl",
+        BinaryOp::Add => format!("add{suffix}"),
+        BinaryOp::Sub => format!("sub{suffix}"),
+        BinaryOp::Mult => format!("imul{suffix}"),
+        BinaryOp::BitAnd => format!("and{suffix}"),
+        BinaryOp::BitOr => format!("or{suffix}"),
+        BinaryOp::BitXOr => format!("xor{suffix}"),
+        BinaryOp::BitShl => format!("shl{suffix}"),
+        BinaryOp::BitSar => format!("sar{suffix}"),
     }
 }
 
@@ -90,65 +130,91 @@ fn emit_operand(operand: &Operand, reg_width: &RegWidth) -> String {
     output
 }
 
+/// Emits AT&T-syntax x86-64 assembly text for a single instruction.
+///
+/// `fn_name` is used to prefix labels and jump targets, ensuring they are scoped
+/// to the enclosing function (e.g., `main.label0`).
 fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
-    fn emit_operand_dw(operand: &Operand) -> String {
-        emit_operand(operand, &RegWidth::DWord)
-    }
     let mut output = String::new();
     match ins {
-        Instruction::Mov { src, dst } => {
-            output.push_str(&format!("movl {}, {}", emit_operand_dw(src), emit_operand_dw(dst)));
+        Instruction::Mov { src, dst, size } => {
+            let suffix = size_suffix(size);
+            let width = RegWidth::from_size(size);
+            output.push_str(&format!(
+                "mov{suffix} {}, {}",
+                emit_operand(src, &width),
+                emit_operand(dst, &width)
+            ));
+        }
+        Instruction::Movsx { src, dst } => {
+            // movslq - sign-extend 32-bit to 64-bit
+            output.push_str(&format!(
+                "movslq {}, {}",
+                emit_operand(src, &RegWidth::DWord),
+                emit_operand(dst, &RegWidth::QWord)
+            ));
         }
         Instruction::Ret => {
             output.push_str("movq %rbp, %rsp\n");
             output.push_str("\tpopq %rbp\n");
             output.push_str("\tret");
         }
-        Instruction::Unary { op, dst } => {
-            output.push_str(&format!("{} {}\n", emit_unaryop(op), emit_operand_dw(dst)));
-        }
-        Instruction::AllocateStack(offset) => {
-            output.push_str(&format!("subq ${}, %rsp", offset));
+        Instruction::Unary { op, dst, size } => {
+            let width = RegWidth::from_size(size);
+            output.push_str(&format!("{} {}\n", emit_unaryop(op, size), emit_operand(dst, &width)));
         }
         Instruction::Binary {
             op: op @ (BinaryOp::BitShl | BinaryOp::BitSar),
             src,
             dst,
+            size,
         } => {
-            // shr and sar always use an immediate or cl register as the source operand
+            // shl and sar always use an immediate or cl register as the source operand
+            let width = RegWidth::from_size(size);
             output.push_str(&format!(
                 "{} {}, {}",
-                emit_binaryop(op),
+                emit_binaryop(op, size),
                 emit_operand(src, &RegWidth::Byte),
-                emit_operand_dw(dst)
+                emit_operand(dst, &width)
             ));
         }
-        Instruction::Binary { op, src, dst } => {
+        Instruction::Binary { op, src, dst, size } => {
+            let width = RegWidth::from_size(size);
             output.push_str(&format!(
                 "{} {}, {}",
-                emit_binaryop(op),
-                emit_operand_dw(src),
-                emit_operand_dw(dst)
+                emit_binaryop(op, size),
+                emit_operand(src, &width),
+                emit_operand(dst, &width)
             ));
         }
-        Instruction::Idiv(op) => {
-            output.push_str(&format!("idivl {} ", emit_operand_dw(op)));
+        Instruction::Idiv(op, size) => {
+            let suffix = size_suffix(size);
+            let width = RegWidth::from_size(size);
+            output.push_str(&format!("idiv{suffix} {} ", emit_operand(op, &width)));
         }
-        Instruction::Cdq => {
-            output.push_str("cdq");
+        Instruction::Cdq(size) => {
+            let ins = match size {
+                AssemblyType::Longword => "cdq",
+                AssemblyType::Quadword => "cqo",
+            };
+            output.push_str(ins);
         }
-        Instruction::Cmp { v1, v2 } => {
-            output.push_str(&format!("cmpl {}, {}", emit_operand_dw(v1), emit_operand_dw(v2)));
+        Instruction::Cmp { v1, v2, size } => {
+            let suffix = size_suffix(size);
+            let width = RegWidth::from_size(size);
+            output.push_str(&format!(
+                "cmp{suffix} {}, {}",
+                emit_operand(v1, &width),
+                emit_operand(v2, &width)
+            ));
         }
         Instruction::Jmp(target) => {
-            // Use raw label name with function prefix for uniqueness
             output.push_str(&format!("jmp {}.{}", fn_name, target.0));
         }
         Instruction::JmpCC { code, label } => {
             output.push_str(&format!("j{} {}.{}", code.ins_suffix(), fn_name, label.0));
         }
         Instruction::Label(label) => {
-            // Use raw label name with function prefix for uniqueness
             output.push_str(&format!("{}.{}:", fn_name, label.0));
         }
         Instruction::SetCC { code, op } => {
@@ -158,15 +224,10 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
                 emit_operand(op, &RegWidth::Byte)
             ));
         }
-        Instruction::DeallocateStack(offset) => {
-            output.push_str(&format!("addq ${}, %rsp", offset));
-        }
         Instruction::Push(op) => {
             output.push_str(&format!("pushq {}", emit_operand(op, &RegWidth::QWord)));
         }
         Instruction::Call(name) => {
-            // Use name.0 to get raw function name without .L prefix
-            // On Linux, use @PLT for external function calls
             if cfg!(target_os = "macos") {
                 output.push_str(&format!("call _{}", name.0));
             } else {
@@ -197,9 +258,20 @@ fn emit_function(fun_def: &FunctionDefinition) -> String {
     output
 }
 
+/// Emits a static variable as AT&T-syntax assembly directives.
+///
+/// Places zero-initialized variables in `.bss` and non-zero variables in `.data`,
+/// with appropriate alignment and size directives (`.long` for int, `.quad` for long).
+/// Extern variables (unresolved by the linker) produce no output.
+/// On macOS, symbol names are prefixed with `_`.
 fn emit_static_variable(sv: &StaticVariable) -> String {
     let mut output = String::new();
-    let StaticVariable { name, global, init } = sv;
+    let StaticVariable {
+        name,
+        global,
+        init,
+        alignment,
+    } = sv;
     let processed_name = if cfg!(target_os = "macos") {
         format!("_{name}")
     } else {
@@ -215,18 +287,28 @@ fn emit_static_variable(sv: &StaticVariable) -> String {
         output.push_str(&format!("\t.globl {processed_name}\n"));
     }
 
-    if *init_val == 0 {
-        // BSS section for zero-initialized data
-        output.push_str("\t.bss\n");
-        output.push_str("\t.align 4\n");
-        output.push_str(&format!("{processed_name}:\n"));
-        output.push_str("\t.zero 4\n");
-    } else {
-        // Data section for initialized data
-        output.push_str("\t.data\n");
-        output.push_str("\t.align 4\n");
-        output.push_str(&format!("{processed_name}:\n"));
-        output.push_str(&format!("\t.long {init_val}\n"));
+    match init_val {
+        validate::StaticInt::IntInit(0) | validate::StaticInt::LongInit(0) => {
+            // BSS section for zero-initialized data
+            output.push_str("\t.bss\n");
+            output.push_str(&format!("\t.align {alignment}\n"));
+            output.push_str(&format!("{processed_name}:\n"));
+            output.push_str(&format!("\t.zero {alignment}\n"));
+        }
+        validate::StaticInt::IntInit(val) => {
+            // Data section for initialized int
+            output.push_str("\t.data\n");
+            output.push_str("\t.align 4\n");
+            output.push_str(&format!("{processed_name}:\n"));
+            output.push_str(&format!("\t.long {val}\n"));
+        }
+        validate::StaticInt::LongInit(val) => {
+            // Data section for initialized long
+            output.push_str("\t.data\n");
+            output.push_str("\t.align 8\n");
+            output.push_str(&format!("{processed_name}:\n"));
+            output.push_str(&format!("\t.quad {val}\n"));
+        }
     }
 
     output
