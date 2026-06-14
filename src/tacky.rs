@@ -30,7 +30,7 @@
 //!   │         ├─ tackify_var_declaration() — emit local var initializers (skip static/extern)
 //!   │         └─ tackify_stmt()         — lower statements to jumps/labels
 //!   │              └─ tackify_expr()    — core: flatten expressions to instructions
-//!   │                   └─ emit_cast()  — int<->long conversion instructions
+//!   │                   └─ emit_cast()  — integer conversions (truncate / sign- / zero-extend)
 //!   └─ convert_symbols_to_tacky()       — extract static vars from symbol table
 //! ```
 
@@ -131,6 +131,10 @@ pub enum Instruction {
         src: Val,
         dst: Val,
     },
+    ZeroExtend {
+        src: Val,
+        dst: Val,
+    },
     Unary {
         op: UnaryOp,
         src: Val,
@@ -197,11 +201,26 @@ pub struct Program {
     pub static_vars: Vec<StaticVariable>,
 }
 
+/// Emits the conversion instruction for casting `src` (`src_type`) into `dst` (`dst_type`).
+///
+/// The instruction is chosen by comparing widths, with extension keyed on the **source**'s
+/// signedness (the value being widened), not the destination's:
+/// - **same width** → `Copy` (a reinterpret, e.g. `int`<->`uint`; no bits change)
+/// - **narrowing** (dst smaller) → `Truncate` (keep the low bits; signedness-independent)
+/// - **widening from a signed source** → `SignExtend` (preserves value, e.g. `int -1` -> `long -1`)
+/// - **widening from an unsigned source** → `ZeroExtend` (preserves value, e.g. `uint` -> `long`)
+///
+/// Keying on the source is what makes mixed-sign widenings correct: `(unsigned long)(-1)`
+/// sign-extends to `ULONG_MAX`, while `(long)4294967295u` zero-extends to `4294967295`.
 fn emit_cast(src: Val, dst: Val, src_type: &Type, dst_type: &Type, instructions: &mut Vec<Instruction>) {
-    match (src_type, dst_type) {
-        (Type::Int, Type::Long) => instructions.push(Instruction::SignExtend { src, dst }),
-        (Type::Long, Type::Int) => instructions.push(Instruction::Truncate { src, dst }),
-        _ => unreachable!("Unsupported cast: {:?} -> {:?}", src_type, dst_type),
+    if src_type.size_bits() == dst_type.size_bits() {
+        instructions.push(Instruction::Copy { src, dst });
+    } else if dst_type.size_bits() < src_type.size_bits() {
+        instructions.push(Instruction::Truncate { src, dst });
+    } else if src_type.is_signed() {
+        instructions.push(Instruction::SignExtend { src, dst });
+    } else {
+        instructions.push(Instruction::ZeroExtend { src, dst });
     }
 }
 
@@ -626,11 +645,16 @@ fn tackify_stmt(
             let mut default_label = None;
             for case in cases {
                 match case {
-                    SwitchIntType::Int(_) | SwitchIntType::Long(_) => {
+                    SwitchIntType::Int(_)
+                    | SwitchIntType::Long(_)
+                    | SwitchIntType::UInt(_)
+                    | SwitchIntType::ULong(_) => {
                         let case_label = Identifier(Rc::from(case.label_str(*switch_num)));
                         let case_const = match case {
                             SwitchIntType::Int(c) => Const::ConstInt(*c),
                             SwitchIntType::Long(c) => Const::ConstLong(*c),
+                            SwitchIntType::UInt(c) => Const::ConstUInt(*c),
+                            SwitchIntType::ULong(c) => Const::ConstULong(*c),
                             SwitchIntType::Default => unreachable!(),
                         };
                         let cond_name = name_generator.next("case_cond");
@@ -756,7 +780,7 @@ fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
     let mut tacky_defs = vec![];
     for (name, entry) in symbols.iter() {
         match &entry.symbol_type {
-            Type::Int | Type::Long => {
+            Type::Int | Type::Long | Type::UInt | Type::ULong => {
                 match &entry.val {
                     InitialValue::Initial(static_val) => tacky_defs.push(StaticVariable {
                         name: name.clone(),
@@ -768,6 +792,8 @@ fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
                         let zero = match &entry.symbol_type {
                             Type::Int => StaticInt::IntInit(0),
                             Type::Long => StaticInt::LongInit(0),
+                            Type::UInt => StaticInt::UIntInit(0),
+                            Type::ULong => StaticInt::ULongInit(0),
                             Type::FunType { .. } => unreachable!("Tentative must be Int or Long"),
                         };
                         tacky_defs.push(StaticVariable {

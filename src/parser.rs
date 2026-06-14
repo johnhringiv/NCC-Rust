@@ -30,7 +30,7 @@
 //!   └─ parse_statement()                  — if not a declaration
 //!        ├─ parse_exp()                   — expression statements, conditions
 //!        │    ├─ parse_factor()           — literals, unary, casts, postfix, calls
-//!        │    │    └─ parse_constant()    — int/long literal with overflow promotion
+//!        │    │    └─ parse_constant()    — integer literal with suffix-based promotion
 //!        │    └─ parse_exp() (recursive)  — binary operators via precedence climbing
 //!        └─ parse_block_item()            — compound statements (recursive)
 //! ```
@@ -110,9 +110,12 @@ pub enum Expr {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)] // `Const` prefix disambiguates from Type / SwitchIntType
 pub enum Const {
     ConstInt(i32),
     ConstLong(i64),
+    ConstUInt(u32),
+    ConstULong(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -184,6 +187,8 @@ impl BinOp {
 pub enum SwitchIntType {
     Int(i32),
     Long(i64),
+    UInt(u32),
+    ULong(u64),
     Default,
 }
 
@@ -194,18 +199,19 @@ impl SwitchIntType {
     /// from the switch expression's type. Used during semantic analysis for
     /// duplicate case detection.
     pub fn as_i64(&self, switch_type: &Type) -> Option<i64> {
-        match self {
-            SwitchIntType::Int(v) => match switch_type {
-                Type::Int | Type::Long => Some(*v as i64),
-                Type::FunType { .. } => unreachable!("Cannot switch on function type"),
-            },
-            SwitchIntType::Long(v) => match switch_type {
-                Type::Int => Some((*v as i32) as i64), // Truncate to int, then extend
-                Type::Long => Some(*v),
-                Type::FunType { .. } => unreachable!("Cannot switch on function type"),
-            },
-            SwitchIntType::Default => None,
-        }
+        // Value as its exact 64-bit pattern (extended by the *source*'s signedness).
+        let raw = match self {
+            SwitchIntType::Int(v) => *v as i64,   // sign-extend
+            SwitchIntType::Long(v) => *v,         // identity
+            SwitchIntType::UInt(v) => *v as i64,  // zero-extend
+            SwitchIntType::ULong(v) => *v as i64, // reinterpret
+            SwitchIntType::Default => return None,
+        };
+        Some(match switch_type {
+            Type::Int | Type::UInt => (raw as i32) as i64, // 32-bit: truncate to low bits, sign-extend
+            Type::Long | Type::ULong => raw,               // 64-bit: full pattern
+            Type::FunType { .. } => unreachable!("Cannot switch on function type"),
+        })
     }
 
     pub fn label_str(&self, switch_num: u64) -> String {
@@ -226,6 +232,12 @@ impl SwitchIntType {
                     format!("switch.{switch_num}_case.neg{c_str}L")
                 }
             }
+            SwitchIntType::UInt(val) => {
+                format!("switch.{switch_num}_case.{val}U")
+            }
+            SwitchIntType::ULong(val) => {
+                format!("switch.{switch_num}_case.{val}UL")
+            }
             SwitchIntType::Default => {
                 format!("switch.{switch_num}_default")
             }
@@ -238,6 +250,8 @@ impl SwitchIntType {
 pub enum Type {
     Int,
     Long,
+    UInt,
+    ULong,
     FunType {
         params: Vec<Type>,
         ret: Box<Type>,
@@ -250,7 +264,39 @@ impl Type {
         match self {
             Type::Int => Const::ConstInt(1),
             Type::Long => Const::ConstLong(1),
+            Type::UInt => Const::ConstUInt(1),
+            Type::ULong => Const::ConstULong(1),
             Type::FunType { .. } => unreachable!("Cannot increment function type"),
+        }
+    }
+
+    pub fn size_bits(&self) -> u32 {
+        match self {
+            Type::Int | Type::UInt => 32,
+            Type::Long | Type::ULong => 64,
+            Type::FunType { .. } => panic!("Function does not have type size"),
+        }
+    }
+
+    pub fn is_signed(&self) -> bool {
+        match self {
+            Type::Int | Type::Long => true,
+            Type::ULong | Type::UInt => false,
+            Type::FunType { .. } => panic!("Function does not have type size"),
+        }
+    }
+
+    /// C usual arithmetic conversions: the common type two operands convert to.
+    /// Same width -> the unsigned type wins; otherwise the wider type wins.
+    pub fn common_with(&self, other: &Type) -> Type {
+        if self == other {
+            self.clone()
+        } else if self.size_bits() == other.size_bits() {
+            if self.is_signed() { other.clone() } else { self.clone() }
+        } else if self.size_bits() > other.size_bits() {
+            self.clone()
+        } else {
+            other.clone()
         }
     }
 }
@@ -425,9 +471,14 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
 
 /// Parses an integer literal token into a constant expression.
 ///
-/// `ConstantInt` tokens (no suffix) try `i32` first, promoting to `i64` on overflow.
-/// `ConstantLong` tokens (e.g., `L` suffix) parse directly as `i64`.
-/// Returns an error if the value doesn't fit in 64 bits.
+/// Each suffix follows its own promotion ladder, trying the narrowest type first and widening on
+/// overflow — `u`-suffixed literals stay unsigned, the rest stay signed:
+/// - `ConstantInt` (no suffix): `i32`, then `i64`.
+/// - `ConstantUnsignedInt` (`u`): `u32`, then `u64`.
+/// - `ConstantLong` (`l`): `i64`.
+/// - `ConstantUnsignedLong` (`ul`): `u64`.
+///
+/// Returns an error if the value doesn't fit the widest type in its ladder (64 bits).
 fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
     match &token.token {
         Token::ConstantInt(value_str) => match value_str.parse::<i32>() {
@@ -437,15 +488,48 @@ fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
                 span: token.span,
             }),
         },
+        Token::ConstantUnsignedInt(value_str) => match value_str.parse::<u32>() {
+            Ok(val) => Ok(Expr::Constant(Const::ConstUInt(val))),
+            Err(_) => parse_constant(&SpannedToken {
+                token: Token::ConstantUnsignedLong(value_str.clone()),
+                span: token.span,
+            }),
+        },
         Token::ConstantLong(value_str) => match value_str.parse::<i64>() {
             Ok(val) => Ok(Expr::Constant(Const::ConstLong(val))),
             Err(_) => Err(SyntaxError::with_span(
-                format!("Integer constant '{}' does not fit in 64-bit int", value_str.bold()),
+                format!(
+                    "Integer constant '{}' does not fit in 64-bit signed int",
+                    value_str.bold()
+                ),
+                Some(token.span),
+            )),
+        },
+        Token::ConstantUnsignedLong(value_str) => match value_str.parse::<u64>() {
+            Ok(val) => Ok(Expr::Constant(Const::ConstULong(val))),
+            Err(_) => Err(SyntaxError::with_span(
+                format!(
+                    "Integer constant '{}' does not fit in 64-bit unsigned int",
+                    value_str.bold()
+                ),
                 Some(token.span),
             )),
         },
         _ => unreachable!(),
     }
+}
+
+/// True if `t` is a type-specifier keyword (`int`, `long`, `signed`, `unsigned`).
+fn is_type_specifier(t: &Token) -> bool {
+    matches!(
+        t,
+        Token::IntKeyword | Token::LongKeyword | Token::SignedKeyword | Token::UnsignedKeyword
+    )
+}
+
+/// True if `t` begins a declaration: a type specifier or a storage-class keyword.
+fn is_specifier(t: &Token) -> bool {
+    is_type_specifier(t) || matches!(t, Token::StaticKeyword | Token::ExternKeyword)
 }
 
 /// Parses primary expressions and operators with precedence higher than any binary operator.
@@ -475,14 +559,19 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
     let next_token = tokens.front().cloned();
     let mut expr = match next_token {
         Some(ref spanned) => match &spanned.token {
-            Token::ConstantInt(_) | Token::ConstantLong(_) => {
+            Token::ConstantInt(_)
+            | Token::ConstantLong(_)
+            | Token::ConstantUnsignedInt(_)
+            | Token::ConstantUnsignedLong(_) => {
                 tokens.pop_front();
                 parse_constant(spanned)
             }
             Token::Negation => {
-                // simply treating negation as an unop cases a panic when unwrapping int min
+                // Fold a leading `-` into the literal so INT_MIN / LONG_MIN keep the right type:
+                // their magnitude (2^31 / 2^63) isn't representable in the positive range, so
+                // parsing the magnitude then negating would overflow-promote and mistype them.
                 if let Some(SpannedToken {
-                    token: Token::ConstantInt(value_str),
+                    token: Token::ConstantInt(value_str) | Token::ConstantLong(value_str),
                     span: _,
                 }) = tokens.get_mut(1)
                 {
@@ -513,10 +602,7 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             Token::OpenParen => {
                 tokens.pop_front();
                 let mut type_specifiers = vec![];
-                while matches!(
-                    tokens.front().map(|t| &t.token),
-                    Some(Token::LongKeyword | Token::IntKeyword)
-                ) {
+                while matches!(tokens.front(), Some(t) if is_type_specifier(&t.token)) {
                     type_specifiers.push(tokens.front().unwrap().token.clone());
                     tokens.pop_front();
                 }
@@ -633,36 +719,56 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
 
 /// Resolves a list of type-specifier tokens into a `Type`.
 ///
-/// Accepts `int`, `long`, `long int`, and `int long` (order-independent).
-/// Returns an error for empty or invalid specifier combinations.
+/// Counts each specifier keyword (`int`, `long`, `signed`, `unsigned`), so combinations are
+/// order-independent (`long int` == `int long`, `unsigned long` == `long unsigned`). Errors on an
+/// empty list, a repeated specifier, or a conflicting `signed`/`unsigned` combination.
 fn parse_type(specifier_list: &Vec<Token>, err_span: &Option<Span>) -> Result<Type, SyntaxError> {
-    match specifier_list.as_slice() {
-        [Token::IntKeyword] => Ok(Type::Int),
-        [Token::LongKeyword] | [Token::IntKeyword, Token::LongKeyword] | [Token::LongKeyword, Token::IntKeyword] => {
-            Ok(Type::Long)
+    let (mut ints, mut longs, mut signed, mut unsigned) = (0u32, 0u32, 0u32, 0u32);
+    for t in specifier_list {
+        match t {
+            Token::IntKeyword => ints += 1,
+            Token::LongKeyword => longs += 1,
+            Token::SignedKeyword => signed += 1,
+            Token::UnsignedKeyword => unsigned += 1,
+            _ => return Err(SyntaxError::with_span("Non-type specifier".to_string(), *err_span)),
         }
-        [] => Err(SyntaxError::with_span("Missing type specifier".to_string(), *err_span)),
-        _ => Err(SyntaxError::with_span(
+    }
+    if specifier_list.is_empty() {
+        return Err(SyntaxError::with_span("Missing type specifier".to_string(), *err_span));
+    }
+    if [ints, longs, signed, unsigned].iter().any(|&n| n > 1) {
+        return Err(SyntaxError::with_span(
+            "Duplicate type specifier".to_string(),
+            *err_span,
+        ));
+    }
+    if (signed > 0) && (unsigned > 0) {
+        return Err(SyntaxError::with_span(
             "Invalid type specifier combination".to_string(),
             *err_span,
-        )),
+        ));
     }
+    Ok(match (unsigned > 0, longs > 0) {
+        (true, true) => Type::ULong,
+        (true, false) => Type::UInt,
+        (false, true) => Type::Long,
+        (false, false) => Type::Int,
+    })
 }
 
 /// Splits a declaration's specifier list into a `Type` and an optional `StorageClass`.
 ///
-/// Separates type specifiers (`int`, `long`) from storage-class specifiers (`static`, `extern`),
-/// then delegates to `parse_type` for type resolution. Errors on duplicate storage classes.
+/// Separates type specifiers (`int`, `long`, `signed`, `unsigned`) from storage-class specifiers
+/// (`static`, `extern`), then delegates to `parse_type` for type resolution. Errors on duplicate
+/// storage classes.
 fn parse_type_and_storage_class(
     specifier_list: &Vec<SpannedToken>,
 ) -> Result<(Type, Option<StorageClass>), SyntaxError> {
     let mut types = Vec::new();
     let mut storage_class = None;
     for token in specifier_list {
-        match token.token {
-            Token::IntKeyword | Token::LongKeyword => {
-                types.push(token.token.clone());
-            }
+        match &token.token {
+            t if is_type_specifier(t) => types.push(token.token.clone()),
             Token::StaticKeyword | Token::ExternKeyword => {
                 let sc = if token.token == Token::StaticKeyword {
                     StorageClass::Static
@@ -950,10 +1056,7 @@ fn warn_switch_unreachable(stmt: &SpannedStmt) {
 /// Peeks at the next token and returns an error if it starts a declaration (type or
 /// storage-class keyword). Used after labels, where C requires a statement, not a declaration.
 fn declaration_check(tokens: &VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
-    if matches!(
-        tokens.front().map(|t| &t.token),
-        Some(&Token::IntKeyword | &Token::LongKeyword | &Token::StaticKeyword | &Token::ExternKeyword)
-    ) {
+    if tokens.front().is_some_and(|t| is_specifier(&t.token)) {
         Err(SyntaxError::with_span(
             "A label can only be part of a statement and a declaration is not a statement. Add a statement or ';' before the declaration.".to_string(),
             Some(tokens.front().unwrap().span),
@@ -984,13 +1087,8 @@ fn parse_declaration(
     err_span: &Option<Span>,
 ) -> Result<Option<Declaration>, SyntaxError> {
     let mut specifier_list = Vec::new();
-    while let Some(front) = tokens.front() {
-        match front.token {
-            Token::IntKeyword | Token::StaticKeyword | Token::ExternKeyword | Token::LongKeyword => {
-                specifier_list.push(tokens.pop_front().unwrap());
-            }
-            _ => break,
-        }
+    while tokens.front().is_some_and(|t| is_specifier(&t.token)) {
+        specifier_list.push(tokens.pop_front().unwrap());
     }
     if specifier_list.is_empty() {
         return Ok(None); // no declaration
@@ -1076,14 +1174,8 @@ fn parse_function_params(
                     break;
                 }
                 let mut type_tokens = Vec::new();
-                while let Some(front) = tokens.front() {
-                    match front.token {
-                        Token::IntKeyword | Token::LongKeyword => {
-                            type_tokens.push(front.token.clone());
-                            tokens.pop_front();
-                        }
-                        _ => break,
-                    }
+                while tokens.front().is_some_and(|t| is_type_specifier(&t.token)) {
+                    type_tokens.push(tokens.pop_front().unwrap().token);
                 }
                 let err_span = tokens.front().map(|t| t.span);
                 if type_tokens.is_empty() {

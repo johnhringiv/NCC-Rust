@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-static CHAPTER_COMPLETED: i32 = 11;
-static EXTRA_COMPLETED: i32 = 11;
+static CHAPTER_COMPLETED: i32 = 12;
+static EXTRA_COMPLETED: i32 = 12;
 
 #[derive(Debug, PartialEq, Clone)]
 enum ProgramOutput {
@@ -1083,6 +1083,31 @@ fn test_no_overflow_on_in_range() {
     );
 
     println!("✓ No overflow warning on in-range folds test passed");
+}
+
+#[test]
+fn test_no_overflow_on_unsigned() {
+    // Unsigned wraparound is well-defined (modular arithmetic), so -Woverflow must NOT fire,
+    // matching gcc/clang. The overflowing_* flag from constant folding is suppressed when the
+    // operand type is unsigned; only signed overflow (UB) warns — see test_overflow_warning.
+    let test_file = "tests/c_programs/warnings/no_overflow_unsigned.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr_output.contains("-Woverflow"),
+        "Unsigned wraparound is defined and must not warn, but stderr was: {}",
+        stderr_output
+    );
+
+    println!("✓ No overflow warning on unsigned wraparound test passed");
 }
 
 #[test]

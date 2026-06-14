@@ -192,9 +192,49 @@ pub enum InitialValue {
 /// Carries both the value and its type so that zero-initialized `.bss` vs
 /// initialized `.data` placement can be decided later in emission.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)] // `Init` suffix = static-initializer value
 pub enum StaticInt {
     IntInit(i32),
     LongInit(i64),
+    UIntInit(u32),
+    ULongInit(u64),
+}
+
+macro_rules! checked_op {
+    // unary:  checked_op!(self, overflowing_neg; IntInit, LongInit, UIntInit, ULongInit)
+    ($self:expr, $method:ident; $($V:ident),+ $(,)?) => {{
+        match $self {
+            $( StaticInt::$V(v) => { let (r, o) = v.$method(); (StaticInt::$V(r), o) } )+
+        }
+    }};
+    // binary: checked_op!(self, other, overflowing_add; IntInit, LongInit, UIntInit, ULongInit)
+    ($self:expr, $other:expr, $method:ident; $($V:ident),+ $(,)?) => {{
+        let (left, right) = $self.get_common($other);
+        match (left, right) {
+            $( (StaticInt::$V(a), StaticInt::$V(b)) => { let (v, o) = a.$method(b); (StaticInt::$V(v), o) } )+
+            _ => unreachable!("get_common guarantees matching variants"),
+        }
+    }};
+}
+
+macro_rules! bitwise_op {
+    ($self:expr, $other:expr, $op:tt; $($V:ident),+ $(,)?) => {{
+        let (left, right) = $self.get_common($other);
+        match (left, right) {
+            $( (StaticInt::$V(a), StaticInt::$V(b)) => StaticInt::$V(a $op b), )+
+            _ => unreachable!("get_common guarantees matching variants"),
+        }
+    }};
+}
+
+macro_rules! compare_op {
+    ($self:expr, $other:expr, $op:tt; $($V:ident),+ $(,)?) => {{
+        let (left, right) = $self.get_common($other);
+        match (left, right) {
+            $( (StaticInt::$V(a), StaticInt::$V(b)) => StaticInt::IntInit((a $op b) as i32), )+
+            _ => unreachable!("get_common guarantees matching variants"),
+        }
+    }};
 }
 
 impl StaticInt {
@@ -202,6 +242,8 @@ impl StaticInt {
         match self {
             StaticInt::IntInit(_) => Type::Int,
             StaticInt::LongInit(_) => Type::Long,
+            StaticInt::UIntInit(_) => Type::UInt,
+            StaticInt::ULongInit(_) => Type::ULong,
         }
     }
 
@@ -209,11 +251,45 @@ impl StaticInt {
         match self {
             StaticInt::IntInit(i) => Const::ConstInt(i),
             StaticInt::LongInit(l) => Const::ConstLong(l),
+            StaticInt::UIntInit(i) => Const::ConstUInt(i),
+            StaticInt::ULongInit(l) => Const::ConstULong(l),
+        }
+    }
+
+    /// Exact value of this constant as a signedness-split wide integer (see [`Wide`]).
+    /// INVARIANT: `Wide`'s arms must stay >= the widest StaticInt variant — widen them to
+    /// i128/u128 in the same change that adds a 128-bit type, or constants silently truncate.
+    fn wide(self) -> Wide {
+        match self {
+            StaticInt::IntInit(v) => Wide::Signed(v as i64),
+            StaticInt::LongInit(v) => Wide::Signed(v),
+            StaticInt::UIntInit(v) => Wide::Unsigned(v as u64),
+            StaticInt::ULongInit(v) => Wide::Unsigned(v),
+        }
+    }
+
+    pub(crate) fn to_le_bytes(self) -> Vec<u8> {
+        match self {
+            StaticInt::UIntInit(v) => v.to_le_bytes().to_vec(),
+            StaticInt::IntInit(v) => v.to_le_bytes().to_vec(),
+            StaticInt::LongInit(v) => v.to_le_bytes().to_vec(),
+            StaticInt::ULongInit(v) => v.to_le_bytes().to_vec(),
+        }
+    }
+
+    /// Assembler directive (`.long`/`.quad`) and decimal value for a `.data` initializer
+    /// (text emitter). Width follows the type; the value uses the variant's signedness.
+    pub(crate) fn data_directive(&self) -> (&'static str, String) {
+        match self {
+            StaticInt::IntInit(v) => (".long", v.to_string()),
+            StaticInt::UIntInit(v) => (".long", v.to_string()),
+            StaticInt::LongInit(v) => (".quad", v.to_string()),
+            StaticInt::ULongInit(v) => (".quad", v.to_string()),
         }
     }
 
     pub fn get_common(self, other: Self) -> (Self, Self) {
-        let common_type = get_common_type(&self.get_type(), &other.get_type());
+        let common_type = self.get_type().common_with(&other.get_type());
         // Promotion only widens to the common type, so it never truncates — ignore the flag.
         let (left, _) = convert_to_type(self, &common_type);
         let (right, _) = convert_to_type(other, &common_type);
@@ -221,74 +297,40 @@ impl StaticInt {
     }
 
     fn neg(self) -> (Self, bool) {
-        match self {
-            StaticInt::IntInit(v) => {
-                let (v, o) = v.overflowing_neg();
-                (StaticInt::IntInit(v), o)
-            }
-            StaticInt::LongInit(v) => {
-                let (v, o) = v.overflowing_neg();
-                (StaticInt::LongInit(v), o)
-            }
-        }
+        checked_op!(self, overflowing_neg; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn add(self, other: Self) -> (Self, bool) {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => {
-                let (v, o) = a.overflowing_add(b);
-                (StaticInt::IntInit(v), o)
-            }
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => {
-                let (v, o) = a.overflowing_add(b);
-                (StaticInt::LongInit(v), o)
-            }
-            _ => unreachable!(),
-        }
+        checked_op!(self, other, overflowing_add; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn sub(self, other: Self) -> (Self, bool) {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => {
-                let (v, o) = a.overflowing_sub(b);
-                (StaticInt::IntInit(v), o)
-            }
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => {
-                let (v, o) = a.overflowing_sub(b);
-                (StaticInt::LongInit(v), o)
-            }
-            _ => unreachable!(),
-        }
+        checked_op!(self, other, overflowing_sub; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn mul(self, other: Self) -> (Self, bool) {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => {
-                let (v, o) = a.overflowing_mul(b);
-                (StaticInt::IntInit(v), o)
-            }
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => {
-                let (v, o) = a.overflowing_mul(b);
-                (StaticInt::LongInit(v), o)
-            }
-            _ => unreachable!(),
-        }
+        checked_op!(self, other, overflowing_mul; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn is_zero(&self) -> bool {
-        match self {
-            StaticInt::IntInit(v) => *v == 0,
-            StaticInt::LongInit(v) => *v == 0,
-        }
+        self.as_i64() == 0
     }
 
     fn as_i64(&self) -> i64 {
         match *self {
             StaticInt::IntInit(v) => v as i64,
             StaticInt::LongInit(v) => v,
+            StaticInt::UIntInit(v) => v as i64,
+            StaticInt::ULongInit(v) => v as i64,
+        }
+    }
+
+    fn as_u32(&self) -> u32 {
+        match *self {
+            StaticInt::IntInit(v) => v as u32,
+            StaticInt::LongInit(v) => v as u32,
+            StaticInt::UIntInit(v) => v,
+            StaticInt::ULongInit(v) => v as u32,
         }
     }
 
@@ -296,145 +338,75 @@ impl StaticInt {
         if other.is_zero() {
             return Err(ConstEvalError::DivByZero);
         }
-        let (left, right) = self.get_common(other);
-        Ok(match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => {
-                let (v, o) = a.overflowing_div(b);
-                (StaticInt::IntInit(v), o)
-            }
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => {
-                let (v, o) = a.overflowing_div(b);
-                (StaticInt::LongInit(v), o)
-            }
-            _ => unreachable!(),
-        })
+        Ok(checked_op!(self, other, overflowing_div; IntInit, LongInit, UIntInit, ULongInit))
     }
 
     fn rem(self, other: Self) -> Result<(Self, bool), ConstEvalError> {
         if other.is_zero() {
             return Err(ConstEvalError::DivByZero);
         }
-        let (left, right) = self.get_common(other);
-        Ok(match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => {
-                let (v, o) = a.overflowing_rem(b);
-                (StaticInt::IntInit(v), o)
-            }
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => {
-                let (v, o) = a.overflowing_rem(b);
-                (StaticInt::LongInit(v), o)
-            }
-            _ => unreachable!(),
-        })
+        Ok(checked_op!(self, other, overflowing_rem; IntInit, LongInit, UIntInit, ULongInit))
     }
 
     fn bitwise_and(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(a & b),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::LongInit(a & b),
-            _ => unreachable!(),
-        }
+        bitwise_op!(self, other, &; IntInit, LongInit, UIntInit, ULongInit)
     }
-
     fn bitwise_or(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(a | b),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::LongInit(a | b),
-            _ => unreachable!(),
-        }
+        bitwise_op!(self, other, |; IntInit, LongInit, UIntInit, ULongInit)
     }
-
     fn bitwise_xor(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(a ^ b),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::LongInit(a ^ b),
-            _ => unreachable!(),
-        }
+        bitwise_op!(self, other, ^; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     /// Left shift. Shift amount is masked (& 31 for int, & 63 for long) to prevent
     /// undefined behavior, matching x86 hardware semantics.
     fn shl(self, other: Self) -> Self {
-        let shift_amount = match other {
-            StaticInt::IntInit(v) => v as u32,
-            StaticInt::LongInit(v) => v as u32,
-        };
+        let shift_amount = other.as_u32();
 
         match self {
             StaticInt::IntInit(a) => StaticInt::IntInit(a << (shift_amount & 31)),
             StaticInt::LongInit(a) => StaticInt::LongInit(a << (shift_amount & 63)),
+            StaticInt::UIntInit(a) => StaticInt::UIntInit(a << (shift_amount & 31)),
+            StaticInt::ULongInit(a) => StaticInt::ULongInit(a << (shift_amount & 63)),
         }
     }
 
-    /// Right shift (arithmetic). Shift amount is masked (& 31 for int, & 63 for long)
-    /// to prevent undefined behavior, matching x86 hardware semantics.
+    /// Right shift: arithmetic for signed operands, logical for unsigned (Rust's `>>`
+    /// follows the operand's signedness, matching x86 SAR vs SHR). Shift amount is masked
+    /// (& 31 for 32-bit, & 63 for 64-bit) to prevent undefined behavior, matching x86 hardware.
     fn shr(self, other: Self) -> Self {
-        let shift_amount = match other {
-            StaticInt::IntInit(v) => v as u32,
-            StaticInt::LongInit(v) => v as u32,
-        };
+        let shift_amount = other.as_u32();
 
         match self {
             StaticInt::IntInit(a) => StaticInt::IntInit(a >> (shift_amount & 31)),
             StaticInt::LongInit(a) => StaticInt::LongInit(a >> (shift_amount & 63)),
+            StaticInt::UIntInit(a) => StaticInt::UIntInit(a >> (shift_amount & 31)),
+            StaticInt::ULongInit(a) => StaticInt::ULongInit(a >> (shift_amount & 63)),
         }
     }
 
     fn eq(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(if a == b { 1 } else { 0 }),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::IntInit(if a == b { 1 } else { 0 }),
-            _ => unreachable!(),
-        }
+        compare_op!(self, other, ==; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn ne(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(if a == b { 0 } else { 1 }),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::IntInit(if a == b { 0 } else { 1 }),
-            _ => unreachable!(),
-        }
+        compare_op!(self, other, !=; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn lt(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(if a < b { 1 } else { 0 }),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::IntInit(if a < b { 1 } else { 0 }),
-            _ => unreachable!(),
-        }
+        compare_op!(self, other, <; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn le(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(if a <= b { 1 } else { 0 }),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::IntInit(if a <= b { 1 } else { 0 }),
-            _ => unreachable!(),
-        }
+        compare_op!(self, other, <=; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn gt(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(if a > b { 1 } else { 0 }),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::IntInit(if a > b { 1 } else { 0 }),
-            _ => unreachable!(),
-        }
+        compare_op!(self, other, >; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn ge(self, other: Self) -> Self {
-        let (left, right) = self.get_common(other);
-        match (left, right) {
-            (StaticInt::IntInit(a), StaticInt::IntInit(b)) => StaticInt::IntInit(if a >= b { 1 } else { 0 }),
-            (StaticInt::LongInit(a), StaticInt::LongInit(b)) => StaticInt::IntInit(if a >= b { 1 } else { 0 }),
-            _ => unreachable!(),
-        }
+        compare_op!(self, other, >=; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn and(self, other: Self) -> Self {
@@ -450,7 +422,7 @@ impl StaticInt {
 ///
 /// # Fields
 ///
-/// - `symbol_type`: The type of the symbol (Int, Long, or FunType)
+/// - `symbol_type`: The type of the symbol (Int, Long, UInt, ULong, or FunType)
 ///   - For functions, `FunType.defined` tracks if the function has a body
 ///
 /// - `global`: Linkage scope
@@ -559,6 +531,8 @@ fn typecheck_local_variable_declaration(
             let zero = match decl.var_type {
                 Type::Int => StaticInt::IntInit(0),
                 Type::Long => StaticInt::LongInit(0),
+                Type::UInt => StaticInt::UIntInit(0),
+                Type::ULong => StaticInt::ULongInit(0),
                 _ => unreachable!("static variable must be int or long"),
             };
             InitialValue::Initial(zero)
@@ -642,7 +616,7 @@ fn typecheck_file_variable_declaration(
                     decl.span,
                 ));
             }
-            Type::Int | Type::Long => {
+            Type::Int | Type::Long | Type::UInt | Type::ULong => {
                 if old_dec.symbol_type != decl.var_type {
                     return Err(SemanticError::with_span(
                         format!(
@@ -719,10 +693,6 @@ fn typecheck_file_variable_declaration(
         var_type: decl.var_type,
         storage_class: decl.storage_class,
     })
-}
-
-pub(crate) fn get_common_type(t1: &Type, t2: &Type) -> Type {
-    if t1 == t2 { t1.clone() } else { Type::Long }
 }
 
 fn convert_to(exp: TypedExpression, t: &Type) -> TypedExpression {
@@ -947,6 +917,14 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                 exp_type: Type::Long,
                 exp: Expr::Const(c),
             }),
+            Const::ConstUInt(_) => Ok(TypedExpression {
+                exp_type: Type::UInt,
+                exp: Expr::Const(c),
+            }),
+            Const::ConstULong(_) => Ok(TypedExpression {
+                exp_type: Type::ULong,
+                exp: Expr::Const(c),
+            }),
         },
         ParserExpr::Cast(t, inner) => {
             let typed_inner = typecheck_exp(*inner, symbols)?;
@@ -996,7 +974,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                 return Ok(binary_exp.with_type(result_type));
             }
 
-            let common_type = get_common_type(&typed_lhs.exp_type, &typed_rhs.exp_type);
+            let common_type = typed_lhs.exp_type.common_with(&typed_rhs.exp_type);
             let converted_lhs = convert_to(typed_lhs, &common_type);
             let converted_rhs = convert_to(typed_rhs, &common_type);
             let binary_exp = Expr::Binary(op, Box::new(converted_lhs), Box::new(converted_rhs));
@@ -1031,7 +1009,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
             let typed_condition = typecheck_exp(*condition, symbols)?;
             let typed_then_exp = typecheck_exp(*then_exp, symbols)?;
             let typed_else_exp = typecheck_exp(*else_exp, symbols)?;
-            let common_type = get_common_type(&typed_then_exp.exp_type, &typed_else_exp.exp_type);
+            let common_type = typed_then_exp.exp_type.common_with(&typed_else_exp.exp_type);
             let converted_then = convert_to(typed_then_exp, &common_type);
             let converted_else = convert_to(typed_else_exp, &common_type);
             let conditional = Expr::Conditional(
@@ -1053,7 +1031,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
             let left_type = typed_lhs.exp_type.clone();
             let op_type = match op {
                 AssignOp::BitwiseLeftShift | AssignOp::BitwiseRightShift => left_type.clone(),
-                _ => get_common_type(&typed_lhs.exp_type, &typed_rhs.exp_type),
+                _ => typed_lhs.exp_type.common_with(&typed_rhs.exp_type),
             };
             let compound = Expr::CompoundAssignment(op, Box::new(typed_lhs), Box::new(typed_rhs), op_type);
             Ok(compound.with_type(left_type))
@@ -1167,7 +1145,7 @@ fn typecheck_function_declaration(
                 global = old_dec.global;
                 defined = defined || *old_defined;
             }
-            Type::Int | Type::Long => {
+            Type::Int | Type::Long | Type::UInt | Type::ULong => {
                 return Err(SemanticError::with_span(
                     format!(
                         "redeclaration of '{}' as a function\n{}: {}: previous declaration was here",
@@ -1745,23 +1723,46 @@ fn resolve_statement(
     }
 }
 
-/// Converts a constant to `target_type`. Returns `(value, truncated)` where `truncated` is true
-/// only for a narrowing (`long`->`int`) that changed the value — the `-Wconstant-conversion` signal.
-/// Widening and same-type conversions never truncate. The caller decides whether to warn
-/// (implicit conversions do; explicit casts and internal promotion do not).
-fn convert_to_type(val: StaticInt, target_type: &Type) -> (StaticInt, bool) {
-    match (val, target_type) {
-        (StaticInt::IntInit(v), Type::Int) => (StaticInt::IntInit(v), false),
-        (StaticInt::LongInit(v), Type::Long) => (StaticInt::LongInit(v), false),
+/// Wide-enough exact value of any integer constant, split by signedness so each half maps to a
+/// lossless std primitive (no single primitive holds both `u128::MAX` and negatives). Today the
+/// widest StaticInt variants are i64/u64, so those suffice — see [`StaticInt::wide`] for the
+/// invariant on widening this to i128/u128.
+#[derive(Clone, Copy)]
+enum Wide {
+    Signed(i64),
+    Unsigned(u64),
+}
 
-        (StaticInt::IntInit(v), Type::Long) => (StaticInt::LongInit(v as i64), false),
-        (StaticInt::LongInit(v), Type::Int) => {
-            let truncated = v as i32;
-            (StaticInt::IntInit(truncated), truncated as i64 != v)
+/// Casts a normalized value (`i64`/`u64`) to each target type, yielding `(result, out_of_range)`
+/// where `out_of_range` means the exact value can't be represented in the target's range.
+macro_rules! to_target {
+    ($v:expr, $target:expr) => {
+        match $target {
+            Type::Int => (StaticInt::IntInit($v as i32), i32::try_from($v).is_err()),
+            Type::UInt => (StaticInt::UIntInit($v as u32), u32::try_from($v).is_err()),
+            Type::Long => (StaticInt::LongInit($v as i64), i64::try_from($v).is_err()),
+            Type::ULong => (StaticInt::ULongInit($v as u64), u64::try_from($v).is_err()),
+            Type::FunType { .. } => unreachable!("Cannot cast to function type in constant expression"),
         }
+    };
+}
 
-        (_, Type::FunType { .. }) => unreachable!("Cannot cast to function type in constant expression"),
-    }
+/// Converts a constant to `target_type`. Returns `(value, truncated)` where `truncated` is true
+/// only for a *narrowing* that changed the value — the `-Wconstant-conversion`/`-Woverflow` signal.
+/// Widening and same-width conversions (including sign reinterprets like `-1` -> unsigned) never set
+/// it; those are gcc's separate, off-by-default `-Wsign-conversion`. The caller decides whether to
+/// warn (implicit conversions do; explicit casts and internal promotion do not).
+// `unnecessary_cast`/`useless_conversion`: the i64/u64 normalizer coincides with the Long/ULong
+// targets today, so those arms are identity casts; they become genuine narrowings once Wide is i128/u128.
+#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+fn convert_to_type(val: StaticInt, target_type: &Type) -> (StaticInt, bool) {
+    let source_bits = val.get_type().size_bits();
+    let (result, out_of_range) = match val.wide() {
+        Wide::Signed(v) => to_target!(v, target_type),
+        Wide::Unsigned(v) => to_target!(v, target_type),
+    };
+    let truncated = out_of_range && target_type.size_bits() < source_bits;
+    (result, truncated)
 }
 
 enum ConstEvalError {
@@ -1821,6 +1822,8 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInt, bool), ConstEvalE
     match expr {
         ParserExpr::Constant(Const::ConstInt(val)) => Ok((StaticInt::IntInit(*val), false)),
         ParserExpr::Constant(Const::ConstLong(val)) => Ok((StaticInt::LongInit(*val), false)),
+        ParserExpr::Constant(Const::ConstUInt(val)) => Ok((StaticInt::UIntInit(*val), false)),
+        ParserExpr::Constant(Const::ConstULong(val)) => Ok((StaticInt::ULongInit(*val), false)),
         ParserExpr::Cast(target, val) => {
             let (v, o) = eval_constant_expr(val)?;
             // Explicit cast: suppress the conversion-truncation warning (programmer intent), but
@@ -1836,17 +1839,15 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInt, bool), ConstEvalE
                     match v {
                         StaticInt::IntInit(n) => StaticInt::IntInit(!n),
                         StaticInt::LongInit(n) => StaticInt::LongInit(!n),
+                        StaticInt::ULongInit(n) => StaticInt::ULongInit(!n),
+                        StaticInt::UIntInit(n) => StaticInt::UIntInit(!n),
                     },
                     false,
                 ),
-                UnaryOp::Not => (
-                    match v {
-                        StaticInt::IntInit(n) => StaticInt::IntInit(if n == 0 { 1 } else { 0 }),
-                        StaticInt::LongInit(n) => StaticInt::IntInit(if n == 0 { 1 } else { 0 }),
-                    },
-                    false,
-                ),
+                UnaryOp::Not => (StaticInt::IntInit(v.is_zero() as i32), false),
             };
+            // Unsigned wraparound is well-defined, not overflow — only signed ops warn (-Woverflow).
+            let o2 = o2 && r.get_type().is_signed();
             Ok((r, o | o2))
         }
         ParserExpr::Binary(op, left, right, _) => {
@@ -1876,6 +1877,8 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInt, bool), ConstEvalE
                     unreachable!("only used for parsing")
                 }
             };
+            // Unsigned wraparound is well-defined, not overflow — only signed ops warn (-Woverflow).
+            let op_ovf = op_ovf && v.get_type().is_signed();
             Ok((v, base | op_ovf))
         }
         ParserExpr::Conditional(cond, true_expr, false_expr) => {
@@ -1946,6 +1949,8 @@ impl LabelTracker {
             let case_exp = match c {
                 StaticInt::IntInit(v) => SwitchIntType::Int(v),
                 StaticInt::LongInit(v) => SwitchIntType::Long(v),
+                StaticInt::UIntInit(v) => SwitchIntType::UInt(v),
+                StaticInt::ULongInit(v) => SwitchIntType::ULong(v),
             };
             // Just collect cases with spans - duplicate checking happens during typecheck
             self.switch_to_cases.get_mut(label).unwrap().push((case_exp, *span));
