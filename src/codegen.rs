@@ -33,7 +33,7 @@
 //!
 //! ```text
 //! generate()                              — public entry point, orchestrates all 4 passes
-//!   ├─ build_backend_symbol_table()       — map all vars/fns to assembly types
+//!   ├─ build_backend_symbol_table()       — map all vars/fns to their types
 //!   ├─ convert_function()                 — per function: lower params + body
 //!   │    └─ convert_instruction()         — per instruction: TACKY -> assembly
 //!   │         └─ convert_function_call()  — System V ABI argument passing
@@ -260,27 +260,6 @@ pub struct Program {
     pub static_vars: Vec<StaticVariable>,
 }
 
-/// Operand size (`Longword`/`Quadword`) for `val` — constants by their `Const` variant,
-/// variables by their type in the backend symbol table. Drives instruction sizing/suffixes.
-fn get_assembly_type(val: &Val, symbols: &BackendSymbolTable) -> AssemblyType {
-    match val {
-        Val::Constant(Const::ConstInt(_) | Const::ConstUInt(_)) => AssemblyType::Longword,
-        Val::Constant(Const::ConstLong(_) | Const::ConstULong(_)) => AssemblyType::Quadword,
-        Val::Var(name) => symbols.get_var_type(name).into(),
-    }
-}
-
-/// Whether `val` has a signed type — selects signed vs unsigned instructions (`idiv`/`div`,
-/// signed/unsigned condition codes). Constants are classified by their `Const` variant;
-/// variables delegate to [`Type::is_signed`] via the backend symbol table.
-fn is_signed(val: &Val, symbols: &BackendSymbolTable) -> bool {
-    match val {
-        Val::Constant(Const::ConstInt(_) | Const::ConstLong(_)) => true,
-        Val::Constant(Const::ConstUInt(_) | Const::ConstULong(_)) => false,
-        Val::Var(name) => symbols.get_var_type(name).is_signed(),
-    }
-}
-
 /// Emits instructions for a function call following the System V AMD64 ABI.
 ///
 /// First 6 integer arguments go in registers (RDI, RSI, RDX, RCX, R8, R9).
@@ -311,12 +290,12 @@ fn convert_function_call(
         instructions.push(Instruction::Mov {
             src: tacky_arg.into(),
             dst: Operand::Reg(reg),
-            size: get_assembly_type(tacky_arg, symbols),
+            size: symbols.get_assembly_type(tacky_arg),
         });
     }
     for tacky_arg in stack_args.iter().rev() {
         let assembly_arg = tacky_arg.into();
-        let asm_type = get_assembly_type(tacky_arg, symbols);
+        let asm_type = symbols.get_assembly_type(tacky_arg);
         if asm_type == AssemblyType::Quadword || matches!(assembly_arg, Operand::Imm(_) | Operand::Reg(_)) {
             instructions.push(Instruction::Push(assembly_arg));
         } else {
@@ -342,7 +321,7 @@ fn convert_function_call(
     instructions.push(Instruction::Mov {
         src: Operand::Reg(Reg::AX),
         dst: dst.into(),
-        size: get_assembly_type(dst, symbols),
+        size: symbols.get_assembly_type(dst),
     });
 
     instructions
@@ -352,7 +331,7 @@ fn convert_function_call(
 /// (instruction selection, pass 1), still operating on pseudo-registers.
 ///
 /// Most ops map straightforwardly; the type-dependent ones consult `symbols` for operand
-/// size ([`get_assembly_type`]) and signedness ([`is_signed`]):
+/// size ([`BackendSymbolTable::get_assembly_type`]) and signedness ([`BackendSymbolTable::is_signed`]):
 /// - **Divide / Remainder** — `idiv` (signed) vs `div` (unsigned); the dividend is set up with
 ///   `cdq`/`cqo` (signed) or a zeroed RDX (unsigned). Result taken from RAX (quotient) or RDX
 ///   (remainder).
@@ -362,7 +341,7 @@ fn convert_function_call(
 fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbolTable) -> Vec<Instruction> {
     match instruction {
         tacky::Instruction::Return(x) => {
-            let size = get_assembly_type(x, symbols);
+            let size = symbols.get_assembly_type(x);
             vec![
                 Instruction::Mov {
                     src: x.into(),
@@ -377,7 +356,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
             src,
             dst,
         } => {
-            let size = get_assembly_type(src, symbols);
+            let size = symbols.get_assembly_type(src);
             vec![
                 Instruction::Cmp {
                     v1: Operand::Imm(0),
@@ -396,7 +375,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
             ]
         }
         tacky::Instruction::Unary { op, src, dst } => {
-            let size = get_assembly_type(src, symbols);
+            let size = symbols.get_assembly_type(src);
             let op = convert_unary_op(op);
             vec![
                 Instruction::Mov {
@@ -412,7 +391,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
             ]
         }
         tacky::Instruction::Binary { op, src1, src2, dst } => {
-            let size = get_assembly_type(src1, symbols);
+            let size = symbols.get_assembly_type(src1);
             match op {
                 BinOp::Add
                 | BinOp::Subtract
@@ -423,7 +402,13 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                 | BinOp::BitwiseLeftShift
                 | BinOp::BitwiseRightShift => {
                     let asm_op = match op {
-                        BinOp::BitwiseRightShift if !is_signed(src1, symbols) => BinaryOp::BitShr, // logical
+                        BinOp::BitwiseRightShift => {
+                            if symbols.is_signed(src1) {
+                                BinaryOp::BitSar
+                            } else {
+                                BinaryOp::BitShr
+                            }
+                        }
                         _ => BinaryOp::from(op), // BitSar / everything else
                     };
                     vec![
@@ -442,7 +427,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                 }
                 BinOp::Divide | BinOp::Remainder => {
                     let result_reg = if *op == BinOp::Divide { Reg::AX } else { Reg::DX };
-                    let signed = is_signed(dst, symbols);
+                    let signed = symbols.is_signed(dst);
                     let mut ins = vec![Instruction::Mov {
                         src: src1.into(),
                         dst: Operand::Reg(Reg::AX),
@@ -473,7 +458,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
                 | BinOp::GreaterThan
                 | BinOp::GreaterOrEqual => {
                     // signedness comes from the operands, not dst (a comparison's result is always int)
-                    let signed = is_signed(src1, symbols);
+                    let signed = symbols.is_signed(src1);
                     let code = match (op, signed) {
                         (BinOp::Equal, _) => CondCode::E,
                         (BinOp::NotEqual, _) => CondCode::NE,
@@ -504,7 +489,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
             }
         }
         tacky::Instruction::JumpIfZero { condition, target } => {
-            let size = get_assembly_type(condition, symbols);
+            let size = symbols.get_assembly_type(condition);
             vec![
                 Instruction::Cmp {
                     v1: Operand::Imm(0),
@@ -518,7 +503,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
             ]
         }
         tacky::Instruction::JumpIfNotZero { condition, target } => {
-            let size = get_assembly_type(condition, symbols);
+            let size = symbols.get_assembly_type(condition);
             vec![
                 Instruction::Cmp {
                     v1: Operand::Imm(0),
@@ -538,7 +523,7 @@ fn convert_instruction(instruction: &tacky::Instruction, symbols: &BackendSymbol
             vec![Instruction::Label(label.clone())]
         }
         tacky::Instruction::Copy { src, dst } => {
-            let size = get_assembly_type(src, symbols);
+            let size = symbols.get_assembly_type(src);
             vec![Instruction::Mov {
                 src: src.into(),
                 dst: dst.into(),
@@ -587,7 +572,7 @@ impl From<&BinOp> for BinaryOp {
             BinOp::BitwiseOr => BinaryOp::BitOr,
             BinOp::BitwiseXOr => BinaryOp::BitXOr,
             BinOp::BitwiseLeftShift => BinaryOp::BitShl,
-            BinOp::BitwiseRightShift => BinaryOp::BitSar,
+            BinOp::BitwiseRightShift => unreachable!("right shift needs signedness; handled in convert_instruction"),
             BinOp::Equal
             | BinOp::NotEqual
             | BinOp::LessThan
@@ -611,7 +596,6 @@ fn convert_unary_op(op: &parser::UnaryOp) -> UnaryOp {
 /// Emits parameter moves (from registers/stack to pseudo-registers) followed
 /// by the converted body instructions. First 6 params come from registers,
 /// the rest from stack positions above the saved RBP and return address.
-//todo should this consume FunctionDefination
 fn convert_function(ast: &tacky::FunctionDefinition, symbols: &BackendSymbolTable) -> FunctionDefinition {
     let tacky::FunctionDefinition {
         name,
@@ -672,32 +656,58 @@ pub enum AsmSymbolEntry {
     },
 }
 
-pub type BackendSymbolTable = HashMap<Rc<str>, AsmSymbolEntry>;
+/// Backend symbol table: maps each name to its [`AsmSymbolEntry`], with helpers to look up a
+/// variable's `Type` and classify an operand's size/signedness for instruction selection.
+pub struct BackendSymbolTable(HashMap<Rc<str>, AsmSymbolEntry>);
 
-/// Operand-type lookups on the backend symbol table: a variable's `Type` (`get_var_type`)
-/// and the `AssemblyType` (size) derived from it (`get_obj_type`).
-pub trait BackendSymbolTableExt {
-    fn get_obj_type(&self, name: &str) -> AssemblyType;
-    fn get_var_type(&self, name: &str) -> &Type;
-}
-
-impl BackendSymbolTableExt for BackendSymbolTable {
-    fn get_obj_type(&self, name: &str) -> AssemblyType {
-        self.get_var_type(name).into()
+impl BackendSymbolTable {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+    fn insert(&mut self, name: Rc<str>, entry: AsmSymbolEntry) {
+        self.0.insert(name, entry);
     }
 
+    /// The declared `Type` of variable `name` (panics if absent or a function).
     fn get_var_type(&self, name: &str) -> &Type {
-        match self.get(name).expect("Variable not in symbol table") {
+        match self.0.get(name).expect("Variable not in symbol table") {
             AsmSymbolEntry::Obj { var_type, .. } => var_type,
             AsmSymbolEntry::Fun { .. } => unreachable!("Expected object type, found function: {}", name),
         }
+    }
+
+    /// Operand size (`Longword`/`Quadword`) for `val` — constants by their `Const` variant,
+    /// variables by their type in the backend symbol table. Drives instruction sizing/suffixes.
+    fn get_assembly_type(&self, val: &Val) -> AssemblyType {
+        match val {
+            Val::Constant(Const::ConstInt(_) | Const::ConstUInt(_)) => AssemblyType::Longword,
+            Val::Constant(Const::ConstLong(_) | Const::ConstULong(_)) => AssemblyType::Quadword,
+            Val::Var(name) => self.get_var_type(name).into(),
+        }
+    }
+
+    /// Whether `val` has a signed type — selects signed vs unsigned instructions (`idiv`/`div`,
+    /// signed/unsigned condition codes). Constants are classified by their `Const` variant;
+    /// variables delegate to [`Type::is_signed`] via the backend symbol table.
+    fn is_signed(&self, val: &Val) -> bool {
+        match val {
+            Val::Constant(Const::ConstInt(_) | Const::ConstLong(_)) => true,
+            Val::Constant(Const::ConstUInt(_) | Const::ConstULong(_)) => false,
+            Val::Var(name) => self.get_var_type(name).is_signed(),
+        }
+    }
+
+    /// Assembly type (size) of the named object — `get_var_type` reduced to its `AssemblyType`.
+    /// Use when you hold a name (param/variable); use `get_assembly_type` for a [`Val`].
+    fn get_obj_type(&self, name: &str) -> AssemblyType {
+        self.get_var_type(name).into()
     }
 }
 
 /// Builds the backend symbol table from the frontend symbol table and TACKY IR.
 ///
-/// Maps all symbols to their assembly types: frontend symbols (variables and functions)
-/// from the validator's symbol table, plus TACKY temporaries from each function definition.
+/// Maps all symbols to their types: frontend symbols (variables and functions) from the
+/// validator's symbol table, plus TACKY temporaries from each function definition.
 fn build_backend_symbol_table(ast: &tacky::Program, symbols: &SymbolTable) -> BackendSymbolTable {
     let mut backend = BackendSymbolTable::new();
     let static_names: HashSet<&str> = ast.static_vars.iter().map(|sv| &*sv.name).collect();
@@ -706,7 +716,7 @@ fn build_backend_symbol_table(ast: &tacky::Program, symbols: &SymbolTable) -> Ba
         let backend_entry = match &symbol.symbol_type {
             Type::FunType { defined, .. } => AsmSymbolEntry::Fun { defined: *defined },
             ty => AsmSymbolEntry::Obj {
-                var_type: ty.clone(), //todo any way to consume and avoid clone
+                var_type: ty.clone(),
                 is_static: static_names.contains(&**name),
             },
         };
