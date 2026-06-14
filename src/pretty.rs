@@ -339,6 +339,8 @@ impl ItfDisplay for Type {
         match self {
             Type::Int => Node::leaf("Int".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
             Type::Long => Node::leaf("Long".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
+            Type::UInt => Node::leaf("UInt".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
+            Type::ULong => Node::leaf("ULong".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
             Type::FunType { params, ret, .. } => {
                 let param_types: Vec<Node> = params.iter().map(|t| t.itf_node()).collect();
                 let mut children = vec![Node::branch("return:", vec![ret.itf_node()])];
@@ -375,6 +377,8 @@ impl ItfDisplay for Expr {
                 let value_str = match c {
                     Const::ConstInt(val) => format!("Int({})", val),
                     Const::ConstLong(val) => format!("Long({})", val),
+                    Const::ConstUInt(val) => format!("UInt({})", val),
+                    Const::ConstULong(val) => format!("ULong({})", val),
                 };
                 Node::leaf(
                     format!("Constant({})", value_str)
@@ -556,6 +560,8 @@ impl ItfDisplay for Stmt {
                     .map(|(c, _span)| match c {
                         SwitchIntType::Int(v) => format!("{v}"),
                         SwitchIntType::Long(v) => format!("{v}L"),
+                        SwitchIntType::UInt(v) => format!("{v}U"),
+                        SwitchIntType::ULong(v) => format!("{v}UL"),
                         SwitchIntType::Default => "default".to_string(),
                     })
                     .collect::<Vec<_>>()
@@ -730,6 +736,8 @@ impl ItfDisplay for ValidatedExpr {
                 let value_str = match c {
                     Const::ConstInt(val) => format!("Int({})", val),
                     Const::ConstLong(val) => format!("Long({})", val),
+                    Const::ConstUInt(val) => format!("UInt({})", val),
+                    Const::ConstULong(val) => format!("ULong({})", val),
                 };
                 Node::leaf(
                     format!("Constant({})", value_str)
@@ -911,6 +919,8 @@ impl ItfDisplay for ValidatedStmt {
                     .map(|c| match c {
                         SwitchIntType::Int(v) => format!("{v}"),
                         SwitchIntType::Long(v) => format!("{v}L"),
+                        SwitchIntType::UInt(v) => format!("{v}U"),
+                        SwitchIntType::ULong(v) => format!("{v}UL"),
                         SwitchIntType::Default => "default".to_string(),
                     })
                     .collect();
@@ -1090,6 +1100,12 @@ impl ItfDisplay for TackyInstruction {
                 val_str(src),
                 val_str(dst)
             )),
+            TackyInstruction::ZeroExtend { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "ZeroExtend".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(src),
+                val_str(dst)
+            )),
         }
     }
 }
@@ -1208,6 +1224,12 @@ impl ItfDisplay for CodegenInstruction {
                 operand_str(src),
                 operand_str(dst)
             )),
+            CodegenInstruction::MovZeroExtend { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "MovZeroExtend".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                operand_str(src),
+                operand_str(dst)
+            )),
             CodegenInstruction::Unary { op, dst, size } => Node::leaf(format!(
                 "{}<{}> {:?} {}",
                 "Unary".truecolor(TEAL.0, TEAL.1, TEAL.2),
@@ -1233,6 +1255,12 @@ impl ItfDisplay for CodegenInstruction {
             CodegenInstruction::Idiv(op, size) => Node::leaf(format!(
                 "{}<{}> {}",
                 "Idiv".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                size_str(size),
+                operand_str(op)
+            )),
+            CodegenInstruction::Div(op, size) => Node::leaf(format!(
+                "{}<{}> {}",
+                "Div".truecolor(TEAL.0, TEAL.1, TEAL.2),
                 size_str(size),
                 operand_str(op)
             )),

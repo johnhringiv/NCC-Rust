@@ -1,4 +1,16 @@
 {
+  "unsigned/widening_casts.c": {
+    "return_code": 2
+  },
+  "unsigned/comparisons.c": {
+    "return_code": 4
+  },
+  "unsigned/shift.c": {
+    "return_code": 2
+  },
+  "unsigned/division.c": {
+    "return_code": 2
+  },
   "conditional/valid/assignment.c": {
     "return_code": 100
   },
@@ -53,6 +65,9 @@
   "int_wrapping/int_wrapping.c": {
     "return_code": 0
   },
+  "int_wrapping/long_min_literal.c": {
+    "return_code": 2
+  },
   "int_wrapping/loop_wrapping.c": {
     "return_code": 2
   },
@@ -64,6 +79,9 @@
   },
   "static_vars/data_operand_coverage.c": {
     "return_code": 0
+  },
+  "static_vars/mixed_alignment.c": {
+    "return_code": 4
   },
   "static_vars/variable_shift_data.c": {
     "return_code": 0

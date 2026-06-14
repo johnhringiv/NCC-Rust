@@ -102,6 +102,7 @@ fn emit_binaryop(op: &BinaryOp, size: &AssemblyType) -> String {
         BinaryOp::BitXOr => format!("xor{suffix}"),
         BinaryOp::BitShl => format!("shl{suffix}"),
         BinaryOp::BitSar => format!("sar{suffix}"),
+        BinaryOp::BitShr => format!("shr{suffix}"),
     }
 }
 
@@ -164,12 +165,12 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
             output.push_str(&format!("{} {}\n", emit_unaryop(op, size), emit_operand(dst, &width)));
         }
         Instruction::Binary {
-            op: op @ (BinaryOp::BitShl | BinaryOp::BitSar),
+            op: op @ (BinaryOp::BitShl | BinaryOp::BitSar | BinaryOp::BitShr),
             src,
             dst,
             size,
         } => {
-            // shl and sar always use an immediate or cl register as the source operand
+            // shl, sar, and shr always use an immediate or cl register as the source operand
             let width = RegWidth::from_size(size);
             output.push_str(&format!(
                 "{} {}, {}",
@@ -192,6 +193,12 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
             let width = RegWidth::from_size(size);
             output.push_str(&format!("idiv{suffix} {} ", emit_operand(op, &width)));
         }
+        Instruction::Div(op, size) => {
+            let suffix = size_suffix(size);
+            let width = RegWidth::from_size(size);
+            output.push_str(&format!("div{suffix} {} ", emit_operand(op, &width)));
+        }
+        Instruction::MovZeroExtend { .. } => unreachable!("MovZeroExtend in emit"),
         Instruction::Cdq(size) => {
             let ins = match size {
                 AssemblyType::Longword => "cdq",
@@ -261,7 +268,8 @@ fn emit_function(fun_def: &FunctionDefinition) -> String {
 /// Emits a static variable as AT&T-syntax assembly directives.
 ///
 /// Places zero-initialized variables in `.bss` and non-zero variables in `.data`,
-/// with appropriate alignment and size directives (`.long` for int, `.quad` for long).
+/// with appropriate alignment and size directives (`.long` for 32-bit int/uint, `.quad`
+/// for 64-bit long/ulong).
 /// Extern variables (unresolved by the linker) produce no output.
 /// On macOS, symbol names are prefixed with `_`.
 fn emit_static_variable(sv: &StaticVariable) -> String {
@@ -288,26 +296,23 @@ fn emit_static_variable(sv: &StaticVariable) -> String {
     }
 
     match init_val {
-        validate::StaticInt::IntInit(0) | validate::StaticInt::LongInit(0) => {
+        validate::StaticInt::IntInit(0)
+        | validate::StaticInt::LongInit(0)
+        | validate::StaticInt::UIntInit(0)
+        | validate::StaticInt::ULongInit(0) => {
             // BSS section for zero-initialized data
             output.push_str("\t.bss\n");
             output.push_str(&format!("\t.align {alignment}\n"));
             output.push_str(&format!("{processed_name}:\n"));
             output.push_str(&format!("\t.zero {alignment}\n"));
         }
-        validate::StaticInt::IntInit(val) => {
-            // Data section for initialized int
+        nonzero => {
+            // Data section: directive (.long/.quad) and value follow the type
+            let (directive, value) = nonzero.data_directive();
             output.push_str("\t.data\n");
-            output.push_str("\t.align 4\n");
+            output.push_str(&format!("\t.align {alignment}\n"));
             output.push_str(&format!("{processed_name}:\n"));
-            output.push_str(&format!("\t.long {val}\n"));
-        }
-        validate::StaticInt::LongInit(val) => {
-            // Data section for initialized long
-            output.push_str("\t.data\n");
-            output.push_str("\t.align 8\n");
-            output.push_str(&format!("{processed_name}:\n"));
-            output.push_str(&format!("\t.quad {val}\n"));
+            output.push_str(&format!("\t{directive} {value}\n"));
         }
     }
 

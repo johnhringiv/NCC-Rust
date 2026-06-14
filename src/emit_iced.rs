@@ -359,8 +359,6 @@ fn emit_object_with_labels(
 
     let data = obj.section_id(StandardSection::Data);
     let bss = obj.section_id(StandardSection::UninitializedData);
-    let mut data_offset: u64 = 0;
-    let mut bss_offset: u64 = 0;
     let mut static_var_symbols: HashMap<Rc<str>, SymbolId> = HashMap::new();
     for StaticVariable {
         name,
@@ -373,24 +371,18 @@ fn emit_object_with_labels(
             // Defined variable - allocate storage in .data or .bss
             VarInit::Defined(init_val) => {
                 let (offset, section) = match init_val {
-                    StaticInt::IntInit(0) | StaticInt::LongInit(0) => {
-                        obj.append_section_bss(bss, *alignment, *alignment);
-                        let offset = bss_offset;
-                        bss_offset += alignment;
+                    StaticInt::IntInit(0)
+                    | StaticInt::LongInit(0)
+                    | StaticInt::UIntInit(0)
+                    | StaticInt::ULongInit(0) => {
+                        // append_section_bss returns the actual offset (after alignment padding)
+                        let offset = obj.append_section_bss(bss, *alignment, *alignment);
                         (offset, &bss)
                     }
-                    StaticInt::IntInit(val) => {
-                        let init_bytes = val.to_le_bytes();
-                        obj.append_section_data(data, &init_bytes, *alignment);
-                        let offset = data_offset;
-                        data_offset += alignment;
-                        (offset, &data)
-                    }
-                    StaticInt::LongInit(val) => {
-                        let init_bytes = val.to_le_bytes();
-                        obj.append_section_data(data, &init_bytes, *alignment);
-                        let offset = data_offset;
-                        data_offset += alignment;
+                    nonzero => {
+                        let init_bytes = nonzero.to_le_bytes();
+                        // append_section_data returns the actual offset (after alignment padding)
+                        let offset = obj.append_section_data(data, &init_bytes, *alignment);
                         (offset, &data)
                     }
                 };
@@ -584,8 +576,31 @@ fn make_lbl_ptr(lbl: &CodeLabel, asm_ty: &AssemblyType) -> AsmMemoryOperand {
     }
 }
 
+macro_rules! emit_setcc {
+    ($a:expr, $code:expr, $op:expr) => {
+        match $code {
+            CondCode::E => $a.sete($op)?,
+            CondCode::NE => $a.setne($op)?,
+            CondCode::G => $a.setg($op)?,
+            CondCode::GE => $a.setge($op)?,
+            CondCode::L => $a.setl($op)?,
+            CondCode::LE => $a.setle($op)?,
+            CondCode::A => $a.seta($op)?,
+            CondCode::AE => $a.setae($op)?,
+            CondCode::B => $a.setb($op)?,
+            CondCode::BE => $a.setbe($op)?,
+        }
+    };
+}
+
 // Data operands (static variables) use RIP-relative addressing with relocations.
 //
+/// Encodes a single assembly instruction into the iced [`CodeAssembler`] `a`.
+///
+/// Matches on the operand shapes (register / immediate / stack / RIP-relative data) and size,
+/// since iced exposes a distinct typed builder per form — hence the large per-instruction match.
+/// Records relocations as it goes: external `Call`s into `external_calls` and RIP-relative data
+/// accesses into `data_relocs`, for the linker to patch.
 // Note: Many Data destination patterns (e.g., `Add(Reg, Data)`, `Neg(Data)`) are currently
 // unreached because the codegen uses load→op→store sequences for static variables.
 // These patterns will become reachable after implementing copy propagation and dead store
@@ -890,6 +905,25 @@ fn emit_instruction(
                 }
                 _ => unreachable!(),
             },
+            BinaryOp::BitShr => match (src, dst, size) {
+                (Operand::Imm(v), Operand::Reg(d), AssemblyType::Longword) => a.shr(gpr32(d), *v as i32)?,
+                (Operand::Imm(v), Operand::Reg(d), AssemblyType::Quadword) => a.shr(gpr64_reg(d), *v as i32)?,
+                (Operand::Reg(Reg::CX), Operand::Reg(d), AssemblyType::Longword) => a.shr(gpr32(d), gpr8::cl)?,
+                (Operand::Reg(Reg::CX), Operand::Reg(d), AssemblyType::Quadword) => a.shr(gpr64_reg(d), gpr8::cl)?,
+                (Operand::Imm(v), Operand::Stack(off), _) => a.shr(mem_rbp(*off, *size), *v as i32)?,
+                (Operand::Imm(v), Operand::Data(name), _) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.shr(make_lbl_ptr(lbl, size), *v as i32)?
+                }
+                (Operand::Reg(Reg::CX), Operand::Stack(off), _) => a.shr(mem_rbp(*off, *size), gpr8::cl)?,
+                (Operand::Reg(Reg::CX), Operand::Data(name), _) => {
+                    let lbl = data_labels.get(name).unwrap();
+                    data_relocs.push((a.instructions().len(), name.clone()));
+                    a.shr(make_lbl_ptr(lbl, size), gpr8::cl)?
+                }
+                _ => unreachable!(),
+            },
         },
         Instruction::Cmp { v1, v2, size } => match (v1, v2, size) {
             (Operand::Reg(r1), Operand::Reg(r2), AssemblyType::Longword) => a.cmp(gpr32(r2), gpr32(r1))?,
@@ -945,6 +979,18 @@ fn emit_instruction(
             }
             _ => unreachable!(),
         },
+        Instruction::Div(op, size) => match (op, size) {
+            (Operand::Reg(r), AssemblyType::Longword) => a.div(gpr32(r))?,
+            (Operand::Reg(r), AssemblyType::Quadword) => a.div(gpr64_reg(r))?,
+            (Operand::Stack(off), _) => a.div(mem_rbp(*off, *size))?,
+            (Operand::Data(name), _) => {
+                let lbl = data_labels.get(name).unwrap();
+                data_relocs.push((a.instructions().len(), name.clone()));
+                a.div(make_lbl_ptr(lbl, size))?
+            }
+            _ => unreachable!("{}", format!("{:?}", op)),
+        },
+        Instruction::MovZeroExtend { .. } => unreachable!("MovZeroExtend in emit"),
         Instruction::Jmp(label) => {
             let l = *labels.entry(label.0.clone()).or_insert_with(|| a.create_label());
             a.jmp(l)?;
@@ -958,36 +1004,19 @@ fn emit_instruction(
                 CondCode::GE => a.jge(l)?,
                 CondCode::L => a.jl(l)?,
                 CondCode::LE => a.jle(l)?,
+                CondCode::A => a.ja(l)?,
+                CondCode::AE => a.jae(l)?,
+                CondCode::B => a.jb(l)?,
+                CondCode::BE => a.jbe(l)?,
             };
         }
         Instruction::SetCC { code, op } => match op {
-            Operand::Reg(_r) => match code {
-                CondCode::E => a.sete(gpr8::al)?,
-                CondCode::NE => a.setne(gpr8::al)?,
-                CondCode::G => a.setg(gpr8::al)?,
-                CondCode::GE => a.setge(gpr8::al)?,
-                CondCode::L => a.setl(gpr8::al)?,
-                CondCode::LE => a.setle(gpr8::al)?,
-            },
-            Operand::Stack(off) => match code {
-                CondCode::E => a.sete(byte_ptr(gpr64::rbp - (-*off)))?,
-                CondCode::NE => a.setne(byte_ptr(gpr64::rbp - (-*off)))?,
-                CondCode::G => a.setg(byte_ptr(gpr64::rbp - (-*off)))?,
-                CondCode::GE => a.setge(byte_ptr(gpr64::rbp - (-*off)))?,
-                CondCode::L => a.setl(byte_ptr(gpr64::rbp - (-*off)))?,
-                CondCode::LE => a.setle(byte_ptr(gpr64::rbp - (-*off)))?,
-            },
+            Operand::Reg(_r) => emit_setcc!(a, code, gpr8::al),
+            Operand::Stack(off) => emit_setcc!(a, code, byte_ptr(gpr64::rbp - (-*off))),
             Operand::Data(name) => {
                 let lbl = data_labels.get(name).unwrap();
                 data_relocs.push((a.instructions().len(), name.clone()));
-                match code {
-                    CondCode::E => a.sete(byte_ptr(*lbl))?,
-                    CondCode::NE => a.setne(byte_ptr(*lbl))?,
-                    CondCode::G => a.setg(byte_ptr(*lbl))?,
-                    CondCode::GE => a.setge(byte_ptr(*lbl))?,
-                    CondCode::L => a.setl(byte_ptr(*lbl))?,
-                    CondCode::LE => a.setle(byte_ptr(*lbl))?,
-                }
+                emit_setcc!(a, code, byte_ptr(*lbl))
             }
             _ => unreachable!(),
         },

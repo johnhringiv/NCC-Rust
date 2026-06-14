@@ -151,9 +151,9 @@ Tests validate both successful compilation and error handling:
 
 ## Language Implementation Notes
 
-**Type System**: Currently supports `int` (32-bit) and `long` (64-bit). Type conversions follow two's complement truncation.
+**Type System**: Currently supports `int`/`unsigned int` (32-bit) and `long`/`unsigned long` (64-bit), with the usual arithmetic conversions. Narrowing truncates (two's complement); widening sign-extends signed sources and zero-extends unsigned ones; same-width signed/unsigned conversions reinterpret the bits.
 
-**Integer Arithmetic**: Deterministic wrapping behavior (non-standard C extension). Shift amounts are masked to prevent undefined behavior.
+**Integer Arithmetic**: Signed overflow wraps deterministically (non-standard C extension; standard C makes it UB); unsigned wraps mod 2^N (standard). Shift amounts are masked to prevent undefined behavior. The `-Woverflow` warning fires only for signed overflow.
 
 **Evaluation Order**: Left-to-right (non-standard, eliminates UB).
 

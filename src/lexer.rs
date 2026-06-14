@@ -37,6 +37,8 @@ pub enum Token {
     Identifier(String),
     ConstantInt(String),
     ConstantLong(String),
+    ConstantUnsignedInt(String),
+    ConstantUnsignedLong(String),
     IntKeyword,              // int
     VoidKeyword,             // void
     ReturnKeyword,           // return
@@ -95,13 +97,20 @@ pub enum Token {
     StaticKeyword,           // static
     ExternKeyword,           // extern
     LongKeyword,             // long
+    SignedKeyword,           // signed
+    UnsignedKeyword,         // unsigned
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
     // Special handling tokens (handled differently in next_token)
     (r"^[a-zA-Z_]\w*\b", Token::Identifier(String::new())),
     (r"^[0-9]+\b", Token::ConstantInt(String::new())),
-    (r"^[0-9]++[lL]\b", Token::ConstantLong(String::new())),
+    (r"^[0-9]+[lL]\b", Token::ConstantLong(String::new())),
+    (r"^[0-9]+[uU]\b", Token::ConstantUnsignedInt(String::new())),
+    (
+        r"^[0-9]++([lL][uU]|[uU][lL])\b",
+        Token::ConstantUnsignedLong(String::new()),
+    ),
     // Keywords
     (r"^int\b", Token::IntKeyword),
     (r"^void\b", Token::VoidKeyword),
@@ -168,6 +177,8 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^static\b", Token::StaticKeyword),
     (r"^extern\b", Token::ExternKeyword),
     (r"^long\b", Token::LongKeyword),
+    (r"^signed\b", Token::SignedKeyword),
+    (r"^unsigned\b", Token::UnsignedKeyword),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -232,9 +243,17 @@ fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
             let token = match variant {
                 Token::Identifier(_) => Token::Identifier(mat.as_str().to_string()),
                 Token::ConstantInt(_) => Token::ConstantInt(mat.as_str().to_string()),
+                Token::ConstantUnsignedInt(_) => {
+                    let s = mat.as_str();
+                    Token::ConstantUnsignedInt(s[..s.len() - 1].to_string())
+                }
                 Token::ConstantLong(_) => {
                     let s = mat.as_str();
                     Token::ConstantLong(s[..s.len() - 1].to_string())
+                }
+                Token::ConstantUnsignedLong(_) => {
+                    let s = mat.as_str();
+                    Token::ConstantUnsignedLong(s[..s.len() - 2].to_string())
                 }
                 other => other.clone(),
             };
