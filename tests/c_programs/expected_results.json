@@ -1,4 +1,16 @@
 {
+  "unsigned/widening_casts.c": {
+    "return_code": 2
+  },
+  "unsigned/comparisons.c": {
+    "return_code": 4
+  },
+  "unsigned/shift.c": {
+    "return_code": 2
+  },
+  "unsigned/division.c": {
+    "return_code": 2
+  },
   "conditional/valid/assignment.c": {
     "return_code": 100
   },
