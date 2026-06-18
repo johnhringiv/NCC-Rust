@@ -72,6 +72,10 @@ struct Args {
     #[arg(short = 'o', long)]
     output: Option<String>,
 
+    /// Link against a library, e.g. `-lm` for libm. Forwarded to the linker.
+    #[arg(short = 'l')]
+    link_libs: Vec<String>,
+
     /// Input files (required)
     #[arg(required = true)]
     filenames: Vec<String>,
@@ -139,7 +143,7 @@ fn get_cc_library_paths() -> Vec<String> {
 
 /// Build linker arguments for Linux (shared between ld and libwild)
 #[cfg(target_os = "linux")]
-fn build_linux_linker_args(obj_files: &[String], out_file: &str, static_link: bool) -> Vec<String> {
+fn build_linux_linker_args(obj_files: &[String], out_file: &str, static_link: bool, link_libs: &[String]) -> Vec<String> {
     let mut args = vec!["-o".to_string(), out_file.to_string()];
 
     if static_link {
@@ -161,6 +165,10 @@ fn build_linux_linker_args(obj_files: &[String], out_file: &str, static_link: bo
     }
 
     args.extend(obj_files.iter().cloned());
+    // user libraries (-lm, …) before -lc: they may depend on libc, which must follow them
+    for lib in link_libs {
+        args.push(format!("-l{lib}"));
+    }
     args.push("-lc".to_string());
 
     if static_link {
@@ -177,7 +185,7 @@ fn build_linux_linker_args(obj_files: &[String], out_file: &str, static_link: bo
 
 /// Link object files using the system linker (ld)
 #[allow(unused_variables)]
-fn link_with_ld(obj_files: &[String], out_file: &str, static_link: bool) {
+fn link_with_ld(obj_files: &[String], out_file: &str, static_link: bool, link_libs: &[String]) {
     let mut cmd = std::process::Command::new("ld");
 
     #[cfg(target_os = "macos")]
@@ -201,6 +209,9 @@ fn link_with_ld(obj_files: &[String], out_file: &str, static_link: bool) {
         }
 
         cmd.arg("-lSystem");
+        for lib in link_libs {
+            cmd.arg(format!("-l{lib}"));
+        }
         for obj in obj_files {
             cmd.arg(obj);
         }
@@ -209,7 +220,7 @@ fn link_with_ld(obj_files: &[String], out_file: &str, static_link: bool) {
 
     #[cfg(target_os = "linux")]
     {
-        for arg in build_linux_linker_args(obj_files, out_file, static_link) {
+        for arg in build_linux_linker_args(obj_files, out_file, static_link, link_libs) {
             cmd.arg(arg);
         }
     }
@@ -223,8 +234,8 @@ fn link_with_ld(obj_files: &[String], out_file: &str, static_link: bool) {
 
 /// Link object files using libwild (Linux only, in-process linker)
 #[cfg(target_os = "linux")]
-fn link_with_libwild(obj_files: &[String], out_file: &str, static_link: bool) {
-    let args_vec = build_linux_linker_args(obj_files, out_file, static_link);
+fn link_with_libwild(obj_files: &[String], out_file: &str, static_link: bool, link_libs: &[String]) {
+    let args_vec = build_linux_linker_args(obj_files, out_file, static_link, link_libs);
     let args_refs: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
 
     let linker = Linker::new();
@@ -307,7 +318,7 @@ fn main() {
             std::process::exit(0);
         }
 
-        let (code_ast, _backend_symbols) = codegen::generate(tacky_ast, &symbols);
+        let (code_ast, _backend_symbols) = codegen::generate(tacky_ast, &symbols, &mut name_gen);
         if args.codegen {
             println!("{}", code_ast.itf_string());
             std::process::exit(0);
@@ -361,7 +372,7 @@ fn main() {
                 for (sv, init_val) in defined_vars {
                     let is_zero = matches!(
                         init_val,
-                        validate::StaticInt::IntInit(0) | validate::StaticInt::LongInit(0)
+                        validate::StaticInit::IntInit(0) | validate::StaticInit::LongInit(0)
                     );
                     let section = if is_zero { ".bss" } else { ".data" };
                     println!("{}", section.cyan());
@@ -374,6 +385,26 @@ fn main() {
                     } else {
                         println!("  {} {:?}", ".long".yellow(), init_val);
                     }
+                }
+            }
+
+            // Print the read-only `double` constant pool. The stored bytes are the raw IEEE-754
+            // bit pattern, so emit `.quad 0x...` (bit-exact) with the decimal value as a comment.
+            if !code_ast.static_constants.is_empty() {
+                println!();
+                println!("{}", ".section .rodata".cyan());
+                for sc in &code_ast.static_constants {
+                    let validate::StaticInit::DoubleInit(d) = sc.init else {
+                        continue; // only doubles live in the constant pool
+                    };
+                    println!("  {}", format!(".align {}", sc.alignment).dimmed());
+                    println!("{}:", sc.name.green());
+                    println!(
+                        "  {} {}   {}",
+                        ".quad".yellow(),
+                        format!("0x{:016x}", d.to_bits()).cyan(),
+                        format!("# {d}").dimmed()
+                    );
                 }
             }
 
@@ -408,7 +439,7 @@ fn main() {
 
         let (mut name_gen, typed_program, symbols) = validated_result;
         let tacky_ast = tacky::tackify_program(typed_program, &mut name_gen, &symbols);
-        let (code_ast, _backend_symbols) = codegen::generate(tacky_ast, &symbols);
+        let (code_ast, _backend_symbols) = codegen::generate(tacky_ast, &symbols, &mut name_gen);
 
         let path = Path::new(c_file);
         let obj_file = path.with_extension("o").to_string_lossy().to_string();
@@ -484,10 +515,10 @@ fn main() {
 
     // Link all object files together
     if use_external_linker {
-        link_with_ld(&obj_files, &out_file, args.static_link);
+        link_with_ld(&obj_files, &out_file, args.static_link, &args.link_libs);
     } else {
         #[cfg(target_os = "linux")]
-        link_with_libwild(&obj_files, &out_file, args.static_link);
+        link_with_libwild(&obj_files, &out_file, args.static_link, &args.link_libs);
     }
 
     // Clean up object files

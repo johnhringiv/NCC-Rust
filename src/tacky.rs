@@ -30,14 +30,13 @@
 //!   │         ├─ tackify_var_declaration() — emit local var initializers (skip static/extern)
 //!   │         └─ tackify_stmt()         — lower statements to jumps/labels
 //!   │              └─ tackify_expr()    — core: flatten expressions to instructions
-//!   │                   └─ emit_cast()  — integer conversions (truncate / sign- / zero-extend)
+//!   │                   └─ emit_cast()  — scalar conversions (truncate / sign- / zero-extend, int<->double)
 //!   └─ convert_symbols_to_tacky()       — extract static vars from symbol table
 //! ```
 
-use crate::parser;
-use crate::parser::{Const, Identifier, IncDec, SwitchIntType, Type, UnaryOp};
+use crate::parser::{AssignOp, BinOp as ParserBinOp, Const, Identifier, IncDec, SwitchIntType, Type, UnaryOp};
 use crate::validate::{
-    Block, BlockItem, Expr, ForInit, InitialValue, NameGenerator, StaticInt, Stmt, SymbolTable, TypedDeclaration,
+    Block, BlockItem, Expr, ForInit, InitialValue, NameGenerator, StaticInit, Stmt, SymbolTable, TypedDeclaration,
     TypedExpression, TypedFunction, TypedProgram, TypedVarDeclaration,
 };
 use std::cmp::PartialEq;
@@ -70,25 +69,25 @@ pub enum BinOp {
     GreaterOrEqual,
 }
 
-impl From<&parser::BinOp> for BinOp {
-    fn from(op: &parser::BinOp) -> Self {
+impl From<&ParserBinOp> for BinOp {
+    fn from(op: &ParserBinOp) -> Self {
         match op {
-            parser::BinOp::Add => BinOp::Add,
-            parser::BinOp::Subtract => BinOp::Subtract,
-            parser::BinOp::Multiply => BinOp::Multiply,
-            parser::BinOp::Divide => BinOp::Divide,
-            parser::BinOp::Remainder => BinOp::Remainder,
-            parser::BinOp::BitwiseAnd => BinOp::BitwiseAnd,
-            parser::BinOp::BitwiseOr => BinOp::BitwiseOr,
-            parser::BinOp::BitwiseXOr => BinOp::BitwiseXOr,
-            parser::BinOp::BitwiseLeftShift => BinOp::BitwiseLeftShift,
-            parser::BinOp::BitwiseRightShift => BinOp::BitwiseRightShift,
-            parser::BinOp::Equal => BinOp::Equal,
-            parser::BinOp::NotEqual => BinOp::NotEqual,
-            parser::BinOp::LessThan => BinOp::LessThan,
-            parser::BinOp::LessOrEqual => BinOp::LessOrEqual,
-            parser::BinOp::GreaterThan => BinOp::GreaterThan,
-            parser::BinOp::GreaterOrEqual => BinOp::GreaterOrEqual,
+            ParserBinOp::Add => BinOp::Add,
+            ParserBinOp::Subtract => BinOp::Subtract,
+            ParserBinOp::Multiply => BinOp::Multiply,
+            ParserBinOp::Divide => BinOp::Divide,
+            ParserBinOp::Remainder => BinOp::Remainder,
+            ParserBinOp::BitwiseAnd => BinOp::BitwiseAnd,
+            ParserBinOp::BitwiseOr => BinOp::BitwiseOr,
+            ParserBinOp::BitwiseXOr => BinOp::BitwiseXOr,
+            ParserBinOp::BitwiseLeftShift => BinOp::BitwiseLeftShift,
+            ParserBinOp::BitwiseRightShift => BinOp::BitwiseRightShift,
+            ParserBinOp::Equal => BinOp::Equal,
+            ParserBinOp::NotEqual => BinOp::NotEqual,
+            ParserBinOp::LessThan => BinOp::LessThan,
+            ParserBinOp::LessOrEqual => BinOp::LessOrEqual,
+            ParserBinOp::GreaterThan => BinOp::GreaterThan,
+            ParserBinOp::GreaterOrEqual => BinOp::GreaterOrEqual,
             _ => unreachable!("Unsupported binary operator {:#?} in tacky conversion", op),
         }
     }
@@ -103,35 +102,86 @@ impl From<&IncDec> for BinOp {
     }
 }
 
-impl From<&parser::AssignOp> for BinOp {
-    fn from(op: &parser::AssignOp) -> Self {
+impl From<&AssignOp> for BinOp {
+    fn from(op: &AssignOp) -> Self {
         match op {
-            parser::AssignOp::Add => BinOp::Add,
-            parser::AssignOp::Subtract => BinOp::Subtract,
-            parser::AssignOp::Multiply => BinOp::Multiply,
-            parser::AssignOp::Divide => BinOp::Divide,
-            parser::AssignOp::Remainder => BinOp::Remainder,
-            parser::AssignOp::BitwiseAnd => BinOp::BitwiseAnd,
-            parser::AssignOp::BitwiseOr => BinOp::BitwiseOr,
-            parser::AssignOp::BitwiseXOr => BinOp::BitwiseXOr,
-            parser::AssignOp::BitwiseLeftShift => BinOp::BitwiseLeftShift,
-            parser::AssignOp::BitwiseRightShift => BinOp::BitwiseRightShift,
+            AssignOp::Add => BinOp::Add,
+            AssignOp::Subtract => BinOp::Subtract,
+            AssignOp::Multiply => BinOp::Multiply,
+            AssignOp::Divide => BinOp::Divide,
+            AssignOp::Remainder => BinOp::Remainder,
+            AssignOp::BitwiseAnd => BinOp::BitwiseAnd,
+            AssignOp::BitwiseOr => BinOp::BitwiseOr,
+            AssignOp::BitwiseXOr => BinOp::BitwiseXOr,
+            AssignOp::BitwiseLeftShift => BinOp::BitwiseLeftShift,
+            AssignOp::BitwiseRightShift => BinOp::BitwiseRightShift,
         }
     }
 }
 
+/// A TACKY three-address instruction.
+///
+/// TACKY is roughly **LLVM IR without SSA** — a generic three-address code, not a C-specific format
+/// (which is why it's the reuse seam for other frontends). The correspondence to LLVM IR:
+///
+/// | TACKY | LLVM |
+/// |-------|------|
+/// | `Return` | `ret` |
+/// | `SignExtend` / `ZeroExtend` / `Truncate` | `sext` / `zext` / `trunc` |
+/// | `IntToDouble` / `UIntToDouble` | `sitofp` / `uitofp` |
+/// | `DoubleToInt` / `DoubleToUInt` | `fptosi` / `fptoui` (saturating variant = `llvm.fptosi.sat` / `.fptoui.sat`) |
+/// | `Binary` (arithmetic/bitwise/shift) | `add`/`sub`/`mul`/`sdiv`/`udiv`/`srem`/`urem`/`and`/`or`/`xor`/`shl`/`ashr`/`lshr` (or `fadd`/… for `double`) |
+/// | `Binary` (comparison) | `icmp`/`fcmp` **+ `zext i1`** (TACKY yields a full int, not `i1`) |
+/// | `Unary::Negate` | `sub 0, x` (int) / `fneg` (double) — LLVM has no integer `neg` |
+/// | `Unary::BitwiseComplement` | `xor x, -1` — LLVM has no `not` |
+/// | `Unary::Not` | `icmp eq x, 0` **+ `zext i1`** |
+/// | `Jump` | unconditional `br` |
+/// | `JumpIfZero` / `JumpIfNotZero` | `icmp eq/ne x, 0` **+** conditional `br` |
+/// | `Label` | a **basic-block boundary** (LLVM has no label *instruction*; blocks are labels) |
+/// | `FunCall` | `call` |
+/// | `Copy` | **no equivalent** — an artifact of TACKY's mutable temporaries (see SSA note) |
+///
+/// Two structural differences from LLVM IR, both deliberate (TACKY sits *before* SSA):
+/// 1. **Not SSA.** Temporaries are reassignable, which is why `Copy` exists at all — in SSA there is
+///    nothing to copy, you reference the value. A `Var` here is closer to an LLVM `alloca` slot.
+///    A `TACKY → SSA → TACKY` pass would introduce `phi`s and match LLVM's middle-end form.
+/// 2. **Flat list + labels, not explicit basic blocks.** `Label`/`Jump` describe the CFG implicitly;
+///    LLVM makes basic blocks first-class (each ends in exactly one terminator).
 #[derive(Clone, Debug)]
 pub enum Instruction {
     Return(Val),
     SignExtend {
+        // LLVM: sext
         src: Val,
         dst: Val,
     },
     Truncate {
+        // LLVM: trunc
         src: Val,
         dst: Val,
     },
     ZeroExtend {
+        // LLVM: zext
+        src: Val,
+        dst: Val,
+    },
+    DoubleToInt {
+        // LLVM: fptosi (saturating variant = llvm.fptosi.sat)
+        src: Val,
+        dst: Val,
+    },
+    DoubleToUInt {
+        // LLVM: fptoui (saturating variant = llvm.fptoui.sat)
+        src: Val,
+        dst: Val,
+    },
+    IntToDouble {
+        // LLVM: sitofp
+        src: Val,
+        dst: Val,
+    },
+    UIntToDouble {
+        // LLVM: uitofp
         src: Val,
         dst: Val,
     },
@@ -182,7 +232,7 @@ pub struct FunctionDefinition {
 #[derive(Debug, Clone)]
 pub enum VarInit {
     /// Variable defined here with initial value (0 = .bss, non-zero = .data)
-    Defined(StaticInt),
+    Defined(StaticInit),
     /// Extern variable - no storage allocated, resolved by linker
     Extern,
 }
@@ -201,10 +251,11 @@ pub struct Program {
     pub static_vars: Vec<StaticVariable>,
 }
 
-/// Emits the conversion instruction for casting `src` (`src_type`) into `dst` (`dst_type`).
+/// Emits the conversion instruction for casting `src` (`src_type`) into `dst` (`dst_type`),
+/// dispatching on whether each side is an integer or `double`.
 ///
-/// The instruction is chosen by comparing widths, with extension keyed on the **source**'s
-/// signedness (the value being widened), not the destination's:
+/// **Integer → integer** — chosen by width, with extension keyed on the **source**'s signedness
+/// (the value being widened), not the destination's:
 /// - **same width** → `Copy` (a reinterpret, e.g. `int`<->`uint`; no bits change)
 /// - **narrowing** (dst smaller) → `Truncate` (keep the low bits; signedness-independent)
 /// - **widening from a signed source** → `SignExtend` (preserves value, e.g. `int -1` -> `long -1`)
@@ -212,15 +263,40 @@ pub struct Program {
 ///
 /// Keying on the source is what makes mixed-sign widenings correct: `(unsigned long)(-1)`
 /// sign-extends to `ULONG_MAX`, while `(long)4294967295u` zero-extends to `4294967295`.
+///
+/// **`double` → integer** → `DoubleToInt` (signed target) / `DoubleToUInt` (unsigned target).
+/// **Integer → `double`** → `IntToDouble` (signed source) / `UIntToDouble` (unsigned source).
+///
+/// `double` → `double` cannot reach here: a same-type cast is short-circuited by the caller (the
+/// `Expr::Cast` arm of `tackify_expr`) before `emit_cast` runs, so that combination is `unreachable!`.
 fn emit_cast(src: Val, dst: Val, src_type: &Type, dst_type: &Type, instructions: &mut Vec<Instruction>) {
-    if src_type.size_bits() == dst_type.size_bits() {
-        instructions.push(Instruction::Copy { src, dst });
-    } else if dst_type.size_bits() < src_type.size_bits() {
-        instructions.push(Instruction::Truncate { src, dst });
-    } else if src_type.is_signed() {
-        instructions.push(Instruction::SignExtend { src, dst });
-    } else {
-        instructions.push(Instruction::ZeroExtend { src, dst });
+    match (src_type.is_integer(), dst_type.is_integer()) {
+        (true, true) => {
+            if src_type.size_bits() == dst_type.size_bits() {
+                instructions.push(Instruction::Copy { src, dst });
+            } else if dst_type.size_bits() < src_type.size_bits() {
+                instructions.push(Instruction::Truncate { src, dst });
+            } else if src_type.is_signed() {
+                instructions.push(Instruction::SignExtend { src, dst });
+            } else {
+                instructions.push(Instruction::ZeroExtend { src, dst });
+            }
+        }
+        (false, true) => {
+            if dst_type.is_signed() {
+                instructions.push(Instruction::DoubleToInt { src, dst })
+            } else {
+                instructions.push(Instruction::DoubleToUInt { src, dst })
+            }
+        }
+        (true, false) => {
+            if src_type.is_signed() {
+                instructions.push(Instruction::IntToDouble { src, dst })
+            } else {
+                instructions.push(Instruction::UIntToDouble { src, dst })
+            }
+        }
+        _ => unreachable!("Double to double no cast"),
     }
 }
 
@@ -270,7 +346,7 @@ fn tackify_expr(
             });
             dst
         }
-        Expr::Binary(parser::BinOp::And, e1, e2) => {
+        Expr::Binary(ParserBinOp::And, e1, e2) => {
             let src1 = tackify_expr(e1, instructions, name_generator, temp_types);
             let false_label = Identifier(name_generator.next("and_false"));
             instructions.push(Instruction::JumpIfZero {
@@ -301,7 +377,7 @@ fn tackify_expr(
             instructions.push(Instruction::Label(end_label));
             result
         }
-        Expr::Binary(parser::BinOp::Or, e1, e2) => {
+        Expr::Binary(ParserBinOp::Or, e1, e2) => {
             let src1 = tackify_expr(e1, instructions, name_generator, temp_types);
             let false_label = Identifier(name_generator.next("or_false"));
             instructions.push(Instruction::JumpIfNotZero {
@@ -737,6 +813,20 @@ fn tackify_var_declaration(
     }
 }
 
+/// Lowers a typed function into its TACKY [`FunctionDefinition`]: tackifies the body into a flat
+/// instruction list and collects the types of the temporaries generated along the way.
+///
+/// # Synthetic return
+///
+/// If the body doesn't already end in a `Return`, one is appended — for **every** function, not just
+/// `main`. Codegen emits the terminating `ret` only when it lowers an [`Instruction::Return`], so a
+/// function with no trailing return would otherwise fall through into the next function's code.
+///
+/// The return *value* is only meaningful for `main`, where C99 §5.1.2.2.3 mandates an implicit
+/// `return 0`. For any other function, reaching `}` and using the result is undefined behavior
+/// (§6.9.1p12): the standard defines no default, and gcc/clang leave the return register as-is
+/// (garbage). NCC instead returns a deterministic `0`/`0.0` of the return type, consistent with its
+/// policy of making UB deterministic; the value is unobservable in defined programs.
 fn tackify_function(func: &TypedFunction, name_generator: &mut NameGenerator) -> FunctionDefinition {
     let mut instructions = Vec::new();
     let mut temp_types = HashMap::new();
@@ -754,7 +844,10 @@ fn tackify_function(func: &TypedFunction, name_generator: &mut NameGenerator) ->
         let default_return = match ret_type {
             Type::Int => Val::Constant(Const::ConstInt(0)),
             Type::Long => Val::Constant(Const::ConstLong(0)),
-            _ => unreachable!("Function return type must be Int or Long"),
+            Type::ULong => Val::Constant(Const::ConstULong(0)),
+            Type::UInt => Val::Constant(Const::ConstUInt(0)),
+            Type::Double => Val::Constant(Const::ConstDouble(0.0)),
+            Type::FunType { .. } => unreachable!("function return type cannot be a function type"),
         };
         instructions.push(Instruction::Return(default_return));
     }
@@ -780,7 +873,7 @@ fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
     let mut tacky_defs = vec![];
     for (name, entry) in symbols.iter() {
         match &entry.symbol_type {
-            Type::Int | Type::Long | Type::UInt | Type::ULong => {
+            Type::Int | Type::Long | Type::UInt | Type::ULong | Type::Double => {
                 match &entry.val {
                     InitialValue::Initial(static_val) => tacky_defs.push(StaticVariable {
                         name: name.clone(),
@@ -790,11 +883,12 @@ fn convert_symbols_to_tacky(symbols: &SymbolTable) -> Vec<StaticVariable> {
                     }),
                     InitialValue::Tentative => {
                         let zero = match &entry.symbol_type {
-                            Type::Int => StaticInt::IntInit(0),
-                            Type::Long => StaticInt::LongInit(0),
-                            Type::UInt => StaticInt::UIntInit(0),
-                            Type::ULong => StaticInt::ULongInit(0),
-                            Type::FunType { .. } => unreachable!("Tentative must be Int or Long"),
+                            Type::Int => StaticInit::IntInit(0),
+                            Type::Long => StaticInit::LongInit(0),
+                            Type::UInt => StaticInit::UIntInit(0),
+                            Type::ULong => StaticInit::ULongInit(0),
+                            Type::Double => StaticInit::DoubleInit(0.0),
+                            Type::FunType { .. } => unreachable!("a function type cannot have a tentative definition"),
                         };
                         tacky_defs.push(StaticVariable {
                             name: name.clone(),

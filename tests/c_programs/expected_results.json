@@ -1,4 +1,7 @@
 {
+  "unsigned/implicit_return_falloff.c": {
+    "return_code": 2
+  },
   "unsigned/widening_casts.c": {
     "return_code": 2
   },

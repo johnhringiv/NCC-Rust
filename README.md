@@ -302,8 +302,17 @@ NCC provides several safety features and guarantees to help developers write mor
 - **Shift masking**: Left and right shifts mask the shift amount to prevent undefined behavior. For `int` types,
   the shift amount is masked with `& 31` (modulo 32); for `long` types, masked with `& 63` (modulo 64).
   For example, `1 << 32` evaluates to `1 << 0 = 1`, matching x86 hardware behavior.
-- **Consistent compile-time and runtime behavior**: Constant expressions (static initializers, case labels) follow
-  the same arithmetic and type conversion rules as runtime expressions, ensuring predictable behavior.
+- **Deterministic floating-point edges**: Cases C leaves undefined are given defined results. A floating-point
+  constant too large for `double` rounds to ±infinity and one too small rounds to zero (both flagged by
+  `-Woverflow`), where C §6.4.4.2 leaves an out-of-range floating constant undefined. Converting a `double` to an
+  integer truncates toward zero; out-of-range or NaN values produce the x86 `cvttsd2si` "integer indefinite" result
+  (the target type's minimum, e.g. `INT_MIN`), where C §6.3.1.4 leaves the conversion undefined.
+- **Consistent compile-time and runtime behavior**: Constant expressions (static initializers, case labels) are
+  folded with the *same* arithmetic and type-conversion rules as runtime expressions — including all of the
+  deterministic resolutions above. Where standard C would make an overflowing or out-of-range constant expression a
+  constraint violation (a required diagnostic), NCC instead folds it to the value equivalent runtime code would
+  produce: `static int x = 2147483647 + 1;` wraps to `INT_MIN`, and a constant `double`→`int` cast yields the same
+  `cvttsd2si` result the runtime conversion would.
 
 #### Compile-Time Warnings
 

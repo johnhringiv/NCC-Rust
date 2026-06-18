@@ -15,7 +15,8 @@
 //! ```
 
 use crate::codegen::{
-    AssemblyType, BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, StaticVariable, UnaryOp,
+    AssemblyType, BinaryOp, FunctionDefinition, Instruction, Operand, Program, Reg, StaticConstant, StaticVariable,
+    UnaryOp,
 };
 use crate::tacky::VarInit;
 use crate::validate;
@@ -24,6 +25,7 @@ enum RegWidth {
     Byte,
     DWord,
     QWord,
+    Xmm,
 }
 
 impl RegWidth {
@@ -31,14 +33,18 @@ impl RegWidth {
         match size {
             AssemblyType::Longword => RegWidth::DWord,
             AssemblyType::Quadword => RegWidth::QWord,
+            AssemblyType::Double => RegWidth::Xmm,
         }
     }
 }
 
+/// Integer instruction size suffix (`l`/`q`). `Double` has no suffix — SSE instructions use
+/// dedicated mnemonics (`movsd`, `addsd`, …) and are emitted on their own paths.
 fn size_suffix(size: &AssemblyType) -> &'static str {
     match size {
         AssemblyType::Longword => "l",
         AssemblyType::Quadword => "q",
+        AssemblyType::Double => unreachable!("SSE instructions use dedicated mnemonics, not a size suffix"),
     }
 }
 
@@ -55,6 +61,7 @@ fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
             Reg::R10 => "r10b",
             Reg::R11 => "r11b",
             Reg::SP => "spl",
+            _ => unreachable!("XMM register requested with a general-purpose width"),
         },
         RegWidth::DWord => match reg {
             Reg::AX => "eax",
@@ -67,6 +74,7 @@ fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
             Reg::R10 => "r10d",
             Reg::R11 => "r11d",
             Reg::SP => "esp",
+            _ => unreachable!("XMM register requested with a general-purpose width"),
         },
         RegWidth::QWord => match reg {
             Reg::AX => "rax",
@@ -79,6 +87,21 @@ fn emit_reg(reg: &Reg, reg_width: &RegWidth) -> &'static str {
             Reg::R10 => "r10",
             Reg::R11 => "r11",
             Reg::SP => "rsp",
+            _ => unreachable!("XMM register requested with a general-purpose width"),
+        },
+        // SSE registers are width-independent
+        RegWidth::Xmm => match reg {
+            Reg::XMM0 => "xmm0",
+            Reg::XMM1 => "xmm1",
+            Reg::XMM2 => "xmm2",
+            Reg::XMM3 => "xmm3",
+            Reg::XMM4 => "xmm4",
+            Reg::XMM5 => "xmm5",
+            Reg::XMM6 => "xmm6",
+            Reg::XMM7 => "xmm7",
+            Reg::XMM14 => "xmm14",
+            Reg::XMM15 => "xmm15",
+            _ => unreachable!("general-purpose register requested with XMM width"),
         },
     }
 }
@@ -88,6 +111,8 @@ fn emit_unaryop(op: &UnaryOp, size: &AssemblyType) -> String {
     match op {
         UnaryOp::Neg => format!("neg{suffix}"),
         UnaryOp::Not => format!("not{suffix}"),
+        // unary shift-by-1 (the round-to-odd step in u64 -> double)
+        UnaryOp::Shr => format!("shr{suffix}"),
     }
 }
 
@@ -103,6 +128,8 @@ fn emit_binaryop(op: &BinaryOp, size: &AssemblyType) -> String {
         BinaryOp::BitShl => format!("shl{suffix}"),
         BinaryOp::BitSar => format!("sar{suffix}"),
         BinaryOp::BitShr => format!("shr{suffix}"),
+        // SSE scalar divide is emitted directly in emit_instruction (dedicated mnemonic, no suffix)
+        BinaryOp::DivDouble => unreachable!("divsd is handled on the double Binary path"),
     }
 }
 
@@ -138,6 +165,13 @@ fn emit_operand(operand: &Operand, reg_width: &RegWidth) -> String {
 fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
     let mut output = String::new();
     match ins {
+        Instruction::Mov { src, dst, size: AssemblyType::Double } => {
+            output.push_str(&format!(
+                "movsd {}, {}",
+                emit_operand(src, &RegWidth::Xmm),
+                emit_operand(dst, &RegWidth::Xmm)
+            ));
+        }
         Instruction::Mov { src, dst, size } => {
             let suffix = size_suffix(size);
             let width = RegWidth::from_size(size);
@@ -163,6 +197,22 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
         Instruction::Unary { op, dst, size } => {
             let width = RegWidth::from_size(size);
             output.push_str(&format!("{} {}\n", emit_unaryop(op, size), emit_operand(dst, &width)));
+        }
+        Instruction::Binary { op, src, dst, size: AssemblyType::Double } => {
+            // SSE scalar-double arithmetic: dedicated mnemonics, XMM operands
+            let mnemonic = match op {
+                BinaryOp::Add => "addsd",
+                BinaryOp::Sub => "subsd",
+                BinaryOp::Mult => "mulsd",
+                BinaryOp::DivDouble => "divsd",
+                BinaryOp::BitXOr => "xorpd",
+                _ => unreachable!("non-SSE binary op with Double size: {op:?}"),
+            };
+            output.push_str(&format!(
+                "{mnemonic} {}, {}",
+                emit_operand(src, &RegWidth::Xmm),
+                emit_operand(dst, &RegWidth::Xmm)
+            ));
         }
         Instruction::Binary {
             op: op @ (BinaryOp::BitShl | BinaryOp::BitSar | BinaryOp::BitShr),
@@ -199,12 +249,41 @@ fn emit_instruction(ins: &Instruction, fn_name: &str) -> String {
             output.push_str(&format!("div{suffix} {} ", emit_operand(op, &width)));
         }
         Instruction::MovZeroExtend { .. } => unreachable!("MovZeroExtend in emit"),
+        Instruction::Cvttsd2si { src, dst, size } => {
+            // double -> signed int: src is the double (xmm/mem), dst a GP register of width `size`
+            let dst_width = RegWidth::from_size(size);
+            output.push_str(&format!(
+                "cvttsd2si {}, {}",
+                emit_operand(src, &RegWidth::Xmm),
+                emit_operand(dst, &dst_width)
+            ));
+        }
+        Instruction::Cvtsi2sd { src, dst, size } => {
+            // int -> double: src is the integer (GP reg/mem of width `size`), dst an XMM register.
+            // The integer-size suffix (l/q) disambiguates a memory source for the assembler.
+            let src_width = RegWidth::from_size(size);
+            output.push_str(&format!(
+                "cvtsi2sd{} {}, {}",
+                size_suffix(size),
+                emit_operand(src, &src_width),
+                emit_operand(dst, &RegWidth::Xmm)
+            ));
+        }
         Instruction::Cdq(size) => {
             let ins = match size {
                 AssemblyType::Longword => "cdq",
                 AssemblyType::Quadword => "cqo",
+                AssemblyType::Double => unreachable!("cdq/cqo are integer-only"),
             };
             output.push_str(ins);
+        }
+        Instruction::Cmp { v1, v2, size: AssemblyType::Double } => {
+            // comisd: AT&T order is `comisd src, dst`; v2 is the XMM register (fix_invalid)
+            output.push_str(&format!(
+                "comisd {}, {}",
+                emit_operand(v1, &RegWidth::Xmm),
+                emit_operand(v2, &RegWidth::Xmm)
+            ));
         }
         Instruction::Cmp { v1, v2, size } => {
             let suffix = size_suffix(size);
@@ -296,10 +375,10 @@ fn emit_static_variable(sv: &StaticVariable) -> String {
     }
 
     match init_val {
-        validate::StaticInt::IntInit(0)
-        | validate::StaticInt::LongInit(0)
-        | validate::StaticInt::UIntInit(0)
-        | validate::StaticInt::ULongInit(0) => {
+        validate::StaticInit::IntInit(0)
+        | validate::StaticInit::LongInit(0)
+        | validate::StaticInit::UIntInit(0)
+        | validate::StaticInit::ULongInit(0) => {
             // BSS section for zero-initialized data
             output.push_str("\t.bss\n");
             output.push_str(&format!("\t.align {alignment}\n"));
@@ -319,6 +398,34 @@ fn emit_static_variable(sv: &StaticVariable) -> String {
     output
 }
 
+/// Emits a `double` constant-pool entry as read-only data.
+///
+/// Placed in `.rodata` (ELF) / `.const` (Mach-O) with the raw IEEE-754 bit pattern via `.quad`,
+/// matching the bytes the iced backend writes. Constants are always internal (no `.globl`); on
+/// macOS the symbol name is `_`-prefixed to match how [`emit_operand`] references `Data` operands.
+fn emit_static_constant(sc: &StaticConstant) -> String {
+    let StaticConstant { name, init, alignment } = sc;
+    let validate::StaticInit::DoubleInit(d) = init else {
+        return String::new(); // only doubles live in the constant pool
+    };
+    let processed_name = if cfg!(target_os = "macos") {
+        format!("_{name}")
+    } else {
+        name.to_string()
+    };
+
+    let mut output = String::new();
+    if cfg!(target_os = "macos") {
+        output.push_str("\t.const\n");
+    } else {
+        output.push_str("\t.section .rodata\n");
+    }
+    output.push_str(&format!("\t.align {alignment}\n"));
+    output.push_str(&format!("{processed_name}:\n"));
+    output.push_str(&format!("\t.quad {:#018x}\n", d.to_bits()));
+    output
+}
+
 pub fn emit_program(program: &Program) -> String {
     let mut output = String::new();
 
@@ -333,6 +440,11 @@ pub fn emit_program(program: &Program) -> String {
     // Emit static variables
     for sv in &program.static_vars {
         output.push_str(&emit_static_variable(sv));
+    }
+
+    // Emit the double constant pool (read-only)
+    for sc in &program.static_constants {
+        output.push_str(&emit_static_constant(sc));
     }
 
     if cfg!(target_os = "linux") {

@@ -19,7 +19,8 @@
 //! - Builds the [`SymbolTable`] mapping identifiers to types, linkage, and initial values
 //! - Inserts implicit casts via common-type promotion (`int` + `long` -> `long`)
 //! - Validates function call arity and argument types
-//! - Evaluates constant expressions for static initializers and case labels
+//! - Evaluates constant expressions for static initializers and case labels (double->int folding
+//!   mirrors x86 `cvttsd2si`, not Rust's saturating `as` — see [`double_to_i32`])
 //! - Emits `-Wdiv-by-zero` for `/` or `%` with a constant zero divisor
 //! - Emits `-Wshift-count-overflow` / `-Wshift-count-negative` for an out-of-range constant shift count
 //! - Emits `-Woverflow` when a constant fold leaves the result type (in static initializers / case labels)
@@ -183,35 +184,38 @@ impl fmt::Debug for SemanticError {
 #[derive(Clone, Copy)]
 pub enum InitialValue {
     Tentative,
-    Initial(StaticInt),
+    Initial(StaticInit),
     NoInitializer,
 }
 
-/// A compile-time integer value for static variable initializers.
+/// A compile-time constant value (integer or `double`) for static variable initializers.
 ///
 /// Carries both the value and its type so that zero-initialized `.bss` vs
 /// initialized `.data` placement can be decided later in emission.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(clippy::enum_variant_names)] // `Init` suffix = static-initializer value
-pub enum StaticInt {
+pub enum StaticInit {
     IntInit(i32),
     LongInit(i64),
     UIntInit(u32),
     ULongInit(u64),
+    DoubleInit(f64),
 }
 
 macro_rules! checked_op {
-    // unary:  checked_op!(self, overflowing_neg; IntInit, LongInit, UIntInit, ULongInit)
-    ($self:expr, $method:ident; $($V:ident),+ $(,)?) => {{
+    // unary:  checked_op!(self, overflowing_neg, -; IntInit, LongInit, UIntInit, ULongInit)
+    ($self:expr, $method:ident; $op:tt; $($V:ident),+ $(,)?) => {{
         match $self {
-            $( StaticInt::$V(v) => { let (r, o) = v.$method(); (StaticInt::$V(r), o) } )+
+            StaticInit::DoubleInit(v) => (StaticInit::DoubleInit($op v), false),
+            $( StaticInit::$V(v) => { let (r, o) = v.$method(); (StaticInit::$V(r), o) } )+
         }
     }};
-    // binary: checked_op!(self, other, overflowing_add; IntInit, LongInit, UIntInit, ULongInit)
-    ($self:expr, $other:expr, $method:ident; $($V:ident),+ $(,)?) => {{
+    // binary: checked_op!(self, other, overflowing_add, +; IntInit, LongInit, UIntInit, ULongInit)
+    ($self:expr, $other:expr, $method:ident; $op:tt; $($V:ident),+ $(,)?) => {{
         let (left, right) = $self.get_common($other);
         match (left, right) {
-            $( (StaticInt::$V(a), StaticInt::$V(b)) => { let (v, o) = a.$method(b); (StaticInt::$V(v), o) } )+
+            (StaticInit::DoubleInit(a), StaticInit::DoubleInit(b)) => (StaticInit::DoubleInit(a $op b), false),
+            $( (StaticInit::$V(a), StaticInit::$V(b)) => { let (v, o) = a.$method(b); (StaticInit::$V(v), o) } )+
             _ => unreachable!("get_common guarantees matching variants"),
         }
     }};
@@ -221,7 +225,7 @@ macro_rules! bitwise_op {
     ($self:expr, $other:expr, $op:tt; $($V:ident),+ $(,)?) => {{
         let (left, right) = $self.get_common($other);
         match (left, right) {
-            $( (StaticInt::$V(a), StaticInt::$V(b)) => StaticInt::$V(a $op b), )+
+            $( (StaticInit::$V(a), StaticInit::$V(b)) => StaticInit::$V(a $op b), )+
             _ => unreachable!("get_common guarantees matching variants"),
         }
     }};
@@ -231,28 +235,41 @@ macro_rules! compare_op {
     ($self:expr, $other:expr, $op:tt; $($V:ident),+ $(,)?) => {{
         let (left, right) = $self.get_common($other);
         match (left, right) {
-            $( (StaticInt::$V(a), StaticInt::$V(b)) => StaticInt::IntInit((a $op b) as i32), )+
+            (StaticInit::DoubleInit(a), StaticInit::DoubleInit(b)) => StaticInit::IntInit((a $op b) as i32),
+            $( (StaticInit::$V(a), StaticInit::$V(b)) => StaticInit::IntInit((a $op b) as i32), )+
             _ => unreachable!("get_common guarantees matching variants"),
         }
     }};
 }
 
-impl StaticInt {
+impl StaticInit {
     fn get_type(&self) -> Type {
         match self {
-            StaticInt::IntInit(_) => Type::Int,
-            StaticInt::LongInit(_) => Type::Long,
-            StaticInt::UIntInit(_) => Type::UInt,
-            StaticInt::ULongInit(_) => Type::ULong,
+            StaticInit::IntInit(_) => Type::Int,
+            StaticInit::LongInit(_) => Type::Long,
+            StaticInit::UIntInit(_) => Type::UInt,
+            StaticInit::ULongInit(_) => Type::ULong,
+            StaticInit::DoubleInit(_) => Type::Double,
         }
     }
 
     fn to_const(self) -> Const {
         match self {
-            StaticInt::IntInit(i) => Const::ConstInt(i),
-            StaticInt::LongInit(l) => Const::ConstLong(l),
-            StaticInt::UIntInit(i) => Const::ConstUInt(i),
-            StaticInt::ULongInit(l) => Const::ConstULong(l),
+            StaticInit::IntInit(i) => Const::ConstInt(i),
+            StaticInit::LongInit(l) => Const::ConstLong(l),
+            StaticInit::UIntInit(i) => Const::ConstUInt(i),
+            StaticInit::ULongInit(l) => Const::ConstULong(l),
+            StaticInit::DoubleInit(d) => Const::ConstDouble(d),
+        }
+    }
+
+    fn to_string(self) -> String {
+        match self {
+            StaticInit::IntInit(n) => n.to_string(),
+            StaticInit::LongInit(n) => n.to_string(),
+            StaticInit::UIntInit(n) => n.to_string(),
+            StaticInit::ULongInit(n) => n.to_string(),
+            StaticInit::DoubleInit(n) => n.to_string(),
         }
     }
 
@@ -261,19 +278,21 @@ impl StaticInt {
     /// i128/u128 in the same change that adds a 128-bit type, or constants silently truncate.
     fn wide(self) -> Wide {
         match self {
-            StaticInt::IntInit(v) => Wide::Signed(v as i64),
-            StaticInt::LongInit(v) => Wide::Signed(v),
-            StaticInt::UIntInit(v) => Wide::Unsigned(v as u64),
-            StaticInt::ULongInit(v) => Wide::Unsigned(v),
+            StaticInit::IntInit(v) => Wide::Signed(v as i64),
+            StaticInit::LongInit(v) => Wide::Signed(v),
+            StaticInit::UIntInit(v) => Wide::Unsigned(v as u64),
+            StaticInit::ULongInit(v) => Wide::Unsigned(v),
+            StaticInit::DoubleInit(_) => unreachable!("only used on integer types"),
         }
     }
 
     pub(crate) fn to_le_bytes(self) -> Vec<u8> {
         match self {
-            StaticInt::UIntInit(v) => v.to_le_bytes().to_vec(),
-            StaticInt::IntInit(v) => v.to_le_bytes().to_vec(),
-            StaticInt::LongInit(v) => v.to_le_bytes().to_vec(),
-            StaticInt::ULongInit(v) => v.to_le_bytes().to_vec(),
+            StaticInit::UIntInit(v) => v.to_le_bytes().to_vec(),
+            StaticInit::IntInit(v) => v.to_le_bytes().to_vec(),
+            StaticInit::LongInit(v) => v.to_le_bytes().to_vec(),
+            StaticInit::ULongInit(v) => v.to_le_bytes().to_vec(),
+            StaticInit::DoubleInit(v) => v.to_le_bytes().to_vec(),
         }
     }
 
@@ -281,10 +300,11 @@ impl StaticInt {
     /// (text emitter). Width follows the type; the value uses the variant's signedness.
     pub(crate) fn data_directive(&self) -> (&'static str, String) {
         match self {
-            StaticInt::IntInit(v) => (".long", v.to_string()),
-            StaticInt::UIntInit(v) => (".long", v.to_string()),
-            StaticInt::LongInit(v) => (".quad", v.to_string()),
-            StaticInt::ULongInit(v) => (".quad", v.to_string()),
+            StaticInit::IntInit(v) => (".long", v.to_string()),
+            StaticInit::UIntInit(v) => (".long", v.to_string()),
+            StaticInit::LongInit(v) => (".quad", v.to_string()),
+            StaticInit::ULongInit(v) => (".quad", v.to_string()),
+            StaticInit::DoubleInit(v) => (".double", v.to_string()),
         }
     }
 
@@ -297,55 +317,62 @@ impl StaticInt {
     }
 
     fn neg(self) -> (Self, bool) {
-        checked_op!(self, overflowing_neg; IntInit, LongInit, UIntInit, ULongInit)
+        checked_op!(self, overflowing_neg; -; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn add(self, other: Self) -> (Self, bool) {
-        checked_op!(self, other, overflowing_add; IntInit, LongInit, UIntInit, ULongInit)
+        checked_op!(self, other, overflowing_add; +; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn sub(self, other: Self) -> (Self, bool) {
-        checked_op!(self, other, overflowing_sub; IntInit, LongInit, UIntInit, ULongInit)
+        checked_op!(self, other, overflowing_sub; -; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn mul(self, other: Self) -> (Self, bool) {
-        checked_op!(self, other, overflowing_mul; IntInit, LongInit, UIntInit, ULongInit)
+        checked_op!(self, other, overflowing_mul; *; IntInit, LongInit, UIntInit, ULongInit)
     }
 
     fn is_zero(&self) -> bool {
-        self.as_i64() == 0
+        if let StaticInit::DoubleInit(val) = *self {
+            val == 0.0
+        } else {
+            self.as_i64() == 0
+        }
     }
 
     fn as_i64(&self) -> i64 {
         match *self {
-            StaticInt::IntInit(v) => v as i64,
-            StaticInt::LongInit(v) => v,
-            StaticInt::UIntInit(v) => v as i64,
-            StaticInt::ULongInit(v) => v as i64,
+            StaticInit::IntInit(v) => v as i64,
+            StaticInit::LongInit(v) => v,
+            StaticInit::UIntInit(v) => v as i64,
+            StaticInit::ULongInit(v) => v as i64,
+            StaticInit::DoubleInit(_) => unreachable!("Integer only helper"),
         }
     }
 
     fn as_u32(&self) -> u32 {
         match *self {
-            StaticInt::IntInit(v) => v as u32,
-            StaticInt::LongInit(v) => v as u32,
-            StaticInt::UIntInit(v) => v,
-            StaticInt::ULongInit(v) => v as u32,
+            StaticInit::IntInit(v) => v as u32,
+            StaticInit::LongInit(v) => v as u32,
+            StaticInit::UIntInit(v) => v,
+            StaticInit::ULongInit(v) => v as u32,
+            StaticInit::DoubleInit(_) => unreachable!("Integer only helper"),
         }
     }
 
     fn div(self, other: Self) -> Result<(Self, bool), ConstEvalError> {
-        if other.is_zero() {
+        if !matches!(other, StaticInit::DoubleInit(_)) && other.is_zero() {
             return Err(ConstEvalError::DivByZero);
         }
-        Ok(checked_op!(self, other, overflowing_div; IntInit, LongInit, UIntInit, ULongInit))
+        Ok(checked_op!(self, other, overflowing_div; /; IntInit, LongInit, UIntInit, ULongInit))
     }
 
     fn rem(self, other: Self) -> Result<(Self, bool), ConstEvalError> {
         if other.is_zero() {
             return Err(ConstEvalError::DivByZero);
         }
-        Ok(checked_op!(self, other, overflowing_rem; IntInit, LongInit, UIntInit, ULongInit))
+        // invalid for floating point operations put passing so I can reuse the helper
+        Ok(checked_op!(self, other, overflowing_rem; /; IntInit, LongInit, UIntInit, ULongInit))
     }
 
     fn bitwise_and(self, other: Self) -> Self {
@@ -364,10 +391,11 @@ impl StaticInt {
         let shift_amount = other.as_u32();
 
         match self {
-            StaticInt::IntInit(a) => StaticInt::IntInit(a << (shift_amount & 31)),
-            StaticInt::LongInit(a) => StaticInt::LongInit(a << (shift_amount & 63)),
-            StaticInt::UIntInit(a) => StaticInt::UIntInit(a << (shift_amount & 31)),
-            StaticInt::ULongInit(a) => StaticInt::ULongInit(a << (shift_amount & 63)),
+            StaticInit::IntInit(a) => StaticInit::IntInit(a << (shift_amount & 31)),
+            StaticInit::LongInit(a) => StaticInit::LongInit(a << (shift_amount & 63)),
+            StaticInit::UIntInit(a) => StaticInit::UIntInit(a << (shift_amount & 31)),
+            StaticInit::ULongInit(a) => StaticInit::ULongInit(a << (shift_amount & 63)),
+            StaticInit::DoubleInit(_) => unreachable!("Integer only operation"),
         }
     }
 
@@ -378,10 +406,11 @@ impl StaticInt {
         let shift_amount = other.as_u32();
 
         match self {
-            StaticInt::IntInit(a) => StaticInt::IntInit(a >> (shift_amount & 31)),
-            StaticInt::LongInit(a) => StaticInt::LongInit(a >> (shift_amount & 63)),
-            StaticInt::UIntInit(a) => StaticInt::UIntInit(a >> (shift_amount & 31)),
-            StaticInt::ULongInit(a) => StaticInt::ULongInit(a >> (shift_amount & 63)),
+            StaticInit::IntInit(a) => StaticInit::IntInit(a >> (shift_amount & 31)),
+            StaticInit::LongInit(a) => StaticInit::LongInit(a >> (shift_amount & 63)),
+            StaticInit::UIntInit(a) => StaticInit::UIntInit(a >> (shift_amount & 31)),
+            StaticInit::ULongInit(a) => StaticInit::ULongInit(a >> (shift_amount & 63)),
+            StaticInit::DoubleInit(_) => unreachable!("Integer only operation"),
         }
     }
 
@@ -410,11 +439,11 @@ impl StaticInt {
     }
 
     fn and(self, other: Self) -> Self {
-        StaticInt::IntInit(if !self.is_zero() && !other.is_zero() { 1 } else { 0 })
+        StaticInit::IntInit(if !self.is_zero() && !other.is_zero() { 1 } else { 0 })
     }
 
     fn or(self, other: Self) -> Self {
-        StaticInt::IntInit(if !self.is_zero() || !other.is_zero() { 1 } else { 0 })
+        StaticInit::IntInit(if !self.is_zero() || !other.is_zero() { 1 } else { 0 })
     }
 }
 
@@ -529,11 +558,12 @@ fn typecheck_local_variable_declaration(
             eval_static_initializer(expr, &decl.var_type, &decl.name, decl.span)?
         } else {
             let zero = match decl.var_type {
-                Type::Int => StaticInt::IntInit(0),
-                Type::Long => StaticInt::LongInit(0),
-                Type::UInt => StaticInt::UIntInit(0),
-                Type::ULong => StaticInt::ULongInit(0),
-                _ => unreachable!("static variable must be int or long"),
+                Type::Int => StaticInit::IntInit(0),
+                Type::Long => StaticInit::LongInit(0),
+                Type::UInt => StaticInit::UIntInit(0),
+                Type::ULong => StaticInit::ULongInit(0),
+                Type::Double => StaticInit::DoubleInit(0.0),
+                _ => unreachable!("static variable must be numeric"),
             };
             InitialValue::Initial(zero)
         };
@@ -616,7 +646,7 @@ fn typecheck_file_variable_declaration(
                     decl.span,
                 ));
             }
-            Type::Int | Type::Long | Type::UInt | Type::ULong => {
+            Type::Int | Type::Long | Type::UInt | Type::ULong | Type::Double => {
                 if old_dec.symbol_type != decl.var_type {
                     return Err(SemanticError::with_span(
                         format!(
@@ -737,7 +767,7 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
                 walk_region(rhs, region);
             }
         }
-        ParserExpr::Unary(_, e) | ParserExpr::Cast(_, e) => walk_region(e, region),
+        ParserExpr::Unary(_, e, _) | ParserExpr::Cast(_, e) => walk_region(e, region),
         ParserExpr::Conditional(c, t, f) => {
             check_sequence_points(c);
             check_sequence_points(t);
@@ -774,7 +804,12 @@ fn warn_sequence_point(target: &ParserExpr, span: Span, region: &mut HashMap<Rc<
 /// `-Wdiv-by-zero`: warn if a `/` or `%` (or `/=` / `%=`) divisor folds to a constant 0.
 /// `is_division` selects the message wording (division vs remainder).
 fn warn_div_by_zero(is_division: bool, rhs: &ParserExpr, span: Span) {
+    // The double exclusion lives here, not upstream, because `/` legitimately accepts double
+    // operands: `1.0 / 0.0` is `inf` (well-defined), not the SIGFPE this warning is about. So a
+    // double divisor really does reach this point — and `is_zero()` is true for `0.0` — so without
+    // this guard we'd warn on correct floating-point division.
     if let Ok((v, _)) = eval_constant_expr(rhs)
+        && !matches!(v, StaticInit::DoubleInit(_))
         && v.is_zero()
     {
         eprintln!(
@@ -790,7 +825,13 @@ fn warn_div_by_zero(is_division: bool, rhs: &ParserExpr, span: Span) {
 /// `-Wshift-count-overflow` / `-Wshift-count-negative`: warn if a shift's constant count is
 /// negative or `>=` the width of the left operand's type (`int` -> 32, `long` -> 64).
 fn warn_shift_count(left_type: &Type, rhs: &ParserExpr, span: Span) {
-    if let Ok((v, _)) = eval_constant_expr(rhs) {
+    // The double exclusion lives here for two reasons: this runs *before* the rhs is typechecked
+    // (so the "shift count must be integer" type error hasn't fired yet — see the caller), and
+    // `as_i64()` just below panics on a `DoubleInit`. A double shift count is rejected as a type
+    // error elsewhere; here we only need to avoid the meaningless warning and the panic.
+    if let Ok((v, _)) = eval_constant_expr(rhs)
+        && !matches!(v, StaticInit::DoubleInit(_))
+    {
         let width: i64 = match left_type {
             Type::Long => 64,
             _ => 32,
@@ -832,14 +873,17 @@ fn warn_overflow(overflowed: bool, span: Span) {
 /// `-Wconstant-conversion`: an implicit narrowing conversion of a constant that changed its value
 /// (e.g. `int x = 0x1FFFFFFFF;`). `changed` is the truncation flag from `convert_to_type`. Explicit
 /// casts suppress this — the caller only invokes it for implicit conversions.
-fn warn_constant_conversion(changed: bool, from: i64, to: i64, span: Span) {
+///
+/// Conversions involving `double` never warn here (float↔int narrowing is gcc's separate, deferred
+/// `-Wfloat-conversion`); the guard also keeps `as_i64` — an integer-only helper — off double values.
+fn warn_constant_conversion(changed: bool, from: &StaticInit, to: &StaticInit, span: Span) {
     if changed {
         eprintln!(
             "{}: {}: implicit conversion changes constant value from {} to {} {}",
             span,
             "warning".purple(),
-            from,
-            to,
+            from.to_string(),
+            to.to_string(),
             "[-Wconstant-conversion]".purple()
         );
     }
@@ -925,18 +969,26 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                 exp_type: Type::ULong,
                 exp: Expr::Const(c),
             }),
+            Const::ConstDouble(_) => Ok(TypedExpression {
+                exp_type: Type::Double,
+                exp: Expr::Const(c),
+            }),
         },
         ParserExpr::Cast(t, inner) => {
             let typed_inner = typecheck_exp(*inner, symbols)?;
             let cast_exp = Expr::Cast(t.clone(), Box::new(typed_inner));
             Ok(cast_exp.with_type(t))
         }
-        ParserExpr::Unary(op, inner) => {
+        ParserExpr::Unary(op, inner, span) => {
             let typed_inner = typecheck_exp(*inner, symbols)?;
             let inner_type = typed_inner.exp_type.clone();
             let unary_exp = Expr::Unary(op, Box::new(typed_inner));
             match op {
                 UnaryOp::Not => Ok(unary_exp.with_type(Type::Int)),
+                UnaryOp::BitwiseComplement if !inner_type.is_integer() => Err(SemanticError::with_span(
+                    "bitwise complement '~' requires an integer operand".to_string(),
+                    span,
+                )),
                 _ => Ok(unary_exp.with_type(inner_type)),
             }
         }
@@ -962,6 +1014,22 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                 warn_shift_count(&typed_lhs.exp_type, &rhs, span);
             }
             let typed_rhs = typecheck_exp(*rhs, symbols)?;
+            if (!typed_lhs.exp_type.is_integer() || !typed_rhs.exp_type.is_integer())
+                && matches!(
+                    op,
+                    BinOp::Remainder
+                        | BinOp::BitwiseAnd
+                        | BinOp::BitwiseLeftShift
+                        | BinOp::BitwiseOr
+                        | BinOp::BitwiseRightShift
+                        | BinOp::BitwiseXOr
+                )
+            {
+                return Err(SemanticError::with_span(
+                    "bitwise, shift, and remainder operators require integer operands".to_string(),
+                    span,
+                ));
+            }
             if matches!(op, BinOp::And | BinOp::Or) {
                 let binary_exp = Expr::Binary(op, Box::new(typed_lhs), Box::new(typed_rhs));
                 return Ok(binary_exp.with_type(Type::Int));
@@ -1028,6 +1096,22 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                 warn_shift_count(&typed_lhs.exp_type, &rhs, span);
             }
             let typed_rhs = typecheck_exp(*rhs, symbols)?;
+            if (!typed_lhs.exp_type.is_integer() || !typed_rhs.exp_type.is_integer())
+                && matches!(
+                    op,
+                    AssignOp::Remainder
+                        | AssignOp::BitwiseAnd
+                        | AssignOp::BitwiseLeftShift
+                        | AssignOp::BitwiseOr
+                        | AssignOp::BitwiseRightShift
+                        | AssignOp::BitwiseXOr
+                )
+            {
+                return Err(SemanticError::with_span(
+                    "bitwise, shift, and remainder operators require integer operands".to_string(),
+                    span,
+                ));
+            }
             let left_type = typed_lhs.exp_type.clone();
             let op_type = match op {
                 AssignOp::BitwiseLeftShift | AssignOp::BitwiseRightShift => left_type.clone(),
@@ -1145,7 +1229,7 @@ fn typecheck_function_declaration(
                 global = old_dec.global;
                 defined = defined || *old_defined;
             }
-            Type::Int | Type::Long | Type::UInt | Type::ULong => {
+            Type::Int | Type::Long | Type::UInt | Type::ULong | Type::Double => {
                 return Err(SemanticError::with_span(
                     format!(
                         "redeclaration of '{}' as a function\n{}: {}: previous declaration was here",
@@ -1282,6 +1366,15 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
             let typed_e = typecheck_exp(e, symbols)?;
             let switch_type = &typed_e.exp_type;
 
+            // The controlling expression must have integer type (C §6.8.4.2). Reject `double` here,
+            // before `as_i64` normalizes case values against it (that would otherwise panic).
+            if !switch_type.is_integer() {
+                return Err(SemanticError {
+                    message: "switch controlling expression must have integer type".to_string(),
+                    span: None,
+                });
+            }
+
             // Normalize cases and check for duplicates
             let mut normalized: HashMap<Option<i64>, Span> = HashMap::new();
             for (case, case_span) in cases.iter() {
@@ -1380,7 +1473,7 @@ fn resolve_exp(
                 *span,
             )),
         },
-        ParserExpr::Unary(_, e) => resolve_exp(e, variable_map, used_vars),
+        ParserExpr::Unary(_, e, _) => resolve_exp(e, variable_map, used_vars),
         ParserExpr::Binary(_, left, right, _) => {
             resolve_exp(left, variable_map, used_vars)?;
             resolve_exp(right, variable_map, used_vars)
@@ -1725,7 +1818,7 @@ fn resolve_statement(
 
 /// Wide-enough exact value of any integer constant, split by signedness so each half maps to a
 /// lossless std primitive (no single primitive holds both `u128::MAX` and negatives). Today the
-/// widest StaticInt variants are i64/u64, so those suffice — see [`StaticInt::wide`] for the
+/// widest StaticInt variants are i64/u64, so those suffice — see [`StaticInit::wide`] for the
 /// invariant on widening this to i128/u128.
 #[derive(Clone, Copy)]
 enum Wide {
@@ -1733,15 +1826,70 @@ enum Wide {
     Unsigned(u64),
 }
 
+// Double -> integer conversion, hand-rolled to match x86 `cvttsd2si` — the instruction codegen
+// emits, so a compile-time fold of e.g. `(int)1e20` must agree with the same cast at runtime.
+//
+// Rust's standard library can't do this for us:
+//   1. There is no fallible float->int conversion — `TryFrom<f64> for i32` (etc.) doesn't exist —
+//      so we can't ask "does this double fit?"; we range-check by hand.
+//   2. `f64::to_int_unchecked` exists but is undefined behavior out of range, so it can't be turned
+//      loose on arbitrary constants during folding.
+//
+// That leaves the `as` cast — but `as` does NOT match the hardware. Rust's float->int `as`
+// SATURATES: an out-of-range value clamps to the target's MIN/MAX and NaN becomes 0. `cvttsd2si`
+// instead yields the "integer indefinite" value — the target's MIN bit pattern (e.g. INT_MIN) — for
+// *every* invalid input: positive overflow, ±infinity, and NaN alike. They agree only when the
+// truncated value is already in range. So: explicit range/NaN check returning the indefinite value
+// on failure, and plain `as` (which truncates toward zero, matching cvttsd2si) on success.
+//
+// `double_to_u32`/`u64` build on the signed path because `cvttsd2si` is signed-only (see each fn).
+fn double_to_i32(d: f64) -> i32 {
+    // cvttsd2si: valid iff trunc(d) fits in i32; NaN/inf/overflow -> indefinite (INT_MIN)
+    if d.is_nan() || d < i32::MIN as f64 || d >= 2147483648.0
+    /* 2^31 */
+    {
+        i32::MIN
+    } else {
+        d as i32 // in range: truncates toward zero, matches cvttsd2si
+    }
+}
+
+fn double_to_i64(d: f64) -> i64 {
+    // cvttsd2si: valid iff trunc(d) fits in i64; NaN/inf/overflow -> indefinite (INT_MIN)
+    if d.is_nan() || d < i64::MIN as f64 || d >= 9223372036854775808.0
+    /* 2^63 */
+    {
+        i64::MIN
+    } else {
+        d as i64 // in range: truncates toward zero, matches cvttsd2si
+    }
+}
+
+fn double_to_u64(d: f64) -> u64 {
+    const TWO_POW_63: f64 = 9223372036854775808.0; // 2^63
+    if d < TWO_POW_63 {
+        double_to_i64(d) as u64 // fits signed range
+    } else {
+        // subtract 2^63, convert the (now in-range) remainder, restore the top bit
+        (double_to_i64(d - TWO_POW_63) as u64).wrapping_add(1u64 << 63)
+    }
+}
+
+fn double_to_u32(d: f64) -> u32 {
+    // u32's full range fits in i64, so convert via the signed 64-bit path and truncate.
+    double_to_i64(d) as u32
+}
+
 /// Casts a normalized value (`i64`/`u64`) to each target type, yielding `(result, out_of_range)`
 /// where `out_of_range` means the exact value can't be represented in the target's range.
 macro_rules! to_target {
     ($v:expr, $target:expr) => {
         match $target {
-            Type::Int => (StaticInt::IntInit($v as i32), i32::try_from($v).is_err()),
-            Type::UInt => (StaticInt::UIntInit($v as u32), u32::try_from($v).is_err()),
-            Type::Long => (StaticInt::LongInit($v as i64), i64::try_from($v).is_err()),
-            Type::ULong => (StaticInt::ULongInit($v as u64), u64::try_from($v).is_err()),
+            Type::Int => (StaticInit::IntInit($v as i32), i32::try_from($v).is_err()),
+            Type::UInt => (StaticInit::UIntInit($v as u32), u32::try_from($v).is_err()),
+            Type::Long => (StaticInit::LongInit($v as i64), i64::try_from($v).is_err()),
+            Type::ULong => (StaticInit::ULongInit($v as u64), u64::try_from($v).is_err()),
+            Type::Double => (StaticInit::DoubleInit($v as f64), false),
             Type::FunType { .. } => unreachable!("Cannot cast to function type in constant expression"),
         }
     };
@@ -1755,7 +1903,17 @@ macro_rules! to_target {
 // `unnecessary_cast`/`useless_conversion`: the i64/u64 normalizer coincides with the Long/ULong
 // targets today, so those arms are identity casts; they become genuine narrowings once Wide is i128/u128.
 #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-fn convert_to_type(val: StaticInt, target_type: &Type) -> (StaticInt, bool) {
+fn convert_to_type(val: StaticInit, target_type: &Type) -> (StaticInit, bool) {
+    if let StaticInit::DoubleInit(v) = val {
+        return match target_type {
+            Type::Int => (StaticInit::IntInit(double_to_i32(v)), false),
+            Type::Long => (StaticInit::LongInit(double_to_i64(v)), false),
+            Type::UInt => (StaticInit::UIntInit(double_to_u32(v)), false),
+            Type::ULong => (StaticInit::ULongInit(double_to_u64(v)), false),
+            Type::Double => (val, false),
+            Type::FunType { .. } => unreachable!(),
+        };
+    }
     let source_bits = val.get_type().size_bits();
     let (result, out_of_range) = match val.wide() {
         Wide::Signed(v) => to_target!(v, target_type),
@@ -1768,11 +1926,13 @@ fn convert_to_type(val: StaticInt, target_type: &Type) -> (StaticInt, bool) {
 enum ConstEvalError {
     NotConstant,
     DivByZero,
+    InvalidType,
 }
 
-/// Evaluate a static / file-scope initializer to its `InitialValue`, mapping the two
-/// constant-eval failures to located diagnostics. Shared by the local-`static` and
-/// file-scope declaration paths so their error messages stay in sync.
+/// Evaluate a static / file-scope initializer to its `InitialValue`, mapping the
+/// constant-eval failures (not-constant, division by zero, invalid-type op like `~` on a
+/// `double`) to located diagnostics. Shared by the local-`static` and file-scope declaration
+/// paths so their error messages stay in sync.
 fn eval_static_initializer(
     expr: &ParserExpr,
     var_type: &Type,
@@ -1784,7 +1944,7 @@ fn eval_static_initializer(
             warn_overflow(overflowed, span);
             // Implicit narrowing conversion to the declared type: -Wconstant-conversion.
             let (converted, truncated) = convert_to_type(c, var_type);
-            warn_constant_conversion(truncated, c.as_i64(), converted.as_i64(), span);
+            warn_constant_conversion(truncated, &c, &converted, span);
             Ok(InitialValue::Initial(converted))
         }
         Err(ConstEvalError::DivByZero) => Err(SemanticError::with_span(
@@ -1796,6 +1956,10 @@ fn eval_static_initializer(
                 "initializer for static variable '{}' is not a constant expression",
                 name.0.bold()
             ),
+            span,
+        )),
+        Err(ConstEvalError::InvalidType) => Err(SemanticError::with_span(
+            format!("cannot take bitwise complement of a {} value", "'double'".bold()),
             span,
         )),
     }
@@ -1818,12 +1982,13 @@ fn eval_static_initializer(
 /// Returns `Err(ConstEvalError::NotConstant)` if the expression contains non-constant
 /// elements (variables, function calls, assignments, etc.), or
 /// `Err(ConstEvalError::DivByZero)` if a `/` or `%` has a zero divisor.
-fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInt, bool), ConstEvalError> {
+fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEvalError> {
     match expr {
-        ParserExpr::Constant(Const::ConstInt(val)) => Ok((StaticInt::IntInit(*val), false)),
-        ParserExpr::Constant(Const::ConstLong(val)) => Ok((StaticInt::LongInit(*val), false)),
-        ParserExpr::Constant(Const::ConstUInt(val)) => Ok((StaticInt::UIntInit(*val), false)),
-        ParserExpr::Constant(Const::ConstULong(val)) => Ok((StaticInt::ULongInit(*val), false)),
+        ParserExpr::Constant(Const::ConstInt(val)) => Ok((StaticInit::IntInit(*val), false)),
+        ParserExpr::Constant(Const::ConstLong(val)) => Ok((StaticInit::LongInit(*val), false)),
+        ParserExpr::Constant(Const::ConstUInt(val)) => Ok((StaticInit::UIntInit(*val), false)),
+        ParserExpr::Constant(Const::ConstULong(val)) => Ok((StaticInit::ULongInit(*val), false)),
+        ParserExpr::Constant(Const::ConstDouble(val)) => Ok((StaticInit::DoubleInit(*val), false)),
         ParserExpr::Cast(target, val) => {
             let (v, o) = eval_constant_expr(val)?;
             // Explicit cast: suppress the conversion-truncation warning (programmer intent), but
@@ -1831,20 +1996,21 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInt, bool), ConstEvalE
             let (cv, _truncated) = convert_to_type(v, target);
             Ok((cv, o))
         }
-        ParserExpr::Unary(op, inner) => {
+        ParserExpr::Unary(op, inner, _) => {
             let (v, o) = eval_constant_expr(inner)?;
             let (r, o2) = match op {
                 UnaryOp::Negate => v.neg(),
                 UnaryOp::BitwiseComplement => (
                     match v {
-                        StaticInt::IntInit(n) => StaticInt::IntInit(!n),
-                        StaticInt::LongInit(n) => StaticInt::LongInit(!n),
-                        StaticInt::ULongInit(n) => StaticInt::ULongInit(!n),
-                        StaticInt::UIntInit(n) => StaticInt::UIntInit(!n),
+                        StaticInit::IntInit(n) => StaticInit::IntInit(!n),
+                        StaticInit::LongInit(n) => StaticInit::LongInit(!n),
+                        StaticInit::ULongInit(n) => StaticInit::ULongInit(!n),
+                        StaticInit::UIntInit(n) => StaticInit::UIntInit(!n),
+                        StaticInit::DoubleInit(_) => return Err(ConstEvalError::InvalidType),
                     },
                     false,
                 ),
-                UnaryOp::Not => (StaticInt::IntInit(v.is_zero() as i32), false),
+                UnaryOp::Not => (StaticInit::IntInit(v.is_zero() as i32), false),
             };
             // Unsigned wraparound is well-defined, not overflow — only signed ops warn (-Woverflow).
             let o2 = o2 && r.get_type().is_signed();
@@ -1853,6 +2019,19 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInt, bool), ConstEvalE
         ParserExpr::Binary(op, left, right, _) => {
             let (l, lo) = eval_constant_expr(left)?;
             let (r, ro) = eval_constant_expr(right)?;
+            if (matches!(l, StaticInit::DoubleInit(_)) || matches!(r, StaticInit::DoubleInit(_)))
+                && matches!(
+                    op,
+                    BinOp::Remainder
+                        | BinOp::BitwiseAnd
+                        | BinOp::BitwiseOr
+                        | BinOp::BitwiseXOr
+                        | BinOp::BitwiseLeftShift
+                        | BinOp::BitwiseRightShift
+                )
+            {
+                return Err(ConstEvalError::InvalidType);
+            }
             let base = lo | ro;
             let (v, op_ovf) = match op {
                 BinOp::Add => l.add(r),
@@ -1940,17 +2119,25 @@ impl LabelTracker {
         }
     }
 
-    fn get_switch_case(&mut self, c: StaticInt, span: &Span) -> Result<Rc<str>, SemanticError> {
+    fn get_switch_case(&mut self, c: StaticInit, span: &Span) -> Result<Rc<str>, SemanticError> {
         // get the active switch id
         if let Some(LabelTag::Switch(label)) = self.cur_label.iter().rev().find(|x| match x {
             LabelTag::Switch(..) => true,
             LabelTag::Loop(..) => false,
         }) {
             let case_exp = match c {
-                StaticInt::IntInit(v) => SwitchIntType::Int(v),
-                StaticInt::LongInit(v) => SwitchIntType::Long(v),
-                StaticInt::UIntInit(v) => SwitchIntType::UInt(v),
-                StaticInt::ULongInit(v) => SwitchIntType::ULong(v),
+                StaticInit::IntInit(v) => SwitchIntType::Int(v),
+                StaticInit::LongInit(v) => SwitchIntType::Long(v),
+                StaticInit::UIntInit(v) => SwitchIntType::UInt(v),
+                StaticInit::ULongInit(v) => SwitchIntType::ULong(v),
+                // Case labels are folded here in Pass 1, before typecheck runs, so a double case
+                // (`case 1.0:`) must be rejected here — not left to Pass 2 — or it would panic.
+                StaticInit::DoubleInit(_) => {
+                    return Err(SemanticError::with_span(
+                        "case label must be an integer constant, not a double".to_string(),
+                        *span,
+                    ));
+                }
             };
             // Just collect cases with spans - duplicate checking happens during typecheck
             self.switch_to_cases.get_mut(label).unwrap().push((case_exp, *span));
@@ -2074,6 +2261,12 @@ fn label_statement(stmt: &mut SpannedStmt, label_tracker: &mut LabelTracker) -> 
                 Err(ConstEvalError::NotConstant) => {
                     return Err(SemanticError::with_span(
                         "Expression is not an integer constant expression".to_string(),
+                        stmt.span,
+                    ));
+                }
+                Err(ConstEvalError::InvalidType) => {
+                    return Err(SemanticError::with_span(
+                        format!("cannot take bitwise complement of a {} value", "'double'".bold()),
                         stmt.span,
                     ));
                 }
