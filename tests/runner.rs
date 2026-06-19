@@ -1,10 +1,10 @@
 use glob::glob;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-static CHAPTER_COMPLETED: i32 = 12;
-static EXTRA_COMPLETED: i32 = 12;
+static CHAPTER_COMPLETED: i32 = 13;
+static EXTRA_COMPLETED: i32 = 13;
 
 #[derive(Debug, PartialEq, Clone)]
 enum ProgramOutput {
@@ -21,6 +21,8 @@ struct TestCase {
     c_file: String,
     extra_files: Vec<String>, // Library files or assembly files
     output: ProgramOutput,
+    requires_mathlib: bool, // needs `-lm` at link time (libm)
+    lib_deps: Vec<String>,  // helper-lib .c files (gcc-built) to link in (from the `libs` mapping)
 }
 
 /// Accumulated pass/fail tallies for a single case (a case may run several sub-tests).
@@ -68,6 +70,41 @@ fn load_assembly_libs() -> HashMap<String, Vec<String>> {
     result
 }
 
+/// Load `requires_mathlib` (relative paths of tests that must link libm) from test_properties.json.
+/// Mirrors the book framework's REQUIRES_MATHLIB; keyed the same way (the `_client` suffix stripped).
+fn load_requires_mathlib() -> HashSet<String> {
+    let json_content = fs::read_to_string("writing-a-c-compiler-tests/test_properties.json").unwrap_or_default();
+    let parsed: serde_json::Value = serde_json::from_str(&json_content).unwrap_or_default();
+    parsed
+        .get("requires_mathlib")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// Load the `libs` mapping from test_properties.json: test path -> helper-lib `.c` dependencies
+/// (e.g. `helper_libs/nan.c`). These are gcc-built and linked into the test, since they `#include`
+/// system headers NCC can't preprocess. Values are resolved to full paths under the tests dir.
+fn load_libs() -> HashMap<String, Vec<String>> {
+    let json_content = fs::read_to_string("writing-a-c-compiler-tests/test_properties.json").unwrap_or_default();
+    let parsed: serde_json::Value = serde_json::from_str(&json_content).unwrap_or_default();
+
+    let mut result = HashMap::new();
+    if let Some(libs) = parsed.get("libs").and_then(|v| v.as_object()) {
+        for (test_path, deps) in libs {
+            if let Some(deps_arr) = deps.as_array() {
+                let dep_paths: Vec<String> = deps_arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| format!("writing-a-c-compiler-tests/tests/{}", s))
+                    .collect();
+                result.insert(test_path.clone(), dep_paths);
+            }
+        }
+    }
+    result
+}
+
 // we want a mapping of test path to program output
 fn get_sandler_cases() -> Vec<TestCase> {
     // Load expected results for valid tests
@@ -76,6 +113,12 @@ fn get_sandler_cases() -> Vec<TestCase> {
 
     // Load assembly libs configuration
     let assembly_libs = load_assembly_libs();
+
+    // Load the set of tests that must link libm
+    let requires_mathlib = load_requires_mathlib();
+
+    // Load helper-lib dependencies (test -> [helper .c files], gcc-built and linked in)
+    let libs = load_libs();
 
     let mut cases = vec![];
 
@@ -95,6 +138,13 @@ fn get_sandler_cases() -> Vec<TestCase> {
 
         // Skip non-client library files (they get compiled with the _client.c file)
         if path_str.contains("/libraries/") && !path_str.ends_with("_client.c") {
+            continue;
+        }
+
+        // Skip helper libraries: these are dependencies linked into other tests (via the `libs`
+        // mapping), not standalone tests. They `#include` system headers NCC can't preprocess and
+        // are always built by gcc, then linked into the test that depends on them.
+        if path_str.contains("/helper_libs/") {
             continue;
         }
 
@@ -148,11 +198,19 @@ fn get_sandler_cases() -> Vec<TestCase> {
             extra_files.extend(asm_files.clone());
         }
 
+        // mathlib and lib deps are keyed like the book's props: a `_client.c` test maps to its
+        // `.c` library name
+        let props_key = relative_path.replace("_client.c", ".c");
+        let needs_mathlib = requires_mathlib.contains(&props_key);
+        let lib_deps = libs.get(&props_key).cloned().unwrap_or_default();
+
         if chapter <= CHAPTER_COMPLETED && (!extra_credit || (chapter <= EXTRA_COMPLETED)) {
             cases.push(TestCase {
                 c_file: path_str.to_string(),
                 extra_files,
                 output,
+                requires_mathlib: needs_mathlib,
+                lib_deps,
             })
         }
     }
@@ -189,6 +247,8 @@ fn get_custom_cases() -> Vec<TestCase> {
             c_file: path_str.to_string(),
             extra_files: vec![],
             output,
+            requires_mathlib: false,
+            lib_deps: vec![],
         })
     }
     cases
@@ -278,6 +338,12 @@ fn run_test(case: &TestCase, result: &mut CaseResult, extra_args: &[String], tes
 
     cmd.arg("-o").arg(binary_path_str);
 
+    // libm is needed only on Linux; macOS provides the math symbols via libSystem (matches the
+    // book framework, which skips -lm on OSX).
+    if case.requires_mathlib && !cfg!(target_os = "macos") {
+        cmd.arg("-lm");
+    }
+
     for arg in extra_args {
         cmd.arg(arg);
     }
@@ -301,6 +367,11 @@ fn run_test(case: &TestCase, result: &mut CaseResult, extra_args: &[String], tes
         ProgramOutput::Error(compile_output.status.code().unwrap_or(-1))
     };
 
+    record(case, actual, result, test_label);
+}
+
+/// Compares a test's actual outcome against its expected `output` and records pass/fail.
+fn record(case: &TestCase, actual: ProgramOutput, result: &mut CaseResult, test_label: &str) {
     let passed = match (&actual, &case.output) {
         (ProgramOutput::Error(a), ProgramOutput::Error(b)) => a == b,
         (
@@ -347,6 +418,74 @@ fn run_test(case: &TestCase, result: &mut CaseResult, extra_args: &[String], tes
     }
 }
 
+/// Runs a test that depends on helper libraries (the `libs` mapping). Each helper `.c` is compiled
+/// by gcc (it `#include`s system headers NCC can't preprocess); then NCC compiles the test and
+/// **links** it against those helper objects (exercising NCC's own linker with external objects).
+/// Helper objects are named per-test so parallel cases sharing a helper (e.g. several NaN tests)
+/// don't collide, and NCC leaves them in place (caller-owned `.o` inputs) for us to clean up.
+fn run_test_with_libs(case: &TestCase, result: &mut CaseResult) {
+    let ncc_path = get_ncc_binary_path();
+    let test_path = std::path::Path::new(&case.c_file);
+    let binary_path = test_path.with_extension("");
+    let binary_str = binary_path.to_str().unwrap();
+    let test_stem = test_path.file_stem().unwrap().to_string_lossy().to_string();
+
+    // gcc compiles each helper to a per-test object (avoids collisions across parallel cases)
+    let mut helper_objs: Vec<std::path::PathBuf> = Vec::new();
+    for lib in &case.lib_deps {
+        let lib_stem = std::path::Path::new(lib).file_stem().unwrap().to_string_lossy();
+        let lib_obj = test_path.with_file_name(format!("{test_stem}__{lib_stem}.o"));
+        let mut cmd = std::process::Command::new("gcc");
+        // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
+        #[cfg(target_arch = "aarch64")]
+        cmd.args(["-arch", "x86_64"]);
+        let st = cmd.arg("-c").arg(lib).arg("-o").arg(&lib_obj).status();
+        if st.is_err() || !st.unwrap().success() {
+            for o in &helper_objs {
+                std::fs::remove_file(o).ok();
+            }
+            result.failed += 1;
+            result
+                .failures
+                .push(format!("{} [with-libs] (helper {} compile failed)", case.c_file, lib));
+            return;
+        }
+        helper_objs.push(lib_obj);
+    }
+
+    // ncc compiles the test and links it with the helper objects (+ -lm on Linux when needed).
+    let mut cmd = std::process::Command::new(&ncc_path);
+    cmd.arg(&case.c_file);
+    for o in &helper_objs {
+        cmd.arg(o);
+    }
+    cmd.arg("-o").arg(binary_str);
+    if case.requires_mathlib && !cfg!(target_os = "macos") {
+        cmd.arg("-lm");
+    }
+    let compile_output = cmd.output().unwrap();
+
+    // helper objects are ours (ncc leaves caller-supplied .o inputs in place)
+    for o in &helper_objs {
+        std::fs::remove_file(o).ok();
+    }
+
+    let actual = if compile_output.status.success() {
+        let run_output = std::process::Command::new(binary_str).output().unwrap();
+        std::fs::remove_file(&binary_path).ok();
+        let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
+        ProgramOutput::Result {
+            code: run_output.status.code().unwrap_or(-1),
+            stdout: if stdout.is_empty() { None } else { Some(stdout) },
+            stderr: if stderr.is_empty() { None } else { Some(stderr) },
+        }
+    } else {
+        ProgramOutput::Error(compile_output.status.code().unwrap_or(-1))
+    };
+    record(case, actual, result, "with-libs");
+}
+
 /// Runs a cross-compilation test for library files
 /// Compiles client with one compiler and library with the other, then links
 fn run_library_cross_test(
@@ -355,6 +494,7 @@ fn run_library_cross_test(
     expected: &ProgramOutput,
     result: &mut CaseResult,
     ncc_compiles_client: bool,
+    requires_mathlib: bool,
 ) {
     let ncc_path = get_ncc_binary_path();
     let path = std::path::Path::new(client_file);
@@ -425,12 +565,15 @@ fn run_library_cross_test(
     // On arm64 hosts gcc must cross-target x86_64 to match ncc's output.
     #[cfg(target_arch = "aarch64")]
     link_cmd.args(["-arch", "x86_64"]);
-    let link_status = link_cmd
+    link_cmd
         .arg(&client_obj)
         .arg(&library_obj)
         .arg("-o")
-        .arg(binary_path_str)
-        .status();
+        .arg(binary_path_str);
+    if requires_mathlib && !cfg!(target_os = "macos") {
+        link_cmd.arg("-lm");
+    }
+    let link_status = link_cmd.status();
 
     std::fs::remove_file(&client_obj).ok();
     std::fs::remove_file(&library_obj).ok();
@@ -509,23 +652,33 @@ fn run_one_case(case: &TestCase) -> CaseResult {
             run_test(case, &mut result, &[], "");
         }
         ProgramOutput::Result { .. } => {
-            // For library tests, use cross-compilation to validate ABI compliance
-            if is_library_test {
+            // Tests with helper-lib dependencies: ncc compiles the test, gcc builds the helpers, link.
+            if !case.lib_deps.is_empty() {
+                run_test_with_libs(case, &mut result);
+            } else if is_library_test {
                 if let Some(library_file) = case.extra_files.first() {
                     // Test 1: ncc compiles client, gcc compiles library (validates ncc as caller)
-                    run_library_cross_test(&case.c_file, library_file, &case.output, &mut result, true);
+                    run_library_cross_test(
+                        &case.c_file,
+                        library_file,
+                        &case.output,
+                        &mut result,
+                        true,
+                        case.requires_mathlib,
+                    );
                     // Test 2: gcc compiles client, ncc compiles library (validates ncc as callee)
-                    run_library_cross_test(&case.c_file, library_file, &case.output, &mut result, false);
+                    run_library_cross_test(
+                        &case.c_file,
+                        library_file,
+                        &case.output,
+                        &mut result,
+                        false,
+                        case.requires_mathlib,
+                    );
                 }
             } else {
                 // Standard test: compile everything with ncc
                 run_test(case, &mut result, &[], "");
-                // The --no-iced text emitter forks an extra `as` per test, doubling
-                // process count. Codecov unions coverage across the CI matrix, so emit.rs
-                // stays fully covered by the Linux job; only run it there. (A single
-                // non-linux --no-iced smoke test below keeps the arm64 `as` shim covered.)
-                #[cfg(target_os = "linux")]
-                run_test(case, &mut result, &["--no-iced".to_string()], "no-iced");
             }
         }
     }
@@ -556,20 +709,9 @@ fn run_cases(cases: Vec<TestCase>) {
         "external-linker",
     );
 
-    // On non-Linux hosts the per-test --no-iced runs are skipped above to avoid forking an
-    // extra `as` per test. Run exactly ONE here so the arm64 `as --arch x86_64` cross-assembly
-    // shim still gets coverage. Pick the first case whose output is a Result and isn't a
-    // _client.c library test (those go through the cross-compilation path, not run_test).
-    #[cfg(not(target_os = "linux"))]
-    if let Some(case) = cases.iter().find(|c| {
-        matches!(c.output, ProgramOutput::Result { .. })
-            && !(c.c_file.contains("/libraries/") && c.c_file.ends_with("_client.c"))
-    }) {
-        run_test(case, &mut tally, &["--no-iced".to_string()], "no-iced-smoke");
-    }
-
-    assert!(
-        tally.failed == 0,
+    assert_eq!(
+        tally.failed,
+        0,
         "{} of {} sub-tests failed:\n{}",
         tally.failed,
         tally.passed + tally.failed,

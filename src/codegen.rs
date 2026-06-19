@@ -67,6 +67,7 @@ use crate::tacky;
 use crate::tacky::{BinOp, StaticVariable as TackyStaticVariable, Val, VarInit};
 use crate::validate::{NameGenerator, StaticInit, SymbolTable};
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -237,35 +238,38 @@ pub enum Instruction {
     Ret,
 }
 
+/// x86 condition codes (the `cc` in `setcc`/`jcc`), named after the flag tests they encode.
+///
+/// `E`/`NE` are signedness-agnostic. The signed set (`G`/`GE`/`L`/`LE`) reads SF/OF/ZF; the
+/// unsigned set (`A`/`AE`/`B`/`BE`) reads CF/ZF. `double` comparisons (`comisd`) set CF/ZF/PF
+/// like an *unsigned* compare, so they reuse `A`/`AE`/`B`/`BE` — plus `P`/`NP` to detect the
+/// unordered (NaN) case, where `comisd` sets PF.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CondCode {
+    /// equal (`ZF=1`)
     E,
+    /// not equal (`ZF=0`)
     NE,
+    /// above — unsigned `>` (`CF=0 and ZF=0`)
     A,
+    /// above or equal — unsigned `>=` (`CF=0`)
     AE,
+    /// below — unsigned `<` (`CF=1`)
     B,
+    /// below or equal — unsigned `<=` (`CF=1 or ZF=1`)
     BE,
+    /// greater — signed `>` (`ZF=0 and SF=OF`)
     G,
+    /// greater or equal — signed `>=` (`SF=OF`)
     GE,
+    /// less — signed `<` (`SF≠OF`)
     L,
+    /// less or equal — signed `<=` (`ZF=1 or SF≠OF`)
     LE,
-}
-
-impl CondCode {
-    pub fn ins_suffix(&self) -> &'static str {
-        match self {
-            CondCode::E => "e",
-            CondCode::NE => "ne",
-            CondCode::G => "g",
-            CondCode::GE => "ge",
-            CondCode::L => "l",
-            CondCode::LE => "le",
-            CondCode::B => "b",
-            CondCode::BE => "be",
-            CondCode::A => "a",
-            CondCode::AE => "ae",
-        }
-    }
+    /// parity (`PF=1`) — unordered: a NaN operand in a floating-point compare
+    P,
+    /// not parity (`PF=0`) — ordered: no NaN operand
+    NP,
 }
 
 #[derive(Debug)]
@@ -298,7 +302,16 @@ fn convert_function_call(
     constants: &mut ConstantPool,
 ) -> Vec<Instruction> {
     let int_regs = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
-    let double_regs = [ Reg::XMM0, Reg::XMM1, Reg::XMM2, Reg::XMM3, Reg::XMM4, Reg::XMM5, Reg::XMM6, Reg::XMM7 ];
+    let double_regs = [
+        Reg::XMM0,
+        Reg::XMM1,
+        Reg::XMM2,
+        Reg::XMM3,
+        Reg::XMM4,
+        Reg::XMM5,
+        Reg::XMM6,
+        Reg::XMM7,
+    ];
     let operands: Vec<(AssemblyType, Operand)> = args
         .iter()
         .map(|v| (symbols.get_assembly_type(v), val_operand(v, constants, 8)))
@@ -320,7 +333,11 @@ fn convert_function_call(
         0
     };
 
-    for ((param_ty, dst), reg) in int_reg_args.iter().zip(int_regs).chain(double_reg_args.iter().zip(double_regs)) {
+    for ((param_ty, dst), reg) in int_reg_args
+        .iter()
+        .zip(int_regs)
+        .chain(double_reg_args.iter().zip(double_regs))
+    {
         instructions.push(Instruction::Mov {
             src: dst.clone(),
             dst: Operand::Reg(reg),
@@ -331,10 +348,16 @@ fn convert_function_call(
     for (param_ty, dst) in stack_args.iter().rev() {
         // 8-byte operands (Quadword/Double) and Reg/Imm operands can be pushed directly; a
         // narrower memory operand is first widened through AX so the full 8-byte slot is defined.
-        if matches!(dst, Operand::Reg(_) | Operand::Imm(_)) || matches!(param_ty, AssemblyType::Quadword | AssemblyType::Double) {
+        if matches!(dst, Operand::Reg(_) | Operand::Imm(_))
+            || matches!(param_ty, AssemblyType::Quadword | AssemblyType::Double)
+        {
             instructions.push(Instruction::Push(dst.clone()))
         } else {
-            instructions.push(Instruction::Mov {src: dst.clone(), dst: Operand::Reg(Reg::AX), size: *param_ty});
+            instructions.push(Instruction::Mov {
+                src: dst.clone(),
+                dst: Operand::Reg(Reg::AX),
+                size: *param_ty,
+            });
             instructions.push(Instruction::Push(Operand::Reg(Reg::AX)))
         }
     }
@@ -355,9 +378,17 @@ fn convert_function_call(
     let return_ty = symbols.get_assembly_type(dst);
 
     if matches!(return_ty, AssemblyType::Double) {
-        instructions.push(Instruction::Mov {src: Operand::Reg(Reg::XMM0), dst: assembly_dst, size: AssemblyType::Double})
+        instructions.push(Instruction::Mov {
+            src: Operand::Reg(Reg::XMM0),
+            dst: assembly_dst,
+            size: AssemblyType::Double,
+        })
     } else {
-        instructions.push(Instruction::Mov {src: Operand::Reg(Reg::AX), dst: assembly_dst, size: return_ty})
+        instructions.push(Instruction::Mov {
+            src: Operand::Reg(Reg::AX),
+            dst: assembly_dst,
+            size: return_ty,
+        })
     }
 
     instructions
@@ -433,8 +464,10 @@ fn val_operand(val: &Val, constants: &mut ConstantPool, alignment: u64) -> Opera
 ///   (remainder). `double` division is the unrelated SSE `divsd` (`BinaryOp::DivDouble`).
 /// - **Right shift** — `sar` (signed, arithmetic) vs `shr` (unsigned, logical).
 /// - **Comparisons** — signed (`L`/`G`/…) vs unsigned (`B`/`A`/…) condition codes via `SetCC`.
-///   `double` comparisons use `comisd` and the *unsigned* codes (it sets ZF/CF/PF like an
-///   unsigned compare). NaN ordering is not yet handled — see the `nan` TODOs.
+///   `double` comparisons use `comisd` and the *unsigned* codes (it sets ZF/CF/PF like an unsigned
+///   compare). NaN (unordered) is handled per IEEE-754: `<`/`<=` swap operands so they use the
+///   carry-clear `A`/`AE` (false on unordered); `==`/`!=` combine the parity flag (`setnp`/`setp`)
+///   so `NaN == x` is false and `NaN != x` true.
 /// - **`double` arithmetic** — `addsd`/`subsd`/`mulsd`/`divsd` on XMM registers (same `BinaryOp`s
 ///   as the integer forms, selected by `AssemblyType::Double`); negation is `xorpd` with a
 ///   16-byte-aligned `-0.0` sign mask; logical `!`/zero-tests compare against a zeroed XMM via
@@ -453,7 +486,11 @@ fn convert_instruction(
     match instruction {
         tacky::Instruction::Return(x) => {
             let size = symbols.get_assembly_type(x);
-            let ret_reg = if matches!(size, AssemblyType::Double) { Reg::XMM0} else {Reg::AX};
+            let ret_reg = if matches!(size, AssemblyType::Double) {
+                Reg::XMM0
+            } else {
+                Reg::AX
+            };
             vec![
                 Instruction::Mov {
                     src: val_operand(x, constants, 8),
@@ -488,6 +525,21 @@ fn convert_instruction(
                 Instruction::SetCC {
                     code: CondCode::E,
                     op: val_operand(dst, constants, 8),
+                },
+                Instruction::Mov {
+                    src: Operand::Imm(0),
+                    dst: Operand::Reg(Reg::AX),
+                    size: AssemblyType::Longword,
+                },
+                Instruction::SetCC {
+                    code: CondCode::NP,
+                    op: Operand::Reg(Reg::AX),
+                },
+                Instruction::Binary {
+                    op: BinaryOp::BitAnd,
+                    src: Operand::Reg(Reg::AX),
+                    dst: val_operand(dst, constants, 8),
+                    size: AssemblyType::Longword,
                 },
             ]
         }
@@ -633,14 +685,26 @@ fn convert_instruction(
                 | BinOp::GreaterThan
                 | BinOp::GreaterOrEqual => {
                     // signedness comes from the operands, not dst (a comparison's result is always int)
-                    // todo will revisit when adding nan
-                    let signed = !symbols.is_double(src1) && symbols.is_signed(src1);
+                    let is_double = symbols.is_double(src1);
+                    let signed = !is_double && symbols.is_signed(src1);
+                    let mut v1 = val_operand(src2, constants, 8);
+                    let mut v2 = val_operand(src1, constants, 8);
                     let code = match (op, signed) {
                         (BinOp::Equal, _) => CondCode::E,
                         (BinOp::NotEqual, _) => CondCode::NE,
                         (BinOp::LessThan, true) => CondCode::L,
+                        // double: rewrite `a < b` as `b > a` (swap) so it uses the carry-clear `A`,
+                        // which is false on unordered (NaN); plain unsigned `<` is `B`.
+                        (BinOp::LessThan, false) if is_double => {
+                            mem::swap(&mut v1, &mut v2);
+                            CondCode::A
+                        }
                         (BinOp::LessThan, false) => CondCode::B,
                         (BinOp::LessOrEqual, true) => CondCode::LE,
+                        (BinOp::LessOrEqual, false) if is_double => {
+                            mem::swap(&mut v1, &mut v2);
+                            CondCode::AE
+                        }
                         (BinOp::LessOrEqual, false) => CondCode::BE,
                         (BinOp::GreaterThan, true) => CondCode::G,
                         (BinOp::GreaterThan, false) => CondCode::A,
@@ -648,12 +712,8 @@ fn convert_instruction(
                         (BinOp::GreaterOrEqual, false) => CondCode::AE,
                         _ => unreachable!(),
                     };
-                    vec![
-                        Instruction::Cmp {
-                            v1: val_operand(src2, constants, 8),
-                            v2: val_operand(src1, constants, 8),
-                            size,
-                        },
+                    let mut ins = vec![
+                        Instruction::Cmp { v1, v2, size },
                         Instruction::Mov {
                             src: Operand::Imm(0),
                             dst: val_operand(dst, constants, 8),
@@ -663,9 +723,68 @@ fn convert_instruction(
                             code,
                             op: val_operand(dst, constants, 8),
                         },
-                    ]
+                    ];
+                    if is_double && matches!(op, BinOp::Equal | BinOp::NotEqual) {
+                        let (nan_op, code) = if matches!(op, BinOp::Equal) {
+                            (BinaryOp::BitAnd, CondCode::NP)
+                        } else {
+                            (BinaryOp::BitOr, CondCode::P)
+                        };
+                        ins.push(Instruction::Mov {
+                            src: Operand::Imm(0),
+                            dst: Operand::Reg(Reg::AX),
+                            size: AssemblyType::Longword,
+                        });
+                        ins.push(Instruction::SetCC {
+                            code,
+                            op: Operand::Reg(Reg::AX),
+                        });
+                        ins.push(Instruction::Binary {
+                            op: nan_op,
+                            src: Operand::Reg(Reg::AX),
+                            dst: val_operand(dst, constants, 8),
+                            size: AssemblyType::Longword,
+                        })
+                    }
+                    ins
                 }
             }
+        }
+        tacky::Instruction::JumpIfZero { condition, target }
+        | tacky::Instruction::JumpIfNotZero { condition, target }
+            if symbols.is_double(condition) =>
+        {
+            let (code, nan_target) = if matches!(instruction, tacky::Instruction::JumpIfZero { .. }) {
+                let nan_skip = Identifier(name_gen.next("nan_skip"));
+                (CondCode::E, nan_skip.clone())
+            } else {
+                (CondCode::NE, target.clone())
+            };
+            let mut cmp_ins = vec![
+                Instruction::Binary {
+                    op: BinaryOp::BitXOr,
+                    src: Operand::Reg(Reg::XMM0),
+                    dst: Operand::Reg(Reg::XMM0),
+                    size: AssemblyType::Double,
+                },
+                Instruction::Cmp {
+                    v1: val_operand(condition, constants, 8),
+                    v2: Operand::Reg(Reg::XMM0),
+                    size: AssemblyType::Double,
+                },
+                Instruction::JmpCC {
+                    code: CondCode::P,
+                    label: nan_target.clone(),
+                },
+                Instruction::JmpCC {
+                    code,
+                    label: target.clone(),
+                },
+            ];
+            if matches!(instruction, tacky::Instruction::JumpIfZero { .. }) {
+                cmp_ins.push(Instruction::Label(nan_target));
+            }
+            cmp_ins
         }
         tacky::Instruction::JumpIfZero { condition, target }
         | tacky::Instruction::JumpIfNotZero { condition, target } => {
@@ -675,33 +794,17 @@ fn convert_instruction(
                 CondCode::NE
             };
             let size = symbols.get_assembly_type(condition);
-            let mut cmp_ins = if matches!(size, AssemblyType::Double) {
-                // todo revist with nan
-                vec![
-                    Instruction::Binary {
-                        op: BinaryOp::BitXOr,
-                        src: Operand::Reg(Reg::XMM0),
-                        dst: Operand::Reg(Reg::XMM0),
-                        size: AssemblyType::Double,
-                    },
-                    Instruction::Cmp {
-                        v1: val_operand(condition, constants, 8),
-                        v2: Operand::Reg(Reg::XMM0),
-                        size: AssemblyType::Double,
-                    },
-                ]
-            } else {
-                vec![Instruction::Cmp {
+            vec![
+                Instruction::Cmp {
                     v1: Operand::Imm(0),
                     v2: val_operand(condition, constants, 8),
                     size,
-                }]
-            };
-            cmp_ins.push(Instruction::JmpCC {
-                code,
-                label: target.clone(),
-            });
-            cmp_ins
+                },
+                Instruction::JmpCC {
+                    code,
+                    label: target.clone(),
+                },
+            ]
         }
         tacky::Instruction::Jump { target } => {
             vec![Instruction::Jmp(target.clone())]
@@ -917,10 +1020,23 @@ fn set_up_parameters(params: &[Identifier], symbols: &BackendSymbolTable) -> Vec
         .collect();
     let (int_reg_args, double_reg_args, stack_args) = classify_operands(&operands);
     let int_regs = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
-    let double_regs = [Reg::XMM0, Reg::XMM1, Reg::XMM2, Reg::XMM3, Reg::XMM4, Reg::XMM5, Reg::XMM6, Reg::XMM7];
+    let double_regs = [
+        Reg::XMM0,
+        Reg::XMM1,
+        Reg::XMM2,
+        Reg::XMM3,
+        Reg::XMM4,
+        Reg::XMM5,
+        Reg::XMM6,
+        Reg::XMM7,
+    ];
     let mut instructions: Vec<Instruction> = Vec::with_capacity(params.len());
 
-    for ((param_ty, dst), reg) in int_reg_args.iter().zip(int_regs).chain(double_reg_args.iter().zip(double_regs)) {
+    for ((param_ty, dst), reg) in int_reg_args
+        .iter()
+        .zip(int_regs)
+        .chain(double_reg_args.iter().zip(double_regs))
+    {
         instructions.push(Instruction::Mov {
             src: Operand::Reg(reg),
             dst: dst.clone(),
@@ -1198,10 +1314,10 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
                 }
                 Instruction::Cvttsd2si { src, dst, size } => {
                     *src = stack_mapping.replace_pseudo(src, AssemblyType::Double); // src is double
-                    *dst = stack_mapping.replace_pseudo(dst, *size);                // dst is integer
+                    *dst = stack_mapping.replace_pseudo(dst, *size); // dst is integer
                 }
                 Instruction::Cvtsi2sd { src, dst, size } => {
-                    *src = stack_mapping.replace_pseudo(src, *size);                // src is integer
+                    *src = stack_mapping.replace_pseudo(src, *size); // src is integer
                     *dst = stack_mapping.replace_pseudo(dst, AssemblyType::Double); // dst is double
                 }
                 Instruction::Unary { op: _, dst, size } => *dst = stack_mapping.replace_pseudo(dst, *size),
@@ -1223,7 +1339,12 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
                     }
                 }
                 Instruction::Push(op) => *op = stack_mapping.replace_pseudo(op, AssemblyType::Quadword),
-                Instruction::Ret | Instruction::Call(_) | Instruction::Label(_) | Instruction::JmpCC {..} | Instruction::Jmp(_) | Instruction::Cdq(_)  => {}
+                Instruction::Ret
+                | Instruction::Call(_)
+                | Instruction::Label(_)
+                | Instruction::JmpCC { .. }
+                | Instruction::Jmp(_)
+                | Instruction::Cdq(_) => {}
             }
         }
         offsets.insert(name.clone(), stack_mapping.offset);
@@ -1272,7 +1393,11 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
         for ins in body.drain(..) {
             match ins {
                 Instruction::Mov { ref src, ref dst, size } if src.is_memory() && dst.is_memory() => {
-                    let scratch = if matches!(size, AssemblyType::Double) {Operand::Reg(Reg::XMM14)} else {Operand::Reg(Reg::R10)};
+                    let scratch = if matches!(size, AssemblyType::Double) {
+                        Operand::Reg(Reg::XMM14)
+                    } else {
+                        Operand::Reg(Reg::R10)
+                    };
                     new_ins.push(Instruction::Mov {
                         src: src.clone(),
                         dst: scratch.clone(),
@@ -1351,13 +1476,29 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     });
                     new_ins.push(Instruction::Div(Operand::Reg(Reg::R10), size))
                 }
-                Instruction::Binary { op, ref src, ref dst, size: AssemblyType::Double }
-                if !matches!(dst, Operand::Reg(_)) =>
-                    {
-                        new_ins.push(Instruction::Mov { src: dst.clone(), dst: Operand::Reg(Reg::XMM15), size: AssemblyType::Double });
-                        new_ins.push(Instruction::Binary { op, src: src.clone(), dst: Operand::Reg(Reg::XMM15), size: AssemblyType::Double });
-                        new_ins.push(Instruction::Mov { src: Operand::Reg(Reg::XMM15), dst: dst.clone(), size: AssemblyType::Double });
-                    }
+                Instruction::Binary {
+                    op,
+                    ref src,
+                    ref dst,
+                    size: AssemblyType::Double,
+                } if !matches!(dst, Operand::Reg(_)) => {
+                    new_ins.push(Instruction::Mov {
+                        src: dst.clone(),
+                        dst: Operand::Reg(Reg::XMM15),
+                        size: AssemblyType::Double,
+                    });
+                    new_ins.push(Instruction::Binary {
+                        op,
+                        src: src.clone(),
+                        dst: Operand::Reg(Reg::XMM15),
+                        size: AssemblyType::Double,
+                    });
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Reg(Reg::XMM15),
+                        dst: dst.clone(),
+                        size: AssemblyType::Double,
+                    });
+                }
                 Instruction::Binary {
                     op: BinaryOp::Mult,
                     ref src,
@@ -1456,12 +1597,24 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                         size: AssemblyType::Quadword,
                     })
                 }
-                Instruction::Cmp { ref v1, ref v2, size: AssemblyType::Double } => {
+                Instruction::Cmp {
+                    ref v1,
+                    ref v2,
+                    size: AssemblyType::Double,
+                } => {
                     if let Operand::Reg(_) = v2 {
                         new_ins.push(ins.clone())
                     } else {
-                        new_ins.push(Instruction::Mov {src: v2.clone(), dst: Operand::Reg(Reg::XMM15), size: AssemblyType::Double});
-                        new_ins.push(Instruction::Cmp {v1: v1.clone(), v2: Operand::Reg(Reg::XMM15), size: AssemblyType::Double})
+                        new_ins.push(Instruction::Mov {
+                            src: v2.clone(),
+                            dst: Operand::Reg(Reg::XMM15),
+                            size: AssemblyType::Double,
+                        });
+                        new_ins.push(Instruction::Cmp {
+                            v1: v1.clone(),
+                            v2: Operand::Reg(Reg::XMM15),
+                            size: AssemblyType::Double,
+                        })
                     }
                 }
                 Instruction::Cmp { ref v1, ref v2, size } => {
@@ -1503,23 +1656,48 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     });
                     new_ins.push(Instruction::Push(Operand::Reg(Reg::R10)));
                 }
-                Instruction::Cvttsd2si {src, dst, size} if !matches!(dst, Operand::Reg(_)) => {
-                    new_ins.push(Instruction::Cvttsd2si { src, dst: Operand::Reg(Reg::R11), size });
-                    new_ins.push(Instruction::Mov {src: Operand::Reg(Reg::R11), dst, size})
+                Instruction::Cvttsd2si { src, dst, size } if !matches!(dst, Operand::Reg(_)) => {
+                    new_ins.push(Instruction::Cvttsd2si {
+                        src,
+                        dst: Operand::Reg(Reg::R11),
+                        size,
+                    });
+                    new_ins.push(Instruction::Mov {
+                        src: Operand::Reg(Reg::R11),
+                        dst,
+                        size,
+                    })
                 }
-                Instruction::Cvtsi2sd {src, dst, size} => {
+                Instruction::Cvtsi2sd { src, dst, size } => {
                     let new_src = if let Operand::Imm(_) = src {
-                        new_ins.push(Instruction::Mov {src, dst: Operand::Reg(Reg::R10), size});
+                        new_ins.push(Instruction::Mov {
+                            src,
+                            dst: Operand::Reg(Reg::R10),
+                            size,
+                        });
                         Operand::Reg(Reg::R10)
-                    } else { src };
+                    } else {
+                        src
+                    };
 
                     if !matches!(dst, Operand::Reg(_)) {
-                        new_ins.push(Instruction::Cvtsi2sd {src: new_src, dst: Operand::Reg(Reg::XMM15), size });
-                        new_ins.push(Instruction::Mov {src: Operand::Reg(Reg::XMM15), dst, size: AssemblyType::Double})
+                        new_ins.push(Instruction::Cvtsi2sd {
+                            src: new_src,
+                            dst: Operand::Reg(Reg::XMM15),
+                            size,
+                        });
+                        new_ins.push(Instruction::Mov {
+                            src: Operand::Reg(Reg::XMM15),
+                            dst,
+                            size: AssemblyType::Double,
+                        })
                     } else {
-                        new_ins.push(Instruction::Cvtsi2sd {src: new_src, dst, size})
+                        new_ins.push(Instruction::Cvtsi2sd {
+                            src: new_src,
+                            dst,
+                            size,
+                        })
                     }
-
                 }
                 Instruction::Movsx { ref src, ref dst } => {
                     //extends longword src to quadword dst

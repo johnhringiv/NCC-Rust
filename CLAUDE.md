@@ -80,7 +80,6 @@ cargo run -- file.c -c         # Emit object file only
 cargo run -- file.c -o binary  # Custom output name
 cargo run -- file.c --static   # Static linking (Linux only)
 cargo run -- file.c --external-linker # Use system ld instead of libwild
-cargo run -- file.c --no-iced  # Use deprecated text-based assembler
 ```
 
 ## Compiler Architecture
@@ -110,9 +109,7 @@ Returns `(NameGenerator, SymbolTable)` needed by subsequent passes. Exit code 30
 
 **Codegen** (`codegen.rs`): Lowers TACKY to x86-64 assembly AST. Assigns pseudo-registers to stack slots, fixes invalid instruction operands (x86 restrictions), implements System V AMD64 calling convention (arguments in RDI, RSI, RDX, RCX, R8, R9, then stack).
 
-**Emitter** (`emit_iced.rs`): Primary emitter using [iced-x86](https://github.com/icedland/iced) to encode instructions to machine code and [object](https://github.com/gimli-rs/object) crate to write ELF (Linux) or Mach-O (macOS) object files. No external assembler needed.
-
-Alternative: `emit.rs` (deprecated `--no-iced` flag) generates text assembly for `as`.
+**Emitter** (`emit_iced.rs`): Encodes instructions to machine code using [iced-x86](https://github.com/icedland/iced) and writes ELF (Linux) or Mach-O (macOS) object files via the [object](https://github.com/gimli-rs/object) crate. No external assembler needed.
 
 **Linker** (`main.rs`): On Linux, uses [wild](https://github.com/wild-linker/wild) for in-process linking. On macOS, shells out to system `ld`. Locates CRT files and libc via the `cc` compiler.
 
@@ -151,9 +148,11 @@ Tests validate both successful compilation and error handling:
 
 ## Language Implementation Notes
 
-**Type System**: Currently supports `int`/`unsigned int` (32-bit) and `long`/`unsigned long` (64-bit), with the usual arithmetic conversions. Narrowing truncates (two's complement); widening sign-extends signed sources and zero-extends unsigned ones; same-width signed/unsigned conversions reinterpret the bits.
+**Type System**: Currently supports `int`/`unsigned int` (32-bit), `long`/`unsigned long` (64-bit), and `double` (64-bit IEEE-754), with the usual arithmetic conversions. Narrowing truncates (two's complement); widening sign-extends signed sources and zero-extends unsigned ones; same-width signed/unsigned conversions reinterpret the bits.
 
 **Integer Arithmetic**: Signed overflow wraps deterministically (non-standard C extension; standard C makes it UB); unsigned wraps mod 2^N (standard). Shift amounts are masked to prevent undefined behavior. The `-Woverflow` warning fires only for signed overflow.
+
+**Floating Point**: `double` arithmetic/comparisons use SSE2 (`addsd`/`comisd`/etc.); constants live in a `.rodata` pool. Comparisons follow IEEE-754 ordering — a `NaN` operand is unordered (relationals and `==` are false, `!=` true, `NaN` is truthy in conditions), implemented via the parity flag. `double`→integer truncates toward zero; out-of-range or `NaN` yields the x86 `cvttsd2si` "integer indefinite" value (target MIN). Unsigned↔`double` conversions use SSE2 workarounds (no native unsigned convert pre-AVX-512). An out-of-range floating constant rounds to ±infinity or zero (`-Woverflow`).
 
 **Evaluation Order**: Left-to-right (non-standard, eliminates UB).
 

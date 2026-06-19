@@ -202,6 +202,18 @@ pub enum StaticInit {
     DoubleInit(f64),
 }
 
+impl std::fmt::Display for StaticInit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StaticInit::IntInit(n) => write!(f, "{n}"),
+            StaticInit::LongInit(n) => write!(f, "{n}"),
+            StaticInit::UIntInit(n) => write!(f, "{n}"),
+            StaticInit::ULongInit(n) => write!(f, "{n}"),
+            StaticInit::DoubleInit(n) => write!(f, "{n}"),
+        }
+    }
+}
+
 macro_rules! checked_op {
     // unary:  checked_op!(self, overflowing_neg, -; IntInit, LongInit, UIntInit, ULongInit)
     ($self:expr, $method:ident; $op:tt; $($V:ident),+ $(,)?) => {{
@@ -263,16 +275,6 @@ impl StaticInit {
         }
     }
 
-    fn to_string(self) -> String {
-        match self {
-            StaticInit::IntInit(n) => n.to_string(),
-            StaticInit::LongInit(n) => n.to_string(),
-            StaticInit::UIntInit(n) => n.to_string(),
-            StaticInit::ULongInit(n) => n.to_string(),
-            StaticInit::DoubleInit(n) => n.to_string(),
-        }
-    }
-
     /// Exact value of this constant as a signedness-split wide integer (see [`Wide`]).
     /// INVARIANT: `Wide`'s arms must stay >= the widest StaticInt variant — widen them to
     /// i128/u128 in the same change that adds a 128-bit type, or constants silently truncate.
@@ -293,18 +295,6 @@ impl StaticInit {
             StaticInit::LongInit(v) => v.to_le_bytes().to_vec(),
             StaticInit::ULongInit(v) => v.to_le_bytes().to_vec(),
             StaticInit::DoubleInit(v) => v.to_le_bytes().to_vec(),
-        }
-    }
-
-    /// Assembler directive (`.long`/`.quad`) and decimal value for a `.data` initializer
-    /// (text emitter). Width follows the type; the value uses the variant's signedness.
-    pub(crate) fn data_directive(&self) -> (&'static str, String) {
-        match self {
-            StaticInit::IntInit(v) => (".long", v.to_string()),
-            StaticInit::UIntInit(v) => (".long", v.to_string()),
-            StaticInit::LongInit(v) => (".quad", v.to_string()),
-            StaticInit::ULongInit(v) => (".quad", v.to_string()),
-            StaticInit::DoubleInit(v) => (".double", v.to_string()),
         }
     }
 
@@ -879,11 +869,13 @@ fn warn_overflow(overflowed: bool, span: Span) {
 fn warn_constant_conversion(changed: bool, from: &StaticInit, to: &StaticInit, span: Span) {
     if changed {
         eprintln!(
-            "{}: {}: implicit conversion changes constant value from {} to {} {}",
+            "{}: {}: implicit conversion from {:?} to {:?} changes constant value from {} to {} {}",
             span,
             "warning".purple(),
-            from.to_string(),
-            to.to_string(),
+            from.get_type(),
+            to.get_type(),
+            from,
+            to,
             "[-Wconstant-conversion]".purple()
         );
     }

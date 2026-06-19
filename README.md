@@ -8,7 +8,7 @@ A (**N**ot **C**ompletely) **C** compiler written in Rust, inspired by Sandler's
 NCC is a full pipeline compiler, going from lexing all the way down to x86-64 machine code emission and linking.
 Machine code is encoded directly using [iced-x86](https://github.com/icedland/iced) and emitted to ELF/Mach-O
 object files via the [object](https://github.com/gimli-rs/object) crate—no external assembler required.
-A substantial subset of C is supported, including `int`, `long`, `unsigned int`, and `unsigned long` types, functions, static variables, all control
+A substantial subset of C is supported, including `int`, `long`, `unsigned int`, `unsigned long`, and `double` types, functions, static variables, all control
 flow statements, and bitwise operations. Additionally, NCC supports developer-friendly warnings and pretty-printing
 of each compiler pass.
 Runs on Linux and macOS.
@@ -145,7 +145,8 @@ ncc [OPTIONS] <FILENAMES>...
 
 ### Arguments
 
-`<FILENAMES>...` Input files (required). Supports multiple C and assembly files.
+`<FILENAMES>...` Input files (required). Supports multiple C (`.c`), assembly (`.s`), and
+pre-built object (`.o`) files; objects are passed straight through to the linker.
 
 ### Options
 
@@ -161,7 +162,7 @@ ncc [OPTIONS] <FILENAMES>...
 | `-c`                      | Emit object file only (no linking)                       |
 | `--external-linker`       | Use system linker (`ld`) instead of built-in libwild     |
 | `--static`                | Link statically (no runtime dependencies) - Linux only   |
-| `--no-iced`               | Use text-based asm building instead of iced (deprecated) |
+| `-l <LIB>`                | Link against a library, e.g. `-lm` (forwarded to linker) |
 | `-o`, `--output <OUTPUT>` | Override output file location                            |
 | `-h`, `--help`            | Print help                                               |
 
@@ -213,7 +214,7 @@ The compiler currently implements a subset of C with the following grammar:
 <variable-declaration> ::= { <specifier> }+ <identifier> [ "=" <exp> ] ";"
 <function-declaration> ::= { <specifier> }+ <identifier> "(" <param-list> ")" ( <block> | ";" )
 <param-list> ::= "void" | <type> <identifier> { "," <type> <identifier> }
-<type> ::= { "int" | "long" | "signed" | "unsigned" }+
+<type> ::= { "int" | "long" | "signed" | "unsigned" }+ | "double"
 <specifier> ::= <type> | "static" | "extern"
 <block> ::= "{" { <block-item> } "}"
 <block-item> ::= <statement> | <declaration>
@@ -235,7 +236,7 @@ The compiler currently implements a subset of C with the following grammar:
             | ";"
 <exp> ::= <factor> | <exp> <binop> <exp> | <exp> <assign-op> <exp>
        | <exp> "?" <exp> ":" <exp> | <exp> "++" | <exp> "--"
-<factor> ::= <int> | <long> | <uint> | <ulong> | <identifier> | <unop> <factor> | "++" <factor> | "--" <factor>
+<factor> ::= <int> | <long> | <uint> | <ulong> | <double> | <identifier> | <unop> <factor> | "++" <factor> | "--" <factor>
           | "(" <type> ")" <factor> | "(" <exp> ")"
           | <identifier> "(" [ <argument-list> ] ")"
 <argument-list> ::= <exp> { "," <exp> }
@@ -248,7 +249,21 @@ The compiler currently implements a subset of C with the following grammar:
 <long> ::= ? A long integer constant token (suffix 'l' or 'L') ?
 <uint> ::= ? An unsigned int constant token (suffix 'u' or 'U') ?
 <ulong> ::= ? An unsigned long constant token (suffix combining 'u'/'U' and 'l'/'L') ?
+<double> ::= ? A floating-point constant token (decimal point and/or exponent) ?
 ```
+
+### Data Types
+
+| Type            | Size   | Representation           | Notes                             |
+|-----------------|--------|--------------------------|-----------------------------------|
+| `int`           | 32-bit | two's complement signed  |                                   |
+| `unsigned int`  | 32-bit | unsigned                 | wraps mod 2³²                     |
+| `long`          | 64-bit | two's complement signed  | LP64 — 64-bit, per System V AMD64 |
+| `unsigned long` | 64-bit | unsigned                 | LP64; wraps mod 2⁶⁴               |
+| `double`        | 64-bit | IEEE-754 binary64        |                                   |
+
+Not yet supported: `char`, `short`, `float`, pointers, arrays, structs. See [Safer C](#safer-c) for
+arithmetic, conversion, and overflow semantics.
 
 ### Supported Features
 
@@ -263,8 +278,9 @@ The compiler supports:
   functions
 - **Compound statements (blocks)**: `{ ... }` with proper scoping
 - **Variable scoping**: Block-local variables with shadowing support
-- **Type system**: `int`/`unsigned int` (32-bit) and `long`/`unsigned long` (64-bit), with the usual arithmetic conversions, implicit conversions, and explicit casts
+- **Type system**: the integer and floating-point types above (see [Data Types](#data-types)), with the usual arithmetic conversions, implicit conversions, and explicit casts
 - **Integer arithmetic**: addition, subtraction, multiplication, division, modulo
+- **Floating-point arithmetic**: `double` addition, subtraction, multiplication, division, negation, and comparisons (SSE2), with conversions to and from every integer type; comparisons follow IEEE-754 ordering, so a `NaN` operand compares unordered (every relational and `==` is false, `!=` is true, and `NaN` is truthy in a condition)
 - **Bitwise operations**: AND (`&`), OR (`|`), XOR (`^`), complement (`~`), left/right shift (`<<`, `>>`)
 - **Logical operations**: AND (`&&`), OR (`||`), NOT (`!`) with short-circuit evaluation
 - **Comparison operators**: `==`, `!=`, `<`, `>`, `<=`, `>=`

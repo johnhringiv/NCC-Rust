@@ -87,19 +87,27 @@ impl SymbolResolver for MySymbolResolver {
         &'_ mut self,
         instruction: &iced_x86::Instruction,
         _operand: u32,
-        _instruction_operand: Option<u32>,
+        instruction_operand: Option<u32>,
         address: u64,
         _address_size: u32,
     ) -> Option<SymbolResult<'_>> {
-        // First check direct address mapping (functions, internal labels)
-        if let Some(name) = self.symbols.get(&address) {
-            return Some(SymbolResult::with_str(address, name));
+        use iced_x86::OpKind;
+        // Only symbolize branch targets and memory references. Immediates must NOT be resolved:
+        // an immediate's *value* can collide with a code/data address (e.g. `$0` aliasing the
+        // function at offset 0), which would mis-render `mov $0, ...` as `mov $func, ...`.
+        match instruction_operand.map(|i| instruction.op_kind(i)) {
+            // jump/call targets: resolve by target address (functions, internal labels)
+            Some(OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64) => self
+                .symbols
+                .get(&address)
+                .map(|name| SymbolResult::with_str(address, name)),
+            // RIP-relative data: resolve by the referencing instruction's IP (static vars / constants)
+            Some(OpKind::Memory) => self
+                .reloc_symbols
+                .get(&instruction.ip())
+                .map(|name| SymbolResult::with_str(address, name)),
+            _ => None,
         }
-        // Then check relocation-based symbols (data references)
-        if let Some(name) = self.reloc_symbols.get(&instruction.ip()) {
-            return Some(SymbolResult::with_str(address, name));
-        }
-        None
     }
 }
 
@@ -432,7 +440,7 @@ fn emit_object_with_labels(
     // text-assembler path. Not worth it: the only saving is literals duplicated across separately
     // compiled objects, which a whole-program compiler essentially never produces.
     let rodata = obj.section_id(StandardSection::ReadOnlyData);
-    for codegen::StaticConstant {name, init, alignment} in &program.static_constants {
+    for codegen::StaticConstant { name, init, alignment } in &program.static_constants {
         let bytes = init.to_le_bytes();
         let offset = obj.append_section_data(rodata, &bytes, *alignment);
         let sym_id = obj.add_symbol(Symbol {
@@ -574,7 +582,7 @@ fn gpr32(reg: &Reg) -> AsmRegister32 {
         R8 => registers::gpr32::r8d,
         R9 => registers::gpr32::r9d,
         SP => registers::gpr32::esp,
-        _ => unreachable!("Only for GP reg")
+        _ => unreachable!("Only for GP reg"),
     }
 }
 
@@ -591,7 +599,7 @@ fn gpr64_reg(reg: &Reg) -> AsmRegister64 {
         R8 => gpr64::r8,
         R9 => gpr64::r9,
         SP => gpr64::rsp,
-        _ => unreachable!("Only for GP reg")
+        _ => unreachable!("Only for GP reg"),
     }
 }
 
@@ -608,7 +616,7 @@ fn xmm_reg(reg: &Reg) -> AsmRegisterXmm {
         XMM7 => registers::xmm::xmm7,
         XMM14 => registers::xmm::xmm14,
         XMM15 => registers::xmm::xmm15,
-        _ => unreachable!("Only for XMM reg")
+        _ => unreachable!("Only for XMM reg"),
     }
 }
 
@@ -648,6 +656,8 @@ macro_rules! emit_setcc {
             CondCode::AE => $a.setae($op)?,
             CondCode::B => $a.setb($op)?,
             CondCode::BE => $a.setbe($op)?,
+            CondCode::P => $a.setp($op)?,
+            CondCode::NP => $a.setnp($op)?,
         }
     };
 }
@@ -688,13 +698,17 @@ fn emit_instruction(
             (Operand::Reg(s), Operand::Stack(off), AssemblyType::Quadword) => {
                 a.mov(mem_rbp(*off, *size), gpr64_reg(s))?
             }
-            (Operand::Reg(s), Operand::Stack(off), AssemblyType::Double) => a.movsd_2(mem_rbp(*off, *size), xmm_reg(s))?,
+            (Operand::Reg(s), Operand::Stack(off), AssemblyType::Double) => {
+                a.movsd_2(mem_rbp(*off, *size), xmm_reg(s))?
+            }
 
             (Operand::Stack(off), Operand::Reg(d), AssemblyType::Longword) => a.mov(gpr32(d), mem_rbp(*off, *size))?,
             (Operand::Stack(off), Operand::Reg(d), AssemblyType::Quadword) => {
                 a.mov(gpr64_reg(d), mem_rbp(*off, *size))?
             }
-            (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => a.movsd_2(xmm_reg(d), mem_rbp(*off, *size))?,
+            (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => {
+                a.movsd_2(xmm_reg(d), mem_rbp(*off, *size))?
+            }
             (Operand::Data(name), Operand::Reg(d), _) => {
                 let lbl = data_labels.get(name).unwrap();
                 data_relocs.push((a.instructions().len(), name.clone()));
@@ -769,7 +783,9 @@ fn emit_instruction(
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Longword) => a.add(gpr32(d), gpr32(s))?,
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.add(gpr64_reg(d), gpr64_reg(s))?,
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Double) => a.addsd(xmm_reg(d), xmm_reg(s))?,
-                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => a.addsd(xmm_reg(d), mem_rbp(*off, *size))?,
+                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => {
+                    a.addsd(xmm_reg(d), mem_rbp(*off, *size))?
+                }
                 (Operand::Data(name), Operand::Reg(d), AssemblyType::Double) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
@@ -788,7 +804,7 @@ fn emit_instruction(
                     match size {
                         AssemblyType::Longword => a.add(dword_ptr(*lbl), gpr32(s))?,
                         AssemblyType::Quadword => a.add(qword_ptr(*lbl), gpr64_reg(s))?,
-                        AssemblyType::Double => unreachable!()
+                        AssemblyType::Double => unreachable!(),
                     }
                 }
 
@@ -804,7 +820,9 @@ fn emit_instruction(
             },
             BinaryOp::Sub => match (src, dst, size) {
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Double) => a.subsd(xmm_reg(d), xmm_reg(s))?,
-                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => a.subsd(xmm_reg(d), mem_rbp(*off, *size))?,
+                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => {
+                    a.subsd(xmm_reg(d), mem_rbp(*off, *size))?
+                }
                 (Operand::Data(name), Operand::Reg(d), AssemblyType::Double) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
@@ -825,7 +843,9 @@ fn emit_instruction(
                     match size {
                         AssemblyType::Longword => a.sub(dword_ptr(*lbl), gpr32(s))?,
                         AssemblyType::Quadword => a.sub(qword_ptr(*lbl), gpr64_reg(s))?,
-                        AssemblyType::Double => todo!(),
+                        AssemblyType::Double => {
+                            unreachable!("double binary dst is always a register after fix_invalid")
+                        }
                     }
                 }
 
@@ -841,7 +861,9 @@ fn emit_instruction(
             },
             BinaryOp::Mult => match (src, dst, size) {
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Double) => a.mulsd(xmm_reg(d), xmm_reg(s))?,
-                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => a.mulsd(xmm_reg(d), mem_rbp(*off, *size))?,
+                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => {
+                    a.mulsd(xmm_reg(d), mem_rbp(*off, *size))?
+                }
                 (Operand::Data(name), Operand::Reg(d), AssemblyType::Double) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
@@ -861,7 +883,9 @@ fn emit_instruction(
                     match size {
                         AssemblyType::Longword => a.imul_2(gpr32(d), dword_ptr(*lbl))?,
                         AssemblyType::Quadword => a.imul_2(gpr64_reg(d), qword_ptr(*lbl))?,
-                        AssemblyType::Double => todo!(),
+                        AssemblyType::Double => {
+                            unreachable!("double binary dst is always a register after fix_invalid")
+                        }
                     }
                 }
 
@@ -902,7 +926,9 @@ fn emit_instruction(
                     match size {
                         AssemblyType::Longword => a.and(dword_ptr(*lbl), gpr32(s))?,
                         AssemblyType::Quadword => a.and(qword_ptr(*lbl), gpr64_reg(s))?,
-                        AssemblyType::Double => todo!(),
+                        AssemblyType::Double => {
+                            unreachable!("double binary dst is always a register after fix_invalid")
+                        }
                     }
                 }
 
@@ -932,7 +958,9 @@ fn emit_instruction(
                     match size {
                         AssemblyType::Longword => a.or(dword_ptr(*lbl), gpr32(s))?,
                         AssemblyType::Quadword => a.or(qword_ptr(*lbl), gpr64_reg(s))?,
-                        AssemblyType::Double => todo!(),
+                        AssemblyType::Double => {
+                            unreachable!("double binary dst is always a register after fix_invalid")
+                        }
                     }
                 }
 
@@ -947,7 +975,9 @@ fn emit_instruction(
             },
             BinaryOp::BitXOr => match (src, dst, size) {
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Double) => a.xorpd(xmm_reg(d), xmm_reg(s))?,
-                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => a.xorpd(xmm_reg(d), mem_rbp(*off, *size))?,
+                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => {
+                    a.xorpd(xmm_reg(d), mem_rbp(*off, *size))?
+                }
                 (Operand::Data(name), Operand::Reg(d), AssemblyType::Double) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
@@ -969,7 +999,9 @@ fn emit_instruction(
                     match size {
                         AssemblyType::Longword => a.xor(dword_ptr(*lbl), gpr32(s))?,
                         AssemblyType::Quadword => a.xor(qword_ptr(*lbl), gpr64_reg(s))?,
-                        AssemblyType::Double => todo!(),
+                        AssemblyType::Double => {
+                            unreachable!("double binary dst is always a register after fix_invalid")
+                        }
                     }
                 }
 
@@ -1065,7 +1097,9 @@ fn emit_instruction(
             (Operand::Stack(off), Operand::Reg(r), AssemblyType::Quadword) => {
                 a.cmp(gpr64_reg(r), mem_rbp(*off, *size))?
             }
-            (Operand::Stack(off), Operand::Reg(r), AssemblyType::Double) => a.comisd(xmm_reg(r), mem_rbp(*off, *size))?,
+            (Operand::Stack(off), Operand::Reg(r), AssemblyType::Double) => {
+                a.comisd(xmm_reg(r), mem_rbp(*off, *size))?
+            }
             (Operand::Data(name), Operand::Reg(r), _) => {
                 let lbl = data_labels.get(name).unwrap();
                 data_relocs.push((a.instructions().len(), name.clone()));
@@ -1088,7 +1122,7 @@ fn emit_instruction(
         Instruction::Cdq(size) => match size {
             AssemblyType::Longword => a.cdq()?,
             AssemblyType::Quadword => a.cqo()?,
-            AssemblyType::Double => todo!(),
+            AssemblyType::Double => unreachable!("cdq/cqo are integer-only"),
         },
         Instruction::Idiv(op, size) => match (op, size) {
             (Operand::Reg(r), AssemblyType::Longword) => a.idiv(gpr32(r))?,
@@ -1130,6 +1164,8 @@ fn emit_instruction(
                 CondCode::AE => a.jae(l)?,
                 CondCode::B => a.jb(l)?,
                 CondCode::BE => a.jbe(l)?,
+                CondCode::P => a.jp(l)?,
+                CondCode::NP => a.jnp(l)?,
             };
         }
         Instruction::SetCC { code, op } => match op {

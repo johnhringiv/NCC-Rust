@@ -1102,7 +1102,7 @@ fn warn_overflow(value: f64, value_str: &str, span: Span) {
         // Scan before the exponent so a true zero like `0e10` (nonzero digit only in the exponent)
         // isn't mistaken for an underflow.
         && value_str
-            .split(|c| c == 'e' || c == 'E')
+            .split(['e', 'E'])
             .next()
             .is_some_and(|significand| significand.bytes().any(|b| b.is_ascii_digit() && b != b'0'))
     {

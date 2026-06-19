@@ -1,5 +1,4 @@
 mod codegen;
-mod emit;
 mod emit_iced;
 mod lexer;
 mod parser;
@@ -64,10 +63,6 @@ struct Args {
     /// Link statically (no runtime dependencies) - Linux only
     #[arg(long = "static")]
     static_link: bool,
-
-    /// Use text based asm building instead of iced (Deprecated)
-    #[arg(long)]
-    no_iced: bool,
 
     #[arg(short = 'o', long)]
     output: Option<String>,
@@ -143,7 +138,12 @@ fn get_cc_library_paths() -> Vec<String> {
 
 /// Build linker arguments for Linux (shared between ld and libwild)
 #[cfg(target_os = "linux")]
-fn build_linux_linker_args(obj_files: &[String], out_file: &str, static_link: bool, link_libs: &[String]) -> Vec<String> {
+fn build_linux_linker_args(
+    obj_files: &[String],
+    out_file: &str,
+    static_link: bool,
+    link_libs: &[String],
+) -> Vec<String> {
     let mut args = vec!["-o".to_string(), out_file.to_string()];
 
     if static_link {
@@ -263,8 +263,10 @@ fn main() {
     // On macOS, always use external linker since libwild doesn't support it
     let use_external_linker = args.external_linker || cfg!(target_os = "macos");
 
-    // Separate C files from assembly files
-    let (c_files, asm_files): (Vec<_>, Vec<_>) = args.filenames.iter().partition(|f| f.ends_with(".c"));
+    // Separate inputs: C sources (compiled), then split the rest into pre-built objects
+    // (linked directly) and assembly files (assembled with `as`).
+    let (c_files, rest): (Vec<_>, Vec<_>) = args.filenames.iter().partition(|f| f.ends_with(".c"));
+    let (obj_inputs, asm_files): (Vec<_>, Vec<_>) = rest.iter().partition(|f| f.ends_with(".o"));
 
     // For single-file debug modes (lex, parse, validate, tacky, codegen, -S),
     // only process the first C file
@@ -444,31 +446,8 @@ fn main() {
         let path = Path::new(c_file);
         let obj_file = path.with_extension("o").to_string_lossy().to_string();
 
-        if args.no_iced {
-            let asm = emit::emit_program(&code_ast);
-            let asm_file = path.with_extension("s").to_string_lossy().to_string();
-            fs::write(&asm_file, asm).expect("Failed to write assembly file");
-
-            let mut cmd = std::process::Command::new("as");
-            // On arm64 hosts the system assembler must be told to target x86_64.
-            #[cfg(target_arch = "aarch64")]
-            cmd.args(["-arch", "x86_64"]);
-            let status = cmd
-                .arg(&asm_file)
-                .arg("-o")
-                .arg(&obj_file)
-                .status()
-                .expect("Failed to execute as");
-
-            if !status.success() {
-                eprintln!("Assembly failed with status: {status}");
-                std::process::exit(1);
-            }
-            fs::remove_file(&asm_file).ok();
-        } else {
-            let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
-            fs::write(&obj_file, &obj).expect("Failed to write object file");
-        }
+        let obj = emit_iced::emit_object(&code_ast).expect("iced obj");
+        fs::write(&obj_file, &obj).expect("Failed to write object file");
 
         obj_files.push(obj_file);
     }
@@ -513,15 +492,19 @@ fn main() {
         std::process::exit(0);
     }
 
-    // Link all object files together
+    // Link object files together. Pre-built `.o` inputs (e.g. a gcc-built helper) join the link
+    // set but are NOT cleaned up below — they're caller-owned inputs, not files we produced.
+    let mut link_objs = obj_files.clone();
+    link_objs.extend(obj_inputs.iter().map(|s| s.to_string()));
+
     if use_external_linker {
-        link_with_ld(&obj_files, &out_file, args.static_link, &args.link_libs);
+        link_with_ld(&link_objs, &out_file, args.static_link, &args.link_libs);
     } else {
         #[cfg(target_os = "linux")]
-        link_with_libwild(&obj_files, &out_file, args.static_link, &args.link_libs);
+        link_with_libwild(&link_objs, &out_file, args.static_link, &args.link_libs);
     }
 
-    // Clean up object files
+    // Clean up only the object files we produced (never the caller's .o inputs)
     for obj in &obj_files {
         fs::remove_file(obj).ok();
     }
