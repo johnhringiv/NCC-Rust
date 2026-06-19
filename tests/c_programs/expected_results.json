@@ -113,5 +113,8 @@
   },
   "types/compound_assign_mixed_types.c": {
     "return_code": 30
+  },
+  "conversions/double_to_int_edges.c": {
+    "return_code": 7
   }
 }

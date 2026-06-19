@@ -24,10 +24,18 @@ unsigned long bump_long(int run) {
     /* run == 0: falls off the end */
 }
 
+double bump_double(int run) {
+    if (run) {
+        return 3.5;
+    }
+    /* run == 0: falls off the end — synthetic return must target XMM0, not RAX */
+}
+
 int main(void) {
-    bump(0);       /* fall-off path; result ignored (would be UB to use) */
-    bump_long(0);  /* fall-off path; result ignored */
-    bump(1);       /* normal path: counter -> 1 */
-    bump(1);       /* normal path: counter -> 2 */
+    bump(0);         /* fall-off path; result ignored (would be UB to use) */
+    bump_long(0);    /* fall-off path; result ignored */
+    bump_double(0);  /* fall-off path on a double-returning fn; result ignored */
+    bump(1);         /* normal path: counter -> 1 */
+    bump(1);         /* normal path: counter -> 2 */
     return (int)counter; /* defined: 2 */
 }
