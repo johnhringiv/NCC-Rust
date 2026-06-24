@@ -341,6 +341,7 @@ impl ItfDisplay for Type {
             Type::Long => Node::leaf("Long".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
             Type::UInt => Node::leaf("UInt".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
             Type::ULong => Node::leaf("ULong".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
+            Type::Double => Node::leaf("Double".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string()),
             Type::FunType { params, ret, .. } => {
                 let param_types: Vec<Node> = params.iter().map(|t| t.itf_node()).collect();
                 let mut children = vec![Node::branch("return:", vec![ret.itf_node()])];
@@ -379,6 +380,7 @@ impl ItfDisplay for Expr {
                     Const::ConstLong(val) => format!("Long({})", val),
                     Const::ConstUInt(val) => format!("UInt({})", val),
                     Const::ConstULong(val) => format!("ULong({})", val),
+                    Const::ConstDouble(val) => format!("Double({})", val),
                 };
                 Node::leaf(
                     format!("Constant({})", value_str)
@@ -394,7 +396,7 @@ impl ItfDisplay for Expr {
                     Node::branch("expr:", vec![e.itf_node()]),
                 ],
             ),
-            Expr::Unary(op, e) => Node::branch(
+            Expr::Unary(op, e, _span) => Node::branch(
                 format!("Unary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
                 vec![e.itf_node()],
             ),
@@ -738,6 +740,7 @@ impl ItfDisplay for ValidatedExpr {
                     Const::ConstLong(val) => format!("Long({})", val),
                     Const::ConstUInt(val) => format!("UInt({})", val),
                     Const::ConstULong(val) => format!("ULong({})", val),
+                    Const::ConstDouble(val) => format!("Double({})", val),
                 };
                 Node::leaf(
                     format!("Constant({})", value_str)
@@ -1106,6 +1109,30 @@ impl ItfDisplay for TackyInstruction {
                 val_str(src),
                 val_str(dst)
             )),
+            TackyInstruction::DoubleToInt { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "DoubleToInt".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(src),
+                val_str(dst)
+            )),
+            TackyInstruction::DoubleToUInt { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "DoubleToUInt".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(src),
+                val_str(dst)
+            )),
+            TackyInstruction::IntToDouble { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "IntToDouble".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(src),
+                val_str(dst)
+            )),
+            TackyInstruction::UIntToDouble { src, dst } => Node::leaf(format!(
+                "{} {} -> {}",
+                "UIntToDouble".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                val_str(src),
+                val_str(dst)
+            )),
         }
     }
 }
@@ -1170,6 +1197,7 @@ fn size_str(size: &AssemblyType) -> String {
     match size {
         AssemblyType::Longword => "L".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string(),
         AssemblyType::Quadword => "Q".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string(),
+        AssemblyType::Double => "D".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2).to_string(),
     }
 }
 
@@ -1227,6 +1255,20 @@ impl ItfDisplay for CodegenInstruction {
             CodegenInstruction::MovZeroExtend { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
                 "MovZeroExtend".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                operand_str(src),
+                operand_str(dst)
+            )),
+            CodegenInstruction::Cvttsd2si { src, dst, size } => Node::leaf(format!(
+                "{}<{}> {} -> {}",
+                "Cvttsd2si".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                size_str(size),
+                operand_str(src),
+                operand_str(dst)
+            )),
+            CodegenInstruction::Cvtsi2sd { src, dst, size } => Node::leaf(format!(
+                "{}<{}> {} -> {}",
+                "Cvtsi2sd".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                size_str(size),
                 operand_str(src),
                 operand_str(dst)
             )),

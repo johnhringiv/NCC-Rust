@@ -45,10 +45,16 @@ use std::rc::Rc;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Identifier(pub Rc<str>);
 
+/// The assembler's local-label prefix for the target platform: `.L` on ELF/Linux, `L` on
+/// Mach-O/macOS. Use it for compiler-generated labels (jump targets, `.rodata` constants) so they
+/// follow the platform's internal-symbol convention consistently.
+pub fn local_label_prefix() -> &'static str {
+    if cfg!(target_os = "macos") { "L" } else { ".L" }
+}
+
 impl fmt::Display for Identifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let prefix = if cfg!(target_os = "macos") { "L" } else { ".L" };
-        write!(f, "{}{}", prefix, self.0)
+        write!(f, "{}{}", local_label_prefix(), self.0)
     }
 }
 
@@ -99,7 +105,7 @@ pub enum Expr {
     Constant(Const),
     Var(Identifier, Span),
     Cast(Type, Box<Expr>),
-    Unary(UnaryOp, Box<Expr>),
+    Unary(UnaryOp, Box<Expr>, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
     Assignment(Box<Expr>, Box<Expr>, Span),
     CompoundAssignment(AssignOp, Box<Expr>, Box<Expr>, Span),
@@ -116,6 +122,7 @@ pub enum Const {
     ConstLong(i64),
     ConstUInt(u32),
     ConstULong(u64),
+    ConstDouble(f64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -210,7 +217,7 @@ impl SwitchIntType {
         Some(match switch_type {
             Type::Int | Type::UInt => (raw as i32) as i64, // 32-bit: truncate to low bits, sign-extend
             Type::Long | Type::ULong => raw,               // 64-bit: full pattern
-            Type::FunType { .. } => unreachable!("Cannot switch on function type"),
+            Type::FunType { .. } | Type::Double => unreachable!("Cannot switch on non-integer type"),
         })
     }
 
@@ -252,6 +259,7 @@ pub enum Type {
     Long,
     UInt,
     ULong,
+    Double,
     FunType {
         params: Vec<Type>,
         ret: Box<Type>,
@@ -266,6 +274,7 @@ impl Type {
             Type::Long => Const::ConstLong(1),
             Type::UInt => Const::ConstUInt(1),
             Type::ULong => Const::ConstULong(1),
+            Type::Double => Const::ConstDouble(1.0),
             Type::FunType { .. } => unreachable!("Cannot increment function type"),
         }
     }
@@ -273,7 +282,7 @@ impl Type {
     pub fn size_bits(&self) -> u32 {
         match self {
             Type::Int | Type::UInt => 32,
-            Type::Long | Type::ULong => 64,
+            Type::Long | Type::ULong | Type::Double => 64,
             Type::FunType { .. } => panic!("Function does not have type size"),
         }
     }
@@ -282,8 +291,12 @@ impl Type {
         match self {
             Type::Int | Type::Long => true,
             Type::ULong | Type::UInt => false,
-            Type::FunType { .. } => panic!("Function does not have type size"),
+            Type::FunType { .. } | Type::Double => panic!("called on non-int"),
         }
+    }
+
+    pub fn is_integer(&self) -> bool {
+        matches!(self, Type::Int | Type::Long | Type::UInt | Type::ULong)
     }
 
     /// C usual arithmetic conversions: the common type two operands convert to.
@@ -291,6 +304,8 @@ impl Type {
     pub fn common_with(&self, other: &Type) -> Type {
         if self == other {
             self.clone()
+        } else if *self == Type::Double || *other == Type::Double {
+            Type::Double
         } else if self.size_bits() == other.size_bits() {
             if self.is_signed() { other.clone() } else { self.clone() }
         } else if self.size_bits() > other.size_bits() {
@@ -469,16 +484,20 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
     }
 }
 
-/// Parses an integer literal token into a constant expression.
+/// Parses a numeric literal token into a constant expression.
 ///
-/// Each suffix follows its own promotion ladder, trying the narrowest type first and widening on
-/// overflow — `u`-suffixed literals stay unsigned, the rest stay signed:
+/// Integer suffixes each follow their own promotion ladder, trying the narrowest type first and
+/// widening on overflow — `u`-suffixed literals stay unsigned, the rest stay signed:
 /// - `ConstantInt` (no suffix): `i32`, then `i64`.
 /// - `ConstantUnsignedInt` (`u`): `u32`, then `u64`.
 /// - `ConstantLong` (`l`): `i64`.
 /// - `ConstantUnsignedLong` (`ul`): `u64`.
 ///
-/// Returns an error if the value doesn't fit the widest type in its ladder (64 bits).
+/// `ConstantDouble` parses to `f64`, which never fails on magnitude (out-of-range values round to
+/// infinity or zero); the lexer regex guarantees the lexeme is well-formed. `warn_overflow` reports
+/// any such rounding.
+///
+/// Returns an error only if an integer value doesn't fit the widest type in its ladder (64 bits).
 fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
     match &token.token {
         Token::ConstantInt(value_str) => match value_str.parse::<i32>() {
@@ -515,15 +534,22 @@ fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
                 Some(token.span),
             )),
         },
+        Token::ConstantDouble(value_str) => {
+            let val = value_str
+                .parse::<f64>()
+                .expect("lexer regex guarantees a valid float literal");
+            warn_overflow(val, value_str, token.span);
+            Ok(Expr::Constant(Const::ConstDouble(val)))
+        }
         _ => unreachable!(),
     }
 }
 
-/// True if `t` is a type-specifier keyword (`int`, `long`, `signed`, `unsigned`).
+/// True if `t` is a type-specifier keyword (`int`, `long`, `signed`, `unsigned`, `double`).
 fn is_type_specifier(t: &Token) -> bool {
     matches!(
         t,
-        Token::IntKeyword | Token::LongKeyword | Token::SignedKeyword | Token::UnsignedKeyword
+        Token::IntKeyword | Token::LongKeyword | Token::SignedKeyword | Token::UnsignedKeyword | Token::DoubleKeyword
     )
 }
 
@@ -562,7 +588,8 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
             Token::ConstantInt(_)
             | Token::ConstantLong(_)
             | Token::ConstantUnsignedInt(_)
-            | Token::ConstantUnsignedLong(_) => {
+            | Token::ConstantUnsignedLong(_)
+            | Token::ConstantDouble(_) => {
                 tokens.pop_front();
                 parse_constant(spanned)
             }
@@ -581,13 +608,13 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 } else {
                     let operator = parse_unop(tokens)?;
                     let inner_exp = parse_factor(tokens)?;
-                    Ok(Expr::Unary(operator, Box::from(inner_exp)))
+                    Ok(Expr::Unary(operator, Box::from(inner_exp), spanned.span))
                 }
             }
             Token::BitwiseComplement | Token::LogicalNot => {
                 let operator = parse_unop(tokens)?;
                 let inner_exp = parse_factor(tokens)?;
-                Ok(Expr::Unary(operator, Box::from(inner_exp)))
+                Ok(Expr::Unary(operator, Box::from(inner_exp), spanned.span))
             }
             Token::Increment | Token::Decrement => {
                 tokens.pop_front();
@@ -719,30 +746,35 @@ fn parse_exp(tokens: &mut VecDeque<SpannedToken>, min_prec: u64) -> Result<Expr,
 
 /// Resolves a list of type-specifier tokens into a `Type`.
 ///
-/// Counts each specifier keyword (`int`, `long`, `signed`, `unsigned`), so combinations are
-/// order-independent (`long int` == `int long`, `unsigned long` == `long unsigned`). Errors on an
-/// empty list, a repeated specifier, or a conflicting `signed`/`unsigned` combination.
+/// Counts each specifier keyword (`int`, `long`, `signed`, `unsigned`, `double`), so combinations
+/// are order-independent (`long int` == `int long`, `unsigned long` == `long unsigned`). Errors on
+/// an empty list, a repeated specifier, a conflicting `signed`/`unsigned` combination, or `double`
+/// mixed with any other specifier.
 fn parse_type(specifier_list: &Vec<Token>, err_span: &Option<Span>) -> Result<Type, SyntaxError> {
-    let (mut ints, mut longs, mut signed, mut unsigned) = (0u32, 0u32, 0u32, 0u32);
+    if *specifier_list == [Token::DoubleKeyword] {
+        return Ok(Type::Double);
+    }
+    let (mut ints, mut longs, mut signed, mut unsigned, mut double) = (0u32, 0u32, 0u32, 0u32, 0u32);
     for t in specifier_list {
         match t {
             Token::IntKeyword => ints += 1,
             Token::LongKeyword => longs += 1,
             Token::SignedKeyword => signed += 1,
             Token::UnsignedKeyword => unsigned += 1,
+            Token::DoubleKeyword => double += 1,
             _ => return Err(SyntaxError::with_span("Non-type specifier".to_string(), *err_span)),
         }
     }
     if specifier_list.is_empty() {
         return Err(SyntaxError::with_span("Missing type specifier".to_string(), *err_span));
     }
-    if [ints, longs, signed, unsigned].iter().any(|&n| n > 1) {
+    if [ints, longs, signed, unsigned, double].iter().any(|&n| n > 1) {
         return Err(SyntaxError::with_span(
             "Duplicate type specifier".to_string(),
             *err_span,
         ));
     }
-    if (signed > 0) && (unsigned > 0) {
+    if ((signed > 0) && (unsigned > 0)) || ((double == 1) && (specifier_list.len() > 1)) {
         return Err(SyntaxError::with_span(
             "Invalid type specifier combination".to_string(),
             *err_span,
@@ -758,7 +790,7 @@ fn parse_type(specifier_list: &Vec<Token>, err_span: &Option<Span>) -> Result<Ty
 
 /// Splits a declaration's specifier list into a `Type` and an optional `StorageClass`.
 ///
-/// Separates type specifiers (`int`, `long`, `signed`, `unsigned`) from storage-class specifiers
+/// Separates type specifiers (`int`, `long`, `signed`, `unsigned`, `double`) from storage-class specifiers
 /// (`static`, `extern`), then delegates to `parse_type` for type resolution. Errors on duplicate
 /// storage classes.
 fn parse_type_and_storage_class(
@@ -1048,6 +1080,39 @@ fn warn_switch_unreachable(stmt: &SpannedStmt) {
             "warning".purple(),
             "[-Wswitch-unreachable]".purple()
         ),
+    }
+}
+
+/// `-Woverflow`: a floating-point literal that can't be represented in `double`. C makes an
+/// out-of-range floating constant undefined behavior; like every real implementation, NCC rounds it
+/// (too large -> infinity, too small -> zero) rather than rejecting it, so this flags the silent
+/// value change. Emitted at parse time, where the lexeme is still available — a literal that rounds
+/// to zero is indistinguishable from `0.0` once parsed, so it can only be caught here.
+fn warn_overflow(value: f64, value_str: &str, span: Span) {
+    if value.is_infinite() {
+        eprintln!(
+            "{}: {}: floating constant {} exceeds range of 'double' (rounded to infinity) {}",
+            span,
+            "warning".purple(),
+            value_str.bold(),
+            "[-Woverflow]".purple()
+        );
+    } else if value == 0.0
+        // Underflow only — a literal whose *significand* has a nonzero digit yet rounds to zero.
+        // Scan before the exponent so a true zero like `0e10` (nonzero digit only in the exponent)
+        // isn't mistaken for an underflow.
+        && value_str
+            .split(['e', 'E'])
+            .next()
+            .is_some_and(|significand| significand.bytes().any(|b| b.is_ascii_digit() && b != b'0'))
+    {
+        eprintln!(
+            "{}: {}: floating constant {} is too small for 'double' (truncated to zero) {}",
+            span,
+            "warning".purple(),
+            value_str.bold(),
+            "[-Woverflow]".purple()
+        );
     }
 }
 

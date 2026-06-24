@@ -17,6 +17,7 @@
 //! - Produces a [`VecDeque<SpannedToken>`] carrying line/column [`Span`]s for error reporting
 //! - Detects lexer errors (unexpected characters, unterminated comments) and exits with code 10
 //! - Promotes integer literals with an `L`/`l` suffix to [`Token::ConstantLong`]
+//! - Recognizes floating-point literals (fraction and/or exponent) as [`Token::ConstantDouble`]
 //!
 //! ## Call Order
 //!
@@ -39,6 +40,7 @@ pub enum Token {
     ConstantLong(String),
     ConstantUnsignedInt(String),
     ConstantUnsignedLong(String),
+    ConstantDouble(String),
     IntKeyword,              // int
     VoidKeyword,             // void
     ReturnKeyword,           // return
@@ -99,6 +101,7 @@ pub enum Token {
     LongKeyword,             // long
     SignedKeyword,           // signed
     UnsignedKeyword,         // unsigned
+    DoubleKeyword,           // double
 }
 
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
@@ -110,6 +113,10 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (
         r"^[0-9]++([lL][uU]|[uU][lL])\b",
         Token::ConstantUnsignedLong(String::new()),
+    ),
+    (
+        r"^((?:[0-9]*\.[0-9]+|[0-9]+\.?)[Ee][+-]?[0-9]+|[0-9]*\.[0-9]+|[0-9]+\.)(?:[^\w.]|$)",
+        Token::ConstantDouble(String::new()),
     ),
     // Keywords
     (r"^int\b", Token::IntKeyword),
@@ -179,6 +186,7 @@ const TOKEN_PATTERNS: &[(&str, Token)] = &[
     (r"^long\b", Token::LongKeyword),
     (r"^signed\b", Token::SignedKeyword),
     (r"^unsigned\b", Token::UnsignedKeyword),
+    (r"^double\b", Token::DoubleKeyword),
 ];
 
 static TOKEN_DEFS: LazyLock<Vec<TokenDef>, fn() -> Vec<TokenDef>> = LazyLock::new(|| {
@@ -239,7 +247,8 @@ pub struct SpannedToken {
 fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
     let mut matches = vec![];
     for TokenDef { regex, variant } in TOKEN_DEFS.iter() {
-        if let Some(mat) = regex.find(input) {
+        if let Some(caps) = regex.captures(input) {
+            let mat = caps.get(0).unwrap();
             let token = match variant {
                 Token::Identifier(_) => Token::Identifier(mat.as_str().to_string()),
                 Token::ConstantInt(_) => Token::ConstantInt(mat.as_str().to_string()),
@@ -255,12 +264,17 @@ fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
                     let s = mat.as_str();
                     Token::ConstantUnsignedLong(s[..s.len() - 2].to_string())
                 }
+                Token::ConstantDouble(_) => {
+                    let value = caps.get(1).unwrap();
+                    Token::ConstantDouble(value.as_str().to_string())
+                }
                 other => other.clone(),
             };
-            matches.push(TokenMatch {
-                token,
-                length: mat.end(),
-            });
+            let length = match variant {
+                Token::ConstantDouble(_) => caps.get(1).unwrap().end(),
+                _ => mat.end(),
+            };
+            matches.push(TokenMatch { token, length });
         }
     }
     if let Some(best_match) = matches.iter().max_by_key(|m| m.length) {
