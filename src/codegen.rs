@@ -417,7 +417,7 @@ impl ConstantPool {
     ///
     /// Sorted by bit pattern so the emitted constant section is deterministic (`HashMap` iteration
     /// order is randomized). Each constant carries the strictest alignment any use requested: 8 for a
-    /// plain `movsd` load, 16 for the `xorpd` sign-flip mask (see [`ConstantPool::intern`]).
+    /// plain `movsd` load, 16 for the `xorps` sign-flip mask (see [`ConstantPool::intern`]).
     fn into_static_constants(self) -> Vec<StaticConstant> {
         let mut entries: Vec<(u64, (Rc<str>, u64))> = self.map.into_iter().collect();
         entries.sort_by_key(|(bits, _)| *bits);
@@ -440,7 +440,7 @@ impl ConstantPool {
 ///
 /// `alignment` is forwarded to [`ConstantPool::intern`] and applies *only* to double constants
 /// (it's ignored for every other variant). Pass `8` for an ordinary `movsd` load; pass `16` for
-/// the `xorpd` sign-flip mask, which requires 16-byte alignment.
+/// the `xorps` sign-flip mask, whose 128-bit memory operand requires 16-byte alignment.
 fn val_operand(val: &Val, constants: &mut ConstantPool, alignment: u64) -> Operand {
     match val {
         Val::Constant(Const::ConstDouble(d)) => Operand::Data(constants.intern(*d, alignment)),
@@ -469,9 +469,10 @@ fn val_operand(val: &Val, constants: &mut ConstantPool, alignment: u64) -> Opera
 ///   carry-clear `A`/`AE` (false on unordered); `==`/`!=` combine the parity flag (`setnp`/`setp`)
 ///   so `NaN == x` is false and `NaN != x` true.
 /// - **`double` arithmetic** — `addsd`/`subsd`/`mulsd`/`divsd` on XMM registers (same `BinaryOp`s
-///   as the integer forms, selected by `AssemblyType::Double`); negation is `xorpd` with a
-///   16-byte-aligned `-0.0` sign mask; logical `!`/zero-tests compare against a zeroed XMM via
-///   `comisd`.
+///   as the integer forms, selected by `AssemblyType::Double`); negation flips the sign bit with
+///   `xorps` against a 16-byte-aligned `-0.0` mask (`xorps`, the single-precision form, is a byte
+///   shorter than `xorpd` and bit-identical for a pure XOR); logical `!`/zero-tests compare against
+///   a zeroed XMM via `comisd`.
 /// - **Integer conversions** — `SignExtend` → `Movsx`, `ZeroExtend` → `MovZeroExtend`,
 ///   `Truncate` → `Mov`.
 /// - **`double` ↔ integer conversions** — `cvtsi2sd`/`cvttsd2si` for the signed cases; the
@@ -1361,7 +1362,7 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
 /// - Immediate operand to idiv (moves to R10 first)
 /// - imul with memory destination (uses R11 as intermediate)
 /// - Integer binary ops with both operands in memory (uses R10)
-/// - `double` binary ops (`addsd`/`subsd`/`mulsd`/`divsd`/`xorpd`) with a non-register
+/// - `double` binary ops (`addsd`/`subsd`/`mulsd`/`divsd`/`xorps`) with a non-register
 ///   destination — SSE requires an XMM-register destination, so the value is routed through XMM15
 /// - Shift with memory source (moves count to CX)
 /// - Compare with immediate as destination operand (v2), or both operands in memory, or large

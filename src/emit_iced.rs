@@ -974,14 +974,14 @@ fn emit_instruction(
                 _ => unreachable!(),
             },
             BinaryOp::BitXOr => match (src, dst, size) {
-                (Operand::Reg(s), Operand::Reg(d), AssemblyType::Double) => a.xorpd(xmm_reg(d), xmm_reg(s))?,
+                (Operand::Reg(s), Operand::Reg(d), AssemblyType::Double) => a.xorps(xmm_reg(d), xmm_reg(s))?,
                 (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => {
-                    a.xorpd(xmm_reg(d), mem_rbp(*off, *size))?
+                    a.xorps(xmm_reg(d), mem_rbp(*off, *size))?
                 }
                 (Operand::Data(name), Operand::Reg(d), AssemblyType::Double) => {
                     let lbl = data_labels.get(name).unwrap();
                     data_relocs.push((a.instructions().len(), name.clone()));
-                    a.xorpd(xmm_reg(d), qword_ptr(*lbl))?
+                    a.xorps(xmm_reg(d), qword_ptr(*lbl))?
                 }
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Longword) => a.xor(gpr32(d), gpr32(s))?,
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Quadword) => a.xor(gpr64_reg(d), gpr64_reg(s))?,
