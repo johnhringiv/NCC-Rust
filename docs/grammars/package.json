@@ -1,0 +1,33 @@
+{
+  "name": "ncc-output-grammars",
+  "displayName": "NCC Output Grammars",
+  "version": "0.1.0",
+  "description": "TextMate grammars for NCC's --lex token dump and --parse/--validate/--tacky/--codegen tree view. Importable as a TextMate bundle in JetBrains IDEs and VS Code.",
+  "engines": { "vscode": "*" },
+  "contributes": {
+    "languages": [
+      {
+        "id": "ncc-tokens",
+        "aliases": ["NCC Tokens"],
+        "extensions": [".ncctok"]
+      },
+      {
+        "id": "ncc-ast-tree",
+        "aliases": ["NCC AST Tree"],
+        "extensions": [".nccir"]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ncc-tokens",
+        "scopeName": "source.tokens",
+        "path": "./tokens.json"
+      },
+      {
+        "language": "ncc-ast-tree",
+        "scopeName": "source.ast-tree",
+        "path": "./ast-tree.json"
+      }
+    ]
+  }
+}

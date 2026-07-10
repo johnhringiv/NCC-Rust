@@ -1,0 +1,198 @@
+{
+  "name": "ast-tree",
+  "scopeName": "source.ast-tree",
+  "_comment": "TextMate grammar for NCC's tree-view pretty printer (src/pretty.rs) covering --parse, --validate, --tacky and --codegen output. Scope names are chosen to track the vitesse-dark colour roles documented at the top of src/pretty.rs. Earlier patterns win, so payload-carrying and size markers are matched before bare keywords.",
+  "patterns": [
+    {
+      "comment": "Comment lines",
+      "name": "comment.line.ast-tree",
+      "match": "^\\s*#.*$"
+    },
+    {
+      "comment": "Trailing annotations (e.g. `Copy a -> b   # Store result`). Matched before the keyword rules so words inside a comment (like the legacy `Store`) are not mis-highlighted as instructions.",
+      "name": "comment.line.ast-tree",
+      "match": "#.*$"
+    },
+    {
+      "comment": "Box-drawing characters used for the tree",
+      "name": "punctuation.tree.ast-tree",
+      "match": "[\\u251c\\u2514\\u2502\\u2500\\u250c\\u2510\\u2518\\u252c\\u2534\\u253c]+"
+    },
+    {
+      "comment": "TACKY/codegen dataflow arrow (src -> dst)",
+      "name": "punctuation.arrow.ast-tree",
+      "match": "->"
+    },
+    {
+      "comment": "Assembly operand size marker <L> (longword) / <Q> (quadword) / <D> (double)",
+      "name": "storage.modifier.size.ast-tree",
+      "match": "<[LQD]>"
+    },
+    {
+      "comment": "Imm(<int>) immediate operand. Keyword coloured teal (constant.numeric) so the immediate reads as one constant together with its number.",
+      "match": "\\b(Imm)\\((-?[0-9]+)\\)",
+      "captures": {
+        "1": { "name": "constant.numeric.operand.ast-tree" },
+        "2": { "name": "constant.numeric.immediate.ast-tree" }
+      }
+    },
+    {
+      "comment": "Stack(<offset>) operand",
+      "match": "\\b(Stack)\\((-?[0-9]+)\\)",
+      "captures": {
+        "1": { "name": "constant.other.operand.ast-tree" },
+        "2": { "name": "constant.numeric.ast-tree" }
+      }
+    },
+    {
+      "comment": "Pseudo(<name>) operand — pseudo-register (pre-allocation virtual register). Keyword shares the indigo register colour since it is register-class, not memory.",
+      "match": "\\b(Pseudo)\\(([^)]*)\\)",
+      "captures": {
+        "1": { "name": "type.identifier.register.ast-tree" },
+        "2": { "name": "string.other.temporary.ast-tree" }
+      }
+    },
+    {
+      "comment": "Data(<name>) operand — static/global symbol. Keyword tan (memory); the global name uses the olive names colour (a global name is a name), avoiding a clash with the control-flow green.",
+      "match": "\\b(Data)\\(([^)]*)\\)",
+      "captures": {
+        "1": { "name": "constant.other.operand.ast-tree" },
+        "2": { "name": "entity.name.function.data.ast-tree" }
+      }
+    },
+    {
+      "comment": "Parser/validated Constant literal. Matches both the current typed form Constant(Int(0)) / Long / UInt / ULong / Double and the older bare form Constant(0) (blog snippets are pinned to the compiler version each post covers, so both formats persist). Teal (constant.numeric) so parser constants join the immediate/number 'constant' family across all stages, instead of the green that clashed with control-flow.",
+      "name": "constant.numeric.constant.ast-tree",
+      "match": "\\bConstant\\((?:(?:Int|Long|UInt|ULong|Double)\\([^)]*\\)|-?[0-9]+)\\)"
+    },
+    {
+      "comment": "TACKY Const debug value: ConstInt/ConstLong/ConstUInt/ConstULong/ConstDouble(...)",
+      "name": "constant.numeric.ast-tree",
+      "match": "\\bConst(?:Int|Long|UInt|ULong|Double)\\([^)]*\\)"
+    },
+    {
+      "comment": "Static initializer value: IntInit/LongInit/UIntInit/ULongInit/DoubleInit(...)",
+      "name": "constant.numeric.ast-tree",
+      "match": "\\b(?:Int|Long|UInt|ULong|Double)Init\\([^)]*\\)"
+    },
+    {
+      "comment": "Identifier(\"name\") leaf",
+      "name": "entity.name.function.ast-tree",
+      "match": "\\bIdentifier\\(\"[^\"]*\"\\)"
+    },
+    {
+      "comment": "Label(<target>) TACKY/codegen instruction with its label payload",
+      "match": "\\b(Label)\\(([^)]*)\\)",
+      "captures": {
+        "1": { "name": "support.function.ast-tree" },
+        "2": { "name": "entity.name.label.ast-tree" }
+      }
+    },
+    {
+      "comment": "FunctionDefinition: <name> header (TACKY/codegen)",
+      "match": "\\b(FunctionDefinition)(:)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "entity.name.class.ast-tree" },
+        "2": { "name": "punctuation.separator.ast-tree" },
+        "3": { "name": "entity.name.function.ast-tree" }
+      }
+    },
+    {
+      "comment": "StaticVariable: <name> header",
+      "match": "\\b(StaticVariable)(:)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "entity.name.class.ast-tree" },
+        "2": { "name": "punctuation.separator.ast-tree" },
+        "3": { "name": "entity.name.function.ast-tree" }
+      }
+    },
+    {
+      "comment": "CPU registers (System V scratch/arg set + SSE XMM). Matched BEFORE the arrow-target rule so a register on the right of `->` (e.g. `Mov R10 -> AX`) is coloured as a register, not mis-scoped as a jump label. Indigo gives registers their own hue, clearly separated from teal immediates/numbers and warm tan memory operands (Stack/Data).",
+      "name": "type.identifier.register.ast-tree",
+      "match": "\\b(AX|CX|DX|DI|SI|R8|R9|R10|R11|SP|XMM[0-9]+)\\b"
+    },
+    {
+      "comment": "Renamed locals / temporaries: name.<n>. Dusty-rose (the best clean/unstyled hue this warm theme offers that is distinct from instruction gold / memory tan; the cooler options in vitesse-dark all carry bold/italic diff-markup styling). Matched BEFORE the arrow-target rule so a temporary destination (`Copy x -> temp.1`) gets the same colour as when it appears as a source — otherwise the same variable renders two different colours. Real jump targets (else_label, end_label) have no .N suffix, so they still fall through to the arrow-target rule and stay label-coloured.",
+      "name": "string.other.temporary.ast-tree",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\.[0-9]+\\b"
+    },
+    {
+      "comment": "Jump / branch target following an arrow",
+      "name": "entity.name.label.ast-tree",
+      "match": "(?<=->\\s)[A-Za-z_][A-Za-z0-9_.]*"
+    },
+    {
+      "comment": "FunCall / Call instruction followed by its callee name",
+      "match": "\\b(FunCall|Call)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "support.function.ast-tree" },
+        "2": { "name": "entity.name.function.ast-tree" }
+      }
+    },
+    {
+      "comment": "Top-level / declaration nodes (teal)",
+      "name": "entity.name.class.ast-tree",
+      "match": "\\b(Program|FunctionDefinition|FunDeclaration|VarDeclaration|StaticVariable|FunType)\\b"
+    },
+    {
+      "comment": "TACKY & codegen instructions and parser/validated expression nodes (teal)",
+      "name": "support.function.ast-tree",
+      "match": "\\b(Mov|Movsx|MovZeroExtend|Cvttsd2si|Cvtsi2sd|Binary|Unary|Cmp|Idiv|Div|Cdq|Jmp|JmpCC|SetCC|Push|Call|Ret|Copy|Jump|JumpIfZero|JumpIfNotZero|FunCall|SignExtend|Truncate|ZeroExtend|DoubleToInt|DoubleToUInt|IntToDouble|UIntToDouble|Cast|CompoundAssignment|Assignment|PostFix|PreFix|FunctionCall)\\b"
+    },
+    {
+      "comment": "Older-form instructions NOT emitted by the current NCC. Blog snippets are pinned to the compiler version each post covers, so this output is permanent (not a snippet to regenerate). Today's compiler lowers stack allocation to `Binary<Q> Sub Imm(n) -> SP` instead of AllocateStack/DeallocateStack; the grammar must highlight both across the post history.",
+      "name": "support.function.ast-tree",
+      "match": "\\b(AllocateStack|DeallocateStack)\\b"
+    },
+    {
+      "comment": "Statement / control-flow nodes (teal-green)",
+      "name": "keyword.control.ast-tree",
+      "match": "\\b(Return|Expression|If|Null|Goto|Labeled|Compound|Break|Continue|While|DoWhile|For|Switch|Case|Default|Conditional|None)\\b"
+    },
+    {
+      "comment": "Storage class / linkage markers",
+      "name": "storage.modifier.ast-tree",
+      "match": "\\b(storage_class:\\s*(?:static|extern)|static|extern|global|local)\\b"
+    },
+    {
+      "comment": "Types",
+      "name": "storage.type.ast-tree",
+      "match": "\\b(Int|Long|UInt|ULong|Double|FunType)\\b"
+    },
+    {
+      "comment": "Operators across parser, TACKY and codegen op enums",
+      "name": "keyword.operator.ast-tree",
+      "match": "\\b(BitwiseComplement|Negate|Not|Neg|Subtract|Sub|Add|Multiply|Mult|DivDouble|Divide|Remainder|BitwiseAnd|BitwiseOr|BitwiseXOr|BitwiseLeftShift|BitwiseRightShift|BitAnd|BitOr|BitXOr|BitShl|BitSar|BitShr|Shr|And|Or|Equal|NotEqual|LessThan|LessOrEqual|GreaterThan|GreaterOrEqual|Increment|Decrement)\\b"
+    },
+    {
+      "comment": "Condition codes (longer names first; sizes <L>/<Q> already consumed above)",
+      "name": "keyword.operator.condition.ast-tree",
+      "match": "\\b(NE|AE|BE|GE|LE|E|A|B|G|L)\\b"
+    },
+    {
+      "comment": "Branch labels carried inline, e.g. [label: 0] or [break_loop.0]",
+      "name": "entity.name.label.ast-tree",
+      "match": "\\[(?:label:\\s*)?[A-Za-z0-9_.]*\\]"
+    },
+    {
+      "comment": "Child field labels (uncoloured in the printer; highlighted here for readability)",
+      "name": "variable.parameter.label.ast-tree",
+      "match": "\\b(name|type|return|params|init|args|condition|then|else|body|post|expr|stmt|target_type|cases|align):"
+    },
+    {
+      "comment": "Vector length header, e.g. [3]",
+      "name": "constant.numeric.ast-tree",
+      "match": "\\[[0-9]+\\]"
+    },
+    {
+      "comment": "Bare integers (offsets, alignments, loop labels)",
+      "name": "constant.numeric.ast-tree",
+      "match": "\\b-?[0-9]+\\b"
+    },
+    {
+      "comment": "Any remaining quoted string",
+      "name": "string.quoted.double.ast-tree",
+      "match": "\"[^\"]*\""
+    }
+  ]
+}
