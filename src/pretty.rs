@@ -3,16 +3,15 @@ use std::fmt;
 use colored::Colorize;
 
 use crate::codegen::{
-    AssemblyType, BinaryOp, CondCode, FunctionDefinition as CodegenFunctionDefinition,
-    Instruction as CodegenInstruction, Operand, Program as CodegenProgram, Reg, UnaryOp,
+    AssemblyType, FunctionDefinition as CodegenFunctionDefinition, Instruction as CodegenInstruction, Operand,
+    Program as CodegenProgram, Reg,
 };
 use crate::parser::{
-    AssignOp, BinOp as ParserBinOp, BlockItem, Const, Declaration, Expr, ForInit, FunDeclaration, Identifier, IncDec,
-    Program as ParserProgram, SpannedStmt, Stmt, StorageClass, SwitchIntType, Type, UnaryOp as ParserUnaryOp,
-    VarDeclaration,
+    BlockItem, Const, Declaration, Expr, ForInit, FunDeclaration, Identifier, Program as ParserProgram, SpannedStmt,
+    Stmt, StorageClass, SwitchIntType, Type, VarDeclaration,
 };
 use crate::tacky::{
-    BinOp, FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction, Program as TackyProgram,
+    FunctionDefinition as TackyFunctionDefinition, Instruction as TackyInstruction, Program as TackyProgram,
     StaticVariable, Val, VarInit,
 };
 use crate::validate::{
@@ -28,21 +27,20 @@ use crate::validate::{
 // highlighting for the compiler's AST pretty printer across all stages:
 // Parser, Tacky IR, and Codegen.
 //
-// Color Mapping:
+// Color Mapping (kept in sync with docs/grammars/ast-tree.json — see
+// docs/grammars/README.md, "Colour scheme ⇄ pretty.rs"):
 //
-// 1. TEAL (93, 169, 148) - Instructions & Declarations
-//    - Instructions: Mov, Binary, Copy, Jump, Call, Label, Return (Tacky), etc.
-//    - Declarations: Program, FunctionDefinition, VarDeclaration, FunDeclaration
-//    - Expression types: PostFix, Assignment, Conditional, Unary, Binary (Parser)
+// 1. TEAL (93, 169, 148) - Declarations
+//    - Program, FunctionDefinition, FunDeclaration, VarDeclaration, StaticVariable
 //
-// 2. TEAL_GREEN (77, 147, 117) - Control Flow & Registers
-//    - Control flow keywords: Return, If, While, For, Break, Continue, Switch, etc.
-//    - CPU Registers: AX, R10, SP, BP, etc.
+// 2. TEAL_GREEN (77, 147, 117) - Control Flow
+//    - Return, If, While, For, Break, Continue, Switch, Conditional, None, etc.
+//      (control-flow only — registers moved to INDIGO)
 //
 // 3. MUTED_RED (203, 118, 118) - Operators & Type Qualifiers
 //    - Operators: Add, Multiply, NotEqual, BitwiseAnd, Increment, etc.
-//    - Operand type keywords: Imm, Stack, Data, Pseudo
 //    - Condition codes: E, NE, L, LE, G, GE, etc.
+//      (operand keywords moved to storage-class colours below)
 //
 // 4. YELLOW_GREEN (128, 166, 101) - Names & Labels
 //    - Function names and identifiers
@@ -52,17 +50,28 @@ use crate::validate::{
 // 5. CREAM (219, 215, 202) - Variables
 //    - Local variable names
 //    - Temporary variables (temp.1, binary_left.2, etc.)
-//    - Pseudo register names
+//    - Pseudo register names (the payload of Pseudo(...))
 //
-// 6. CYAN_TEAL (76, 154, 145) - Numeric Values
-//    - Integer literals
-//    - Immediate values
-//    - Stack offsets (-4, -8, etc.)
-//    - Memory offsets and allocation sizes
+// 6. CYAN_TEAL (76, 154, 145) - Numeric Values & immediates
+//    - Integer literals, stack/memory offsets, allocation sizes
+//    - Imm(...) immediate operands — keyword AND value, so the whole Imm(1)
+//      reads as one constant (immediate storage class)
 //
 // 7. YELLOW_GOLD (230, 204, 119) - String Constants
 //    - Constant expressions in Parser AST
 //    - String literal values
+//
+// 8. INDIGO (104, 114, 171) - Registers (register storage class)
+//    - CPU registers: AX, R10, SP, XMM0, etc.
+//    - Pseudo(...) keyword (a pseudo-register is register-class)
+//
+// 9. TAN (201, 144, 118) - Memory operands (memory storage class)
+//    - Stack(...) and Data(...) keywords (spills and globals)
+//
+// 10. GOLD_INSTR (184, 169, 101) - Instructions / opcodes & expression nodes
+//    - TACKY/codegen instructions: Mov, Binary, Copy, Jump, Call, Ret, Label, etc.
+//    - Parser/validated expression nodes: Cast, Unary, Binary, Assignment,
+//      CompoundAssignment, PostFix, PreFix, FunctionCall
 //
 // =============================================================================
 
@@ -73,6 +82,9 @@ const YELLOW_GREEN: (u8, u8, u8) = (128, 166, 101); // s3: #80a665
 const CREAM: (u8, u8, u8) = (219, 215, 202); // s4: #dbd7caee
 const CYAN_TEAL: (u8, u8, u8) = (76, 154, 145); // s18: #4c9a91
 const YELLOW_GOLD: (u8, u8, u8) = (230, 204, 119); // s17: #e6cc77
+const INDIGO: (u8, u8, u8) = (104, 114, 171); // s28: #6872ab — registers & pseudo-registers
+const TAN: (u8, u8, u8) = (201, 144, 118); // s2:  #c99076 — memory operands (Stack, Data)
+const GOLD_INSTR: (u8, u8, u8) = (184, 169, 101); // s10: #b8a965 — instructions/opcodes & expression nodes
 
 #[derive(Clone)]
 pub struct Node {
@@ -141,22 +153,11 @@ macro_rules! colored_node {
     };
 }
 
-// Operators and condition codes (muted red)
-colored_node!(
-    MUTED_RED.0, MUTED_RED.1, MUTED_RED.2;
-    ParserUnaryOp,
-    ParserBinOp,
-    AssignOp,
-    IncDec,    // Parser
-    BinOp,     // Tacky
-    UnaryOp,
-    BinaryOp,
-    CondCode,  // Codegen
-);
+// Operators and condition codes are coloured inline via `op_str` (muted red).
 
-// Registers (teal-green)
+// Registers (indigo)
 colored_node!(
-    TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2;
+    INDIGO.0, INDIGO.1, INDIGO.2;
     Reg,
 );
 
@@ -301,7 +302,7 @@ impl<T: ItfDisplay> ItfDisplay for Vec<T> {
         let children: Vec<Node> = self.iter().map(|item| item.itf_node()).collect();
         Node::branch(
             format!("[{}]", self.len())
-                .truecolor(TEAL.0, TEAL.1, TEAL.2)
+                .truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
                 .to_string(),
             children,
         )
@@ -318,7 +319,7 @@ impl ItfDisplay for ForInit {
             ForInit::InitDecl(decl) => decl.itf_node(),
             ForInit::InitExp(opt_expr) => match opt_expr {
                 Some(expr) => expr.itf_node(),
-                None => Node::leaf("None".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string()),
+                None => Node::leaf("None".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()),
             },
         }
     }
@@ -390,42 +391,62 @@ impl ItfDisplay for Expr {
             }
             Expr::Var(id, _span) => id.itf_node(),
             Expr::Cast(target_type, e) => Node::branch(
-                "Cast".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                "Cast".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2).to_string(),
                 vec![
                     Node::branch("target_type:", vec![target_type.itf_node()]),
                     Node::branch("expr:", vec![e.itf_node()]),
                 ],
             ),
             Expr::Unary(op, e, _span) => Node::branch(
-                format!("Unary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                format!(
+                    "{} ({})",
+                    "Unary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e.itf_node()],
             ),
             Expr::Binary(op, e1, e2, _span) => Node::branch(
-                format!("Binary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                format!(
+                    "{} ({})",
+                    "Binary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e1.itf_node(), e2.itf_node()],
             ),
             Expr::Assignment(lhs, rhs, _span) => Node::branch(
-                "Assignment".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                "Assignment"
+                    .truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2)
+                    .to_string(),
                 vec![lhs.itf_node(), rhs.itf_node()],
             ),
             Expr::CompoundAssignment(op, lhs, rhs, _span) => Node::branch(
-                format!("CompoundAssignment ({op:?})")
-                    .truecolor(TEAL.0, TEAL.1, TEAL.2)
-                    .to_string(),
+                format!(
+                    "{} ({})",
+                    "CompoundAssignment".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![lhs.itf_node(), rhs.itf_node()],
             ),
             Expr::PostFixOp(op, e, _span) => Node::branch(
-                format!("PostFix ({op:?})")
-                    .truecolor(TEAL.0, TEAL.1, TEAL.2)
-                    .to_string(),
+                format!(
+                    "{} ({})",
+                    "PostFix".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e.itf_node()],
             ),
             Expr::PreFixOp(op, e, _span) => Node::branch(
-                format!("PreFix ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                format!(
+                    "{} ({})",
+                    "PreFix".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e.itf_node()],
             ),
             Expr::Conditional(condition, then_expr, else_expr) => Node::branch(
-                "Conditional".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                "Conditional"
+                    .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                    .to_string(),
                 vec![
                     Node::branch("condition:", vec![condition.itf_node()]),
                     Node::branch("then:", vec![then_expr.itf_node()]),
@@ -438,7 +459,12 @@ impl ItfDisplay for Expr {
                     let arg_nodes: Vec<Node> = args.iter().map(|a| a.itf_node()).collect();
                     children.push(Node::branch("args:", arg_nodes));
                 }
-                Node::branch("FunctionCall".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), children)
+                Node::branch(
+                    "FunctionCall"
+                        .truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2)
+                        .to_string(),
+                    children,
+                )
             }
         }
     }
@@ -750,42 +776,62 @@ impl ItfDisplay for ValidatedExpr {
             }
             ValidatedExpr::Var(id) => id.itf_node(),
             ValidatedExpr::Cast(target_type, e) => Node::branch(
-                "Cast".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                "Cast".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2).to_string(),
                 vec![
                     Node::branch("target_type:", vec![target_type.itf_node()]),
                     Node::branch("expr:", vec![e.itf_node()]),
                 ],
             ),
             ValidatedExpr::Unary(op, e) => Node::branch(
-                format!("Unary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                format!(
+                    "{} ({})",
+                    "Unary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e.itf_node()],
             ),
             ValidatedExpr::Binary(op, e1, e2) => Node::branch(
-                format!("Binary ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                format!(
+                    "{} ({})",
+                    "Binary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e1.itf_node(), e2.itf_node()],
             ),
             ValidatedExpr::Assignment(lhs, rhs) => Node::branch(
-                "Assignment".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                "Assignment"
+                    .truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2)
+                    .to_string(),
                 vec![lhs.itf_node(), rhs.itf_node()],
             ),
             ValidatedExpr::CompoundAssignment(op, lhs, rhs, _inner_type) => Node::branch(
-                format!("CompoundAssignment ({op:?})")
-                    .truecolor(TEAL.0, TEAL.1, TEAL.2)
-                    .to_string(),
+                format!(
+                    "{} ({})",
+                    "CompoundAssignment".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![lhs.itf_node(), rhs.itf_node()],
             ),
             ValidatedExpr::PostFixOp(op, e) => Node::branch(
-                format!("PostFix ({op:?})")
-                    .truecolor(TEAL.0, TEAL.1, TEAL.2)
-                    .to_string(),
+                format!(
+                    "{} ({})",
+                    "PostFix".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e.itf_node()],
             ),
             ValidatedExpr::PreFixOp(op, e) => Node::branch(
-                format!("PreFix ({op:?})").truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                format!(
+                    "{} ({})",
+                    "PreFix".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                    op_str(op)
+                ),
                 vec![e.itf_node()],
             ),
             ValidatedExpr::Conditional(cond, then_expr, else_expr) => Node::branch(
-                "Conditional".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(),
+                "Conditional"
+                    .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
+                    .to_string(),
                 vec![
                     Node::branch("condition:", vec![cond.itf_node()]),
                     Node::branch("then:", vec![then_expr.itf_node()]),
@@ -798,7 +844,12 @@ impl ItfDisplay for ValidatedExpr {
                     let arg_nodes: Vec<Node> = args.iter().map(|a| a.itf_node()).collect();
                     children.push(Node::branch("args:", arg_nodes));
                 }
-                Node::branch("FunctionCall".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string(), children)
+                Node::branch(
+                    "FunctionCall"
+                        .truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2)
+                        .to_string(),
+                    children,
+                )
             }
         }
     }
@@ -999,7 +1050,7 @@ impl ItfDisplay for ValidatedForInit {
             ValidatedForInit::InitDecl(decl) => decl.itf_node(),
             ValidatedForInit::InitExp(opt_expr) => match opt_expr {
                 Some(expr) => expr.itf_node(),
-                None => Node::leaf("None".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string()),
+                None => Node::leaf("None".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2).to_string()),
             },
         }
     }
@@ -1032,60 +1083,70 @@ fn val_str(v: &Val) -> String {
     }
 }
 
+// Format an operator or condition code (Debug) in the operator colour (muted red),
+// matching the grammar's `keyword.operator` scope across every stage.
+fn op_str(op: impl std::fmt::Debug) -> String {
+    format!("{op:?}")
+        .truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2)
+        .to_string()
+}
+
 impl ItfDisplay for TackyInstruction {
     fn itf_node(&self) -> Node {
         match self {
-            TackyInstruction::Return(v) => {
-                Node::leaf(format!("{} {}", "Return".truecolor(TEAL.0, TEAL.1, TEAL.2), val_str(v)))
-            }
+            TackyInstruction::Return(v) => Node::leaf(format!(
+                "{} {}",
+                "Return".truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2),
+                val_str(v)
+            )),
             TackyInstruction::Unary { op, src, dst } => Node::leaf(format!(
-                "{} {:?} {} -> {}",
-                "Unary".truecolor(TEAL.0, TEAL.1, TEAL.2),
-                op,
+                "{} {} {} -> {}",
+                "Unary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                op_str(op),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::Binary { op, src1, src2, dst } => Node::leaf(format!(
-                "{} {:?} {}, {} -> {}",
-                "Binary".truecolor(TEAL.0, TEAL.1, TEAL.2),
-                op,
+                "{} {} {}, {} -> {}",
+                "Binary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                op_str(op),
                 val_str(src1),
                 val_str(src2),
                 val_str(dst)
             )),
             TackyInstruction::Copy { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "Copy".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Copy".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::Jump { target } => Node::leaf(format!(
                 "{} -> {}",
-                "Jump".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Jump".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
             TackyInstruction::JumpIfZero { condition, target } => Node::leaf(format!(
                 "{} {} -> {}",
-                "JumpIfZero".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "JumpIfZero".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(condition),
                 target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
             TackyInstruction::JumpIfNotZero { condition, target } => Node::leaf(format!(
                 "{} {} -> {}",
-                "JumpIfNotZero".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "JumpIfNotZero".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(condition),
                 target.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
             TackyInstruction::Label(lbl) => Node::leaf(format!(
                 "{}({})",
-                "Label".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Label".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 lbl.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
             TackyInstruction::FunCall { fun_name, args, dst } => {
                 let args_str = args.iter().map(val_str).collect::<Vec<_>>().join(", ");
                 Node::leaf(format!(
                     "{} {}({}) -> {}",
-                    "FunCall".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                    "FunCall".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                     fun_name.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2),
                     args_str,
                     val_str(dst)
@@ -1093,43 +1154,43 @@ impl ItfDisplay for TackyInstruction {
             }
             TackyInstruction::SignExtend { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "SignExtend".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "SignExtend".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::Truncate { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "Truncate".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Truncate".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::ZeroExtend { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "ZeroExtend".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "ZeroExtend".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::DoubleToInt { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "DoubleToInt".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "DoubleToInt".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::DoubleToUInt { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "DoubleToUInt".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "DoubleToUInt".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::IntToDouble { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "IntToDouble".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "IntToDouble".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
             TackyInstruction::UIntToDouble { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "UIntToDouble".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "UIntToDouble".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 val_str(src),
                 val_str(dst)
             )),
@@ -1204,27 +1265,27 @@ fn size_str(size: &AssemblyType) -> String {
 // Helper to format Operand compactly as string
 fn operand_str(op: &Operand) -> String {
     match op {
+        // Operands are coloured by storage class: immediate (teal, keyword + value read as one
+        // constant), register (indigo), memory — Stack/Data (tan). See docs/grammars/README.md.
         Operand::Imm(i) => format!(
             "{}({})",
-            "Imm".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
+            "Imm".truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2),
             i.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
         ),
-        Operand::Reg(r) => format!("{:?}", r)
-            .truecolor(TEAL_GREEN.0, TEAL_GREEN.1, TEAL_GREEN.2)
-            .to_string(),
+        Operand::Reg(r) => format!("{:?}", r).truecolor(INDIGO.0, INDIGO.1, INDIGO.2).to_string(),
         Operand::Pseudo(s) => format!(
             "{}({})",
-            "Pseudo".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
+            "Pseudo".truecolor(INDIGO.0, INDIGO.1, INDIGO.2),
             s.truecolor(CREAM.0, CREAM.1, CREAM.2)
         ),
         Operand::Stack(o) => format!(
             "{}({})",
-            "Stack".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
+            "Stack".truecolor(TAN.0, TAN.1, TAN.2),
             o.to_string().truecolor(CYAN_TEAL.0, CYAN_TEAL.1, CYAN_TEAL.2)
         ),
         Operand::Data(s) => format!(
             "{}({})",
-            "Data".truecolor(MUTED_RED.0, MUTED_RED.1, MUTED_RED.2),
+            "Data".truecolor(TAN.0, TAN.1, TAN.2),
             s.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
         ),
     }
@@ -1241,107 +1302,109 @@ impl ItfDisplay for CodegenInstruction {
         match self {
             CodegenInstruction::Mov { src, dst, size } => Node::leaf(format!(
                 "{}<{}> {} -> {}",
-                "Mov".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Mov".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
                 operand_str(src),
                 operand_str(dst)
             )),
             CodegenInstruction::Movsx { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "Movsx".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Movsx".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 operand_str(src),
                 operand_str(dst)
             )),
             CodegenInstruction::MovZeroExtend { src, dst } => Node::leaf(format!(
                 "{} {} -> {}",
-                "MovZeroExtend".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "MovZeroExtend".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 operand_str(src),
                 operand_str(dst)
             )),
             CodegenInstruction::Cvttsd2si { src, dst, size } => Node::leaf(format!(
                 "{}<{}> {} -> {}",
-                "Cvttsd2si".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Cvttsd2si".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
                 operand_str(src),
                 operand_str(dst)
             )),
             CodegenInstruction::Cvtsi2sd { src, dst, size } => Node::leaf(format!(
                 "{}<{}> {} -> {}",
-                "Cvtsi2sd".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Cvtsi2sd".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
                 operand_str(src),
                 operand_str(dst)
             )),
             CodegenInstruction::Unary { op, dst, size } => Node::leaf(format!(
-                "{}<{}> {:?} {}",
-                "Unary".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "{}<{}> {} {}",
+                "Unary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
-                op,
+                op_str(op),
                 operand_str(dst)
             )),
             CodegenInstruction::Binary { op, src, dst, size } => Node::leaf(format!(
-                "{}<{}> {:?} {} -> {}",
-                "Binary".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "{}<{}> {} {} -> {}",
+                "Binary".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
-                op,
+                op_str(op),
                 operand_str(src),
                 operand_str(dst)
             )),
             CodegenInstruction::Cmp { v1, v2, size } => Node::leaf(format!(
                 "{}<{}> {}, {}",
-                "Cmp".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Cmp".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
                 operand_str(v1),
                 operand_str(v2)
             )),
             CodegenInstruction::Idiv(op, size) => Node::leaf(format!(
                 "{}<{}> {}",
-                "Idiv".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Idiv".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
                 operand_str(op)
             )),
             CodegenInstruction::Div(op, size) => Node::leaf(format!(
                 "{}<{}> {}",
-                "Div".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Div".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size),
                 operand_str(op)
             )),
             CodegenInstruction::Cdq(size) => Node::leaf(format!(
                 "{}<{}>",
-                "Cdq".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Cdq".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 size_str(size)
             )),
             CodegenInstruction::Jmp(label) => Node::leaf(format!(
                 "{} -> {}",
-                "Jmp".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Jmp".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 label.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
             CodegenInstruction::JmpCC { code, label } => Node::leaf(format!(
-                "{} {:?} -> {}",
-                "JmpCC".truecolor(TEAL.0, TEAL.1, TEAL.2),
-                code,
+                "{} {} -> {}",
+                "JmpCC".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                op_str(code),
                 label.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
             CodegenInstruction::SetCC { code, op } => Node::leaf(format!(
-                "{} {:?} {}",
-                "SetCC".truecolor(TEAL.0, TEAL.1, TEAL.2),
-                code,
+                "{} {} {}",
+                "SetCC".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
+                op_str(code),
                 operand_str(op)
             )),
             CodegenInstruction::Label(l) => Node::leaf(format!(
                 "{}({})",
-                "Label".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Label".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 l.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
-            CodegenInstruction::Ret => Node::leaf("Ret".truecolor(TEAL.0, TEAL.1, TEAL.2).to_string()),
+            CodegenInstruction::Ret => {
+                Node::leaf("Ret".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2).to_string())
+            }
             CodegenInstruction::Push(op) => Node::leaf(format!(
                 "{} {}",
-                "Push".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Push".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 operand_str(op)
             )),
             CodegenInstruction::Call(name) => Node::leaf(format!(
                 "{} {}",
-                "Call".truecolor(TEAL.0, TEAL.1, TEAL.2),
+                "Call".truecolor(GOLD_INSTR.0, GOLD_INSTR.1, GOLD_INSTR.2),
                 name.0.truecolor(YELLOW_GREEN.0, YELLOW_GREEN.1, YELLOW_GREEN.2)
             )),
         }
