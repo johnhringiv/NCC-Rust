@@ -469,6 +469,9 @@ struct VarInfo {
     renamed: Rc<str>,
     span: Span,
     ext_link: bool,
+    /// Functions and variables share the identifier namespace. Like gcc, `-Wshadow` doesn't
+    /// fire when a variable shadows a function.
+    is_function: bool,
 }
 
 pub struct NameGenerator {
@@ -505,6 +508,7 @@ impl NameGenerator {
 ///
 /// **none (automatic)**: Regular local variable with automatic storage
 /// - Initializer is typechecked and converted to variable's type
+/// - A constant initializer whose value the conversion changes emits `-Wconstant-conversion`
 /// - Added to symbol table with `global: false`
 /// - `defined: true` (allocates stack storage)
 ///
@@ -522,9 +526,26 @@ fn typecheck_local_variable_declaration(
         }
         if let Some(old_dec) = symbols.get(&decl.name.0) {
             if old_dec.symbol_type != decl.var_type {
+                let what = if matches!(old_dec.symbol_type, Type::FunType { .. }) {
+                    "redeclared as different kind of symbol"
+                } else {
+                    "has conflicting types"
+                };
                 return Err(SemanticError::with_span(
                     format!(
-                        "'{}' redeclared as different kind of symbol\n{}: {}: previous declaration was here",
+                        "'{}' {what}\n{}: {}: previous declaration was here",
+                        decl.name.0.bold(),
+                        old_dec.span,
+                        "note".cyan()
+                    ),
+                    decl.span,
+                ));
+            }
+            if decl.prior_linkage_hidden && !old_dec.global {
+                return Err(SemanticError::with_span(
+                    format!(
+                        "'{}' declared 'extern' while a local hides its 'static' declaration, so it \
+                         would need both external and internal linkage\n{}: {}: 'static' declaration was here",
                         decl.name.0.bold(),
                         old_dec.span,
                         "note".cyan()
@@ -567,7 +588,13 @@ fn typecheck_local_variable_declaration(
             },
         );
     } else {
-        // Automatic storage (no storage class specifier)
+        // Automatic storage (no storage class specifier). A constant initializer is converted at
+        // run time, but its value is known now, so a lossy conversion still gets
+        // -Wconstant-conversion, as for statics. Non-constant initializers are skipped.
+        if let Some(Ok((value, _))) = decl.init.as_ref().map(eval_constant_expr) {
+            let (converted, changed) = convert_to_type(value, &decl.var_type);
+            warn_constant_conversion(changed, &value, &converted, decl.span);
+        }
         symbols.insert(
             decl.name.0.clone(),
             Symbol {
@@ -613,7 +640,11 @@ fn typecheck_file_variable_declaration(
     symbols: &mut SymbolTable,
 ) -> Result<TypedVarDeclaration, SemanticError> {
     let mut initial_value = if let Some(expr) = &decl.init {
-        eval_static_initializer(expr, &decl.var_type, &decl.name, decl.span)?
+        let value = eval_static_initializer(expr, &decl.var_type, &decl.name, decl.span)?;
+        // The value comes from constant evaluation; type-checking the expression too (result
+        // discarded) emits its expression-level warnings, e.g. -Wshift-count-*, as for locals.
+        typecheck_exp(expr.clone(), symbols)?;
+        value
     } else if decl.storage_class == Some(StorageClass::Extern) {
         InitialValue::NoInitializer
     } else {
@@ -736,8 +767,13 @@ fn check_sequence_points(expr: &ParserExpr) {
 }
 
 /// Walks `expr` within the current unsequenced region, recording modifications into `region`.
-/// Sequence-point operators (`&&`, `||`, `?:`, and function-call arguments) start fresh regions
-/// via [`check_sequence_points`]; everything else shares the region with its operands.
+///
+/// `&&`, `||` and `?:` have a sequence point after their first operand, so each operand is walked
+/// in its own region (catching double modifications inside it). The operator as a whole is still
+/// unsequenced relative to its siblings, though: `(j && i++) + i++` modifies `i` twice. So the
+/// operands' modifications are then merged into `region`, as a union first, since `i++ && i++`
+/// itself is fine. Call arguments are unsequenced among themselves *and* relative to the rest of
+/// the enclosing expression (`i++ + f(i++)`), so they share `region` directly.
 fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
     match expr {
         ParserExpr::Assignment(lhs, rhs, span) | ParserExpr::CompoundAssignment(_, lhs, rhs, span) => {
@@ -749,25 +785,17 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
         }
         ParserExpr::Binary(op, lhs, rhs, _) => {
             if matches!(op, BinOp::And | BinOp::Or) {
-                // sequence points
-                check_sequence_points(lhs);
-                check_sequence_points(rhs);
+                walk_sequenced(&[lhs, rhs], region);
             } else {
                 walk_region(lhs, region);
                 walk_region(rhs, region);
             }
         }
         ParserExpr::Unary(_, e, _) | ParserExpr::Cast(_, e) => walk_region(e, region),
-        ParserExpr::Conditional(c, t, f) => {
-            check_sequence_points(c);
-            check_sequence_points(t);
-            check_sequence_points(f);
-        }
+        ParserExpr::Conditional(c, t, f) => walk_sequenced(&[c, t, f], region),
         ParserExpr::FunctionCall(_, args, _) => {
-            // args have no sequence points between them
-            let mut arg_region = HashMap::new();
             for a in args {
-                walk_region(a, &mut arg_region);
+                walk_region(a, region);
             }
         }
         ParserExpr::Var(..) | ParserExpr::Constant(..) => {}
@@ -778,9 +806,29 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
 /// subset). A second modification of the same object in the current region is an unsequenced
 /// double-modification — emit `-Wsequence-point`.
 fn warn_sequence_point(target: &ParserExpr, span: Span, region: &mut HashMap<Rc<str>, Span>) {
-    if let ParserExpr::Var(Identifier(name), _) = target
-        && region.insert(name.clone(), span).is_some()
-    {
+    if let ParserExpr::Var(Identifier(name), _) = target {
+        record_modification(name, span, region);
+    }
+}
+
+/// Walks operands that are separated by sequence points (see [`walk_region`]): each in its own
+/// region, then the union of their modifications is recorded in the enclosing `region`.
+fn walk_sequenced(operands: &[&ParserExpr], region: &mut HashMap<Rc<str>, Span>) {
+    let mut modified: HashMap<Rc<str>, Span> = HashMap::new();
+    for operand in operands {
+        let mut own = HashMap::new();
+        walk_region(operand, &mut own);
+        modified.extend(own);
+    }
+    for (name, span) in modified {
+        record_modification(&name, span, region);
+    }
+}
+
+/// `-Wsequence-point`: records that `name` is modified at `span`, and emits the warning if
+/// `region` already has a modification of it.
+fn record_modification(name: &Rc<str>, span: Span, region: &mut HashMap<Rc<str>, Span>) {
+    if region.insert(name.clone(), span).is_some() {
         eprintln!(
             "{}: {}: '{}' modified more than once between sequence points (undefined in standard C; NCC evaluates left-to-right) {}",
             span,
@@ -881,6 +929,12 @@ fn warn_constant_conversion(changed: bool, from: &StaticInit, to: &StaticInit, s
     }
 }
 
+/// The span to report for `-Wshadow` when a declaration replaced `shadow` in the scope map:
+/// `None` if nothing was shadowed or the shadowed name is a function (gcc doesn't warn then).
+fn shadowed_variable_span(shadow: Option<&VarInfo>) -> Option<Span> {
+    shadow.filter(|s| !s.is_function).map(|s| s.span)
+}
+
 /// `-Wshadow`: a declaration shadows one in an outer scope. `prev` is the shadowed entry's span
 /// (the value returned when inserting into the scope map), or `None` if nothing was shadowed.
 /// Emits the warning plus a note pointing at the previous declaration.
@@ -977,10 +1031,9 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
             let unary_exp = Expr::Unary(op, Box::new(typed_inner));
             match op {
                 UnaryOp::Not => Ok(unary_exp.with_type(Type::Int)),
-                UnaryOp::BitwiseComplement if !inner_type.is_integer() => Err(SemanticError::with_span(
-                    "bitwise complement '~' requires an integer operand".to_string(),
-                    span,
-                )),
+                UnaryOp::BitwiseComplement if !inner_type.is_integer() => {
+                    Err(SemanticError::with_span(COMPLEMENT_DOUBLE_MSG.to_string(), span))
+                }
                 _ => Ok(unary_exp.with_type(inner_type)),
             }
         }
@@ -1017,10 +1070,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                         | BinOp::BitwiseXOr
                 )
             {
-                return Err(SemanticError::with_span(
-                    "bitwise, shift, and remainder operators require integer operands".to_string(),
-                    span,
-                ));
+                return Err(SemanticError::with_span(INTEGER_OPERANDS_MSG.to_string(), span));
             }
             if matches!(op, BinOp::And | BinOp::Or) {
                 let binary_exp = Expr::Binary(op, Box::new(typed_lhs), Box::new(typed_rhs));
@@ -1099,10 +1149,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                         | AssignOp::BitwiseXOr
                 )
             {
-                return Err(SemanticError::with_span(
-                    "bitwise, shift, and remainder operators require integer operands".to_string(),
-                    span,
-                ));
+                return Err(SemanticError::with_span(INTEGER_OPERANDS_MSG.to_string(), span));
             }
             let left_type = typed_lhs.exp_type.clone();
             let op_type = match op {
@@ -1295,7 +1342,7 @@ fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Typ
                 typecheck_function_declaration(fun, symbols)?;
             }
             ParserBlockItem::Statement(stmt) => {
-                let typed_stmt = typecheck_stmt(stmt.stmt, symbols, ret_type)?;
+                let typed_stmt = typecheck_stmt(stmt.stmt, stmt.span, symbols, ret_type)?;
                 typed_items.push(BlockItem::Statement(typed_stmt));
             }
         }
@@ -1308,7 +1355,13 @@ fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Typ
 /// `ret_type` is the enclosing function's return type, used to insert implicit casts
 /// on `return` expressions. Switch statements normalize case values to the controlling
 /// expression's type and check for duplicates.
-fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) -> Result<Stmt, SemanticError> {
+/// `span` is the statement's location, for diagnostics about the statement as a whole.
+fn typecheck_stmt(
+    stmt: ParserStmt,
+    span: Span,
+    symbols: &mut SymbolTable,
+    ret_type: &Type,
+) -> Result<Stmt, SemanticError> {
     match stmt {
         ParserStmt::Return(e1) => {
             let typed_e1 = typecheck_exp(e1, symbols)?;
@@ -1321,9 +1374,9 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
         }
         ParserStmt::If(cond, then_s, else_s) => {
             let typed_cond = typecheck_exp(cond, symbols)?;
-            let converted_then = typecheck_stmt(then_s.stmt, symbols, ret_type)?;
+            let converted_then = typecheck_stmt(then_s.stmt, then_s.span, symbols, ret_type)?;
             let typed_else = (*else_s)
-                .map(|e| typecheck_stmt(e.stmt, symbols, ret_type))
+                .map(|e| typecheck_stmt(e.stmt, e.span, symbols, ret_type))
                 .transpose()?
                 .map(Box::new);
             Ok(Stmt::If(typed_cond, Box::new(converted_then), typed_else))
@@ -1333,11 +1386,11 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
         ParserStmt::Break(lbl) => Ok(Stmt::Break(lbl)),
         ParserStmt::Continue(lbl) => Ok(Stmt::Continue(lbl)),
         ParserStmt::Labeled(lbl, s) => {
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::Labeled(lbl, Box::new(typed_s)))
         }
         ParserStmt::Default(s, lbl) => {
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::Default(Box::new(typed_s), lbl))
         }
         ParserStmt::Compound(block) => {
@@ -1346,12 +1399,12 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
         }
         ParserStmt::While(e, s, lbl) => {
             let typed_e = typecheck_exp(e, symbols)?;
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::While(typed_e, Box::new(typed_s), lbl))
         }
         ParserStmt::DoWhile(s, e, lbl) => {
             let typed_e = typecheck_exp(e, symbols)?;
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::DoWhile(Box::new(typed_s), typed_e, lbl))
         }
         ParserStmt::Switch(e, s, lbl, cases) => {
@@ -1361,10 +1414,10 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
             // The controlling expression must have integer type (C §6.8.4.2). Reject `double` here,
             // before `as_i64` normalizes case values against it (that would otherwise panic).
             if !switch_type.is_integer() {
-                return Err(SemanticError {
-                    message: "switch controlling expression must have integer type".to_string(),
-                    span: None,
-                });
+                return Err(SemanticError::with_span(
+                    "switch controlling expression must have integer type".to_string(),
+                    span,
+                ));
             }
 
             // Normalize cases and check for duplicates
@@ -1389,13 +1442,13 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
                 }
             }
 
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             // Convert Vec to HashSet for output (tacky doesn't need spans)
             let cases_set = cases.iter().map(|(c, _span)| *c).collect();
             Ok(Stmt::Switch(typed_e, Box::new(typed_s), lbl, cases_set))
         }
         ParserStmt::Case(e, s, lbl) => {
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             let typed_e = typecheck_exp(e, symbols)?;
             Ok(Stmt::Case(typed_e, Box::new(typed_s), lbl))
         }
@@ -1419,7 +1472,7 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
             };
             let typed_cond = cond.map(|e| typecheck_exp(e, symbols)).transpose()?;
             let typed_post = post.map(|e| typecheck_exp(e, symbols)).transpose()?;
-            let typed_body = typecheck_stmt(body.stmt, symbols, ret_type)?;
+            let typed_body = typecheck_stmt(body.stmt, body.span, symbols, ret_type)?;
             Ok(Stmt::For(
                 Box::new(typed_init),
                 typed_cond,
@@ -1533,6 +1586,7 @@ fn resolve_fun_decoration(
             renamed: name.clone(),
             span: dec.span,
             ext_link: true,
+            is_function: true,
         },
     );
     if let Some(shadow) = shadow
@@ -1556,8 +1610,10 @@ fn resolve_fun_decoration(
     let mut inner_block_vars = HashSet::new();
     let original_params: Vec<Rc<str>> = dec.params.iter().map(|Identifier(name)| name.clone()).collect();
 
-    for param in &mut dec.params {
-        resolve_param(param, &mut inner_map, name_gen, &mut inner_block_vars, dec.span)?;
+    // A prototype's parameter names are only documentation, so they don't shadow anything.
+    let has_body = dec.body.is_some();
+    for (param, &span) in dec.params.iter_mut().zip(&dec.param_spans) {
+        resolve_param(param, &mut inner_map, name_gen, &mut inner_block_vars, span, has_body)?;
     }
 
     if let Some(block) = &mut dec.body {
@@ -1571,20 +1627,24 @@ fn resolve_fun_decoration(
             used_vars,
         )?;
     }
-    if dec.body.is_some() {
-        for (Identifier(param), org_name) in dec.params.iter().zip(original_params) {
-            warn_unused_parameter(used_vars.contains(param), &org_name, dec.span);
+    if has_body {
+        for ((Identifier(param), org_name), &span) in dec.params.iter().zip(original_params).zip(&dec.param_spans) {
+            warn_unused_parameter(used_vars.contains(param), &org_name, span);
         }
     }
     Ok(())
 }
 
+/// Resolves one function parameter: gives it a unique name in the function's scope (a duplicate
+/// parameter name is an error). In a definition (`has_body`), emits `-Wshadow` if it shadows a
+/// variable; a prototype's parameter names are only documentation, so they never warn.
 fn resolve_param(
     param: &mut Identifier,
     variable_map: &mut HashMap<Rc<str>, VarInfo>,
     name_gen: &mut NameGenerator,
     block_vars: &mut HashSet<Rc<str>>,
     span: Span,
+    has_body: bool,
 ) -> Result<(), SemanticError> {
     let Identifier(name) = param.clone();
 
@@ -1597,9 +1657,12 @@ fn resolve_param(
                 renamed: unique_name.clone(),
                 span,
                 ext_link: false,
+                is_function: false,
             },
         );
-        warn_shadow(&name, span, shadow.map(|s| s.span));
+        if has_body {
+            warn_shadow(&name, span, shadowed_variable_span(shadow.as_ref()));
+        }
         *param = Identifier(unique_name);
         Ok(())
     } else {
@@ -1631,6 +1694,7 @@ fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut Has
             renamed: name.clone(),
             span: dec.span,
             ext_link: true,
+            is_function: false,
         },
     );
 }
@@ -1645,6 +1709,7 @@ fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut Has
 /// **extern**: References an external variable
 /// - Keeps original name (no renaming)
 /// - Marked with `ext_link: true`
+/// - If it hides a local, emits `-Wshadow` and sets `prior_linkage_hidden` (see that field)
 ///
 /// **static or automatic**: Local variable
 /// - Gets a unique renamed identifier (e.g., `x` → `x.1`)
@@ -1677,14 +1742,24 @@ fn resolve_local_var_decoration(
         ));
     }
     if dec.storage_class == Some(StorageClass::Extern) {
-        variable_map.insert(
+        let shadow = variable_map.insert(
             name.clone(),
             VarInfo {
                 renamed: name.clone(),
                 span: dec.span,
                 ext_link: true,
+                is_function: false,
             },
         );
+        // Shadowing a local (no linkage) hides every earlier declaration, so this `extern` can't
+        // inherit a file-scope `static`'s internal linkage. It names a *different* object than
+        // the local, so it also warrants -Wshadow; redeclaring a linked name does not.
+        if let Some(shadow) = shadow
+            && !shadow.ext_link
+        {
+            dec.prior_linkage_hidden = true;
+            warn_shadow(name, dec.span, Some(shadow.span));
+        }
     } else {
         let unique_name = name_gen.next(name);
         dec.name = Identifier(unique_name.clone());
@@ -1694,9 +1769,10 @@ fn resolve_local_var_decoration(
                 renamed: unique_name.clone(),
                 span: dec.span,
                 ext_link: false,
+                is_function: false,
             },
         );
-        warn_shadow(name, dec.span, shadow.map(|s| s.span));
+        warn_shadow(name, dec.span, shadowed_variable_span(shadow.as_ref()));
         if let Some(init_expr) = &mut dec.init {
             check_sequence_points(init_expr);
             resolve_exp(init_expr, variable_map, used_vars)?;
@@ -1926,7 +2002,19 @@ fn convert_to_type(val: StaticInit, target_type: &Type) -> (StaticInit, bool) {
 enum ConstEvalError {
     NotConstant,
     DivByZero,
-    InvalidType,
+    /// An operator applied to a `double` that requires integers; carries the diagnostic.
+    InvalidType(&'static str),
+}
+
+/// Diagnostic for `~` on a `double` (shared by runtime type checking and constant evaluation).
+const COMPLEMENT_DOUBLE_MSG: &str = "bitwise complement '~' requires an integer operand";
+/// Diagnostic for `%`, `&`, `|`, `^`, `<<`, `>>` with a `double` operand (shared likewise).
+const INTEGER_OPERANDS_MSG: &str = "bitwise, shift, and remainder operators require integer operands";
+
+/// The name as written in the source: the resolve pass renames locals to `name.N`, and `.`
+/// can't appear in a C identifier, so everything from the first `.` on is the suffix.
+fn source_name(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
 }
 
 /// Evaluate a static / file-scope initializer to its `InitialValue`, mapping the
@@ -1954,14 +2042,11 @@ fn eval_static_initializer(
         Err(ConstEvalError::NotConstant) => Err(SemanticError::with_span(
             format!(
                 "initializer for static variable '{}' is not a constant expression",
-                name.0.bold()
+                source_name(&name.0).bold()
             ),
             span,
         )),
-        Err(ConstEvalError::InvalidType) => Err(SemanticError::with_span(
-            format!("cannot take bitwise complement of a {} value", "'double'".bold()),
-            span,
-        )),
+        Err(ConstEvalError::InvalidType(msg)) => Err(SemanticError::with_span(msg.to_string(), span)),
     }
 }
 
@@ -2006,7 +2091,7 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
                         StaticInit::LongInit(n) => StaticInit::LongInit(!n),
                         StaticInit::ULongInit(n) => StaticInit::ULongInit(!n),
                         StaticInit::UIntInit(n) => StaticInit::UIntInit(!n),
-                        StaticInit::DoubleInit(_) => return Err(ConstEvalError::InvalidType),
+                        StaticInit::DoubleInit(_) => return Err(ConstEvalError::InvalidType(COMPLEMENT_DOUBLE_MSG)),
                     },
                     false,
                 ),
@@ -2030,7 +2115,7 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
                         | BinOp::BitwiseRightShift
                 )
             {
-                return Err(ConstEvalError::InvalidType);
+                return Err(ConstEvalError::InvalidType(INTEGER_OPERANDS_MSG));
             }
             let base = lo | ro;
             let (v, op_ovf) = match op {
@@ -2264,11 +2349,8 @@ fn label_statement(stmt: &mut SpannedStmt, label_tracker: &mut LabelTracker) -> 
                         stmt.span,
                     ));
                 }
-                Err(ConstEvalError::InvalidType) => {
-                    return Err(SemanticError::with_span(
-                        format!("cannot take bitwise complement of a {} value", "'double'".bold()),
-                        stmt.span,
-                    ));
+                Err(ConstEvalError::InvalidType(msg)) => {
+                    return Err(SemanticError::with_span(msg.to_string(), stmt.span));
                 }
             };
             *label = label_tracker.get_switch_case(value, &stmt.span)?;

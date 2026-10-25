@@ -1177,6 +1177,113 @@ fn test_switch_unreachable() {
     for file in files {
         test_warning(file, "-Wswitch-unreachable")
     }
+
+    // One warning per switch with dead code before its first label, none when it's reachable
+    for (file, expected) in [
+        ("tests/c_programs/warnings/switch_unreachable.c", 5),
+        ("tests/c_programs/warnings/no_switch_unreachable.c", 0),
+    ] {
+        let stderr = validate_stderr(file);
+        assert_eq!(
+            stderr.matches("-Wswitch-unreachable").count(),
+            expected,
+            "{file}: expected {expected} -Wswitch-unreachable warnings, stderr was: {stderr}"
+        );
+    }
+}
+
+/// Runs `ncc <file> --validate` and returns stderr with ANSI color codes removed.
+fn validate_stderr(file: &str) -> String {
+    let output = std::process::Command::new(get_ncc_binary_path())
+        .arg(file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+    strip_ansi(&String::from_utf8_lossy(&output.stderr))
+}
+
+/// Removes ANSI escape sequences (`ESC [ ... m`) so diagnostics can be matched as plain text.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            chars.by_ref().find(|&c| c == 'm');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn test_wshadow_cases() {
+    // gcc-compatible -Wshadow: silent for prototype parameters and for names shadowing a function
+    let stderr = validate_stderr("tests/c_programs/warnings/no_shadow.c");
+    assert!(
+        !stderr.contains("-Wshadow"),
+        "expected no -Wshadow, stderr was: {stderr}"
+    );
+
+    // a block-scope extern hiding a local is a different object: exactly one warning, at the extern
+    let stderr = validate_stderr("tests/c_programs/warnings/shadow_extern.c");
+    assert_eq!(stderr.matches("-Wshadow").count(), 1, "stderr was: {stderr}");
+    assert!(
+        stderr.contains("shadow_extern.c:6:"),
+        "expected the warning at the extern on line 6, stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn test_warnings_outside_function_bodies() {
+    // -Wshift-count-overflow in a file-scope initializer (only constant-folded, never run)
+    let stderr = validate_stderr("tests/c_programs/warnings/shift_count_file_scope.c");
+    assert!(stderr.contains("-Wshift-count-overflow"), "stderr was: {stderr}");
+
+    // -Wconstant-conversion on an automatic local with a constant initializer
+    let stderr = validate_stderr("tests/c_programs/warnings/constant_conversion_local.c");
+    assert!(stderr.contains("-Wconstant-conversion"), "stderr was: {stderr}");
+}
+
+#[test]
+fn test_semantic_error_messages() {
+    // (file, text the error must contain, text it must not contain)
+    let cases = [
+        (
+            "tests/c_programs/types/invalid_semantics/const_remainder_double.c",
+            "remainder operators require integer operands",
+            "complement",
+        ),
+        (
+            "tests/c_programs/static_vars/invalid_semantics/static_init_not_constant.c",
+            "static variable 'b' is not a constant expression",
+            "b.",
+        ),
+        (
+            "tests/c_programs/declaration/invalid_semantics/extern_conflicting_types.c",
+            "conflicting types",
+            "different kind of symbol",
+        ),
+        (
+            "tests/c_programs/declaration/invalid_semantics/extern_hides_static.c",
+            "both external and internal linkage",
+            "\0",
+        ),
+        (
+            // the error carries a location (it used to have none)
+            "writing-a-c-compiler-tests/tests/chapter_13/invalid_types/extra_credit/switch_on_double.c",
+            "switch_on_double.c:",
+            "\0",
+        ),
+    ];
+    for (file, must, must_not) in cases {
+        let stderr = validate_stderr(file);
+        assert!(stderr.contains(must), "{file}: expected `{must}`, stderr was: {stderr}");
+        assert!(
+            !stderr.contains(must_not),
+            "{file}: unexpected `{must_not}`, stderr was: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -1209,6 +1316,13 @@ fn test_unused_parameter_warning() {
     assert!(
         !stderr_output.contains("unused parameter 'x'"),
         "Should not warn about parameter 'x' which is used, but stderr was: {}",
+        stderr_output
+    );
+
+    // The warning points at the parameter itself (`y` is at 1:20), not at the function
+    assert!(
+        strip_ansi(&stderr_output).contains("unused_parameter.c:1:20: warning: unused parameter 'y'"),
+        "Warning should point at parameter 'y' (1:20), but stderr was: {}",
         stderr_output
     );
 
@@ -1519,9 +1633,12 @@ fn test_sequence_point_warning() {
         .expect("Failed to execute ncc");
 
     let stderr_output = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr_output.contains("-Wsequence-point"),
-        "Expected -Wsequence-point warning, but stderr was: {}",
+    // 3 basic cases plus 4 where a sequenced operator or a call argument conflicts with a
+    // modification elsewhere in the same expression: each must warn exactly once.
+    assert_eq!(
+        stderr_output.matches("-Wsequence-point").count(),
+        7,
+        "Expected 7 -Wsequence-point warnings, but stderr was: {}",
         stderr_output
     );
 

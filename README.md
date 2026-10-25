@@ -245,7 +245,7 @@ The compiler currently implements a subset of C with the following grammar:
          | "==" | "!=" | "<" | "<=" | ">" | ">="
 <assign-op> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
 <identifier> ::= ? An identifier token ?
-<int> ::= ? An integer constant token ?
+<int> ::= ? An integer constant token: decimal, or octal with a leading 0 (e.g. 017) ?
 <long> ::= ? A long integer constant token (suffix 'l' or 'L') ?
 <uint> ::= ? An unsigned int constant token (suffix 'u' or 'U') ?
 <ulong> ::= ? An unsigned long constant token (suffix combining 'u'/'U' and 'l'/'L') ?
@@ -298,6 +298,13 @@ The compiler supports:
     - `goto` and labeled statements
     - `return` statements
 - **Expression statements** and **null statements**
+- **Integer literals**: decimal and octal (a leading `0`, e.g. `0755`), with `u`/`l` suffixes. Each literal takes the
+  first type that holds its value, per C11 6.4.4.1: decimal goes `int` → `long`, while octal can also become
+  unsigned (`int` → `unsigned int` → `long` → `unsigned long`), so `037777777777` is an `unsigned int`. Hexadecimal
+  is not supported yet
+- **Line splicing**: a backslash at the end of a line joins it with the next before tokenizing, anywhere in the source
+  (inside tokens and `//` comments too). There is no preprocessor: a line whose first non-blank character is `#` is
+  skipped, along with any lines spliced onto it
 
 ### Safer C
 
@@ -334,10 +341,14 @@ NCC provides several safety features and guarantees to help developers write mor
 
 #### Compile-Time Warnings
 
-- **Variable shadowing** (`-Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer
-  scope
-- **Unreachable switch code** (`-Wswitch-unreachable`): Warns about statements before the first `case` label in a
-  switch, which can never be executed
+- **Variable shadowing** (`-Wshadow`): Warns when a variable or parameter declaration shadows a variable in an outer
+  scope, including a block-scope `extern` that hides a local. Like gcc, it stays silent for prototype parameter
+  names and for variables that shadow a function
+- **Unreachable switch code** (`-Wswitch-unreachable`): Warns about code before the first label in a switch body,
+  which can never be executed: a statement, an initialized declaration, or the first part of a construct that runs
+  before any label inside it (an `if` condition, a `for` initializer, a nested switch's controlling expression).
+  Empty statements, uninitialized declarations, labeled statements, and loops entered through a `case` inside them
+  are reachable or harmless, and don't warn (matching gcc)
 - **Unused parameters** (`-Wunused-parameter`): Warns when a function parameter is declared but never used in the
   function body
 - **Division by zero** (`-Wdiv-by-zero`): Warns when `/` or `%`, including the compound forms `/=` and `%=`, has
@@ -350,12 +361,13 @@ NCC provides several safety features and guarantees to help developers write mor
   static initializer or case label overflows the result type (e.g. `int x = 2147483647 + 1;`). NCC wraps
   deterministically (two's complement) rather than treating it as undefined, so this flags non-portable code instead of
   erroring. Unsigned wraparound is well-defined and is *not* warned (matching gcc/clang)
-- **Constant changed by an implicit conversion** (`-Wconstant-conversion`): Warns when a constant initializer is
-  implicitly narrowed to a type that can't hold it (e.g. `int x = 2147483648;`, which truncates to `-2147483648`).
-  An explicit cast (`int x = (int)2147483648;`) silences it
+- **Constant changed by an implicit conversion** (`-Wconstant-conversion`): Warns when a constant initializer (of a
+  static, file-scope, or automatic variable) is implicitly narrowed to a type that can't hold it (e.g.
+  `int x = 2147483648;`, which truncates to `-2147483648`). An explicit cast (`int x = (int)2147483648;`) silences it
 - **Unsequenced modification** (`-Wsequence-point`): Warns when the same object is modified more than once between
-  sequence points (e.g. `i = i++`, `i++ + i++`, `f(i++, i++)`) — undefined in standard C. NCC evaluates left-to-right
-  so the result is well-defined, but the code is non-portable
+  sequence points (e.g. `i = i++`, `i++ + i++`, `f(i++, i++)`, `i++ + f(i++)`) — undefined in standard C. `&&`, `||`
+  and `?:` sequence their own operands, but not against the rest of the expression, so `(j && i++) + i++` also warns.
+  NCC evaluates left-to-right so the result is well-defined, but the code is non-portable
 
 #### Developer Experience
 

@@ -359,12 +359,18 @@ pub struct VarDeclaration {
     pub var_type: Type,
     pub storage_class: Option<StorageClass>,
     pub span: Span,
+    /// Set by the resolve pass on a block-scope `extern` declared while a local variable hides
+    /// every earlier declaration of the name. Such an `extern` can't inherit internal linkage
+    /// from a file-scope `static` (C11 6.2.2p4), so the type checker must reject that pairing.
+    pub prior_linkage_hidden: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct FunDeclaration {
     pub name: Identifier,
     pub params: Vec<Identifier>,
+    /// Source location of each parameter's name, parallel to `params` (for diagnostics).
+    pub param_spans: Vec<Span>,
     pub body: Option<Block>,
     pub fun_type: Type,
     pub storage_class: Option<StorageClass>,
@@ -486,12 +492,18 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
 
 /// Parses a numeric literal token into a constant expression.
 ///
-/// Integer suffixes each follow their own promotion ladder, trying the narrowest type first and
-/// widening on overflow — `u`-suffixed literals stay unsigned, the rest stay signed:
-/// - `ConstantInt` (no suffix): `i32`, then `i64`.
-/// - `ConstantUnsignedInt` (`u`): `u32`, then `u64`.
-/// - `ConstantLong` (`l`): `i64`.
-/// - `ConstantUnsignedLong` (`ul`): `u64`.
+/// An integer literal takes the first type in its ladder that can hold its value (C11 6.4.4.1).
+/// Decimal literals stay signed unless suffixed `u`; octal literals (a leading `0`, e.g. `017`)
+/// may also become unsigned, so a value that only fits the unsigned type keeps its bit pattern:
+///
+/// | suffix | decimal          | octal                                  |
+/// |--------|------------------|----------------------------------------|
+/// | none   | `int`, `long`    | `int`, `unsigned int`, `long`, `unsigned long` |
+/// | `u`    | `unsigned int`, `unsigned long` | same                    |
+/// | `l`    | `long`           | `long`, `unsigned long`                |
+/// | `ul`   | `unsigned long`  | same                                   |
+///
+/// A decimal lexeme may carry a leading `-` folded in by `parse_factor` (see there).
 ///
 /// `ConstantDouble` parses to `f64`, which never fails on magnitude (out-of-range values round to
 /// infinity or zero); the lexer regex guarantees the lexeme is well-formed. `warn_overflow` reports
@@ -499,50 +511,53 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
 ///
 /// Returns an error only if an integer value doesn't fit the widest type in its ladder (64 bits).
 fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
-    match &token.token {
-        Token::ConstantInt(value_str) => match value_str.parse::<i32>() {
-            Ok(val) => Ok(Expr::Constant(Const::ConstInt(val))),
-            Err(_) => parse_constant(&SpannedToken {
-                token: Token::ConstantLong(value_str.clone()),
-                span: token.span,
-            }),
-        },
-        Token::ConstantUnsignedInt(value_str) => match value_str.parse::<u32>() {
-            Ok(val) => Ok(Expr::Constant(Const::ConstUInt(val))),
-            Err(_) => parse_constant(&SpannedToken {
-                token: Token::ConstantUnsignedLong(value_str.clone()),
-                span: token.span,
-            }),
-        },
-        Token::ConstantLong(value_str) => match value_str.parse::<i64>() {
-            Ok(val) => Ok(Expr::Constant(Const::ConstLong(val))),
-            Err(_) => Err(SyntaxError::with_span(
-                format!(
-                    "Integer constant '{}' does not fit in 64-bit signed int",
-                    value_str.bold()
-                ),
-                Some(token.span),
-            )),
-        },
-        Token::ConstantUnsignedLong(value_str) => match value_str.parse::<u64>() {
-            Ok(val) => Ok(Expr::Constant(Const::ConstULong(val))),
-            Err(_) => Err(SyntaxError::with_span(
-                format!(
-                    "Integer constant '{}' does not fit in 64-bit unsigned int",
-                    value_str.bold()
-                ),
-                Some(token.span),
-            )),
-        },
+    use Const::*;
+    // Each candidate converts the value if it fits that type.
+    type Candidate = fn(i128) -> Option<Const>;
+    let int: Candidate = |v| i32::try_from(v).ok().map(ConstInt);
+    let uint: Candidate = |v| u32::try_from(v).ok().map(ConstUInt);
+    let long: Candidate = |v| i64::try_from(v).ok().map(ConstLong);
+    let ulong: Candidate = |v| u64::try_from(v).ok().map(ConstULong);
+
+    let (value_str, ladder): (&String, &[Candidate]) = match &token.token {
+        Token::ConstantInt(v) if is_octal_literal(v) => (v, &[int, uint, long, ulong]),
+        Token::ConstantInt(v) => (v, &[int, long]),
+        Token::ConstantUnsignedInt(v) => (v, &[uint, ulong]),
+        Token::ConstantLong(v) if is_octal_literal(v) => (v, &[long, ulong]),
+        Token::ConstantLong(v) => (v, &[long]),
+        Token::ConstantUnsignedLong(v) => (v, &[ulong]),
         Token::ConstantDouble(value_str) => {
             let val = value_str
                 .parse::<f64>()
                 .expect("lexer regex guarantees a valid float literal");
             warn_overflow(val, value_str, token.span);
-            Ok(Expr::Constant(Const::ConstDouble(val)))
+            return Ok(Expr::Constant(Const::ConstDouble(val)));
         }
         _ => unreachable!(),
+    };
+
+    let (negative, digits) = match value_str.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value_str.as_str()),
+    };
+    let radix = if is_octal_literal(digits) { 8 } else { 10 };
+    // i128 holds every 64-bit magnitude; anything that doesn't parse is too big for any type.
+    let value = i128::from_str_radix(digits, radix)
+        .ok()
+        .map(|v| if negative { -v } else { v });
+    match value.and_then(|v| ladder.iter().find_map(|fits| fits(v))) {
+        Some(c) => Ok(Expr::Constant(c)),
+        None => Err(SyntaxError::with_span(
+            format!("Integer constant '{}' is too large for its type", value_str.bold()),
+            Some(token.span),
+        )),
     }
+}
+
+/// True for an octal integer lexeme: a leading `0` followed by more digits (`0` alone is decimal,
+/// though the two readings agree). The lexer has already rejected the digits 8 and 9 in these.
+fn is_octal_literal(digits: &str) -> bool {
+    digits.len() > 1 && digits.starts_with('0')
 }
 
 /// True if `t` is a type-specifier keyword (`int`, `long`, `signed`, `unsigned`, `double`).
@@ -599,16 +614,24 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 // harmless whenever it keeps C's type for `-literal` (the type of the magnitude).
                 // The exception is 2147483648: C types it `long`, so `-2147483648` is a `long`,
                 // but folded it would fit `int`. Leave that one as a negation.
+                // Octal literals are never folded: their ladder includes unsigned types, so
+                // `-literal` can't in general be re-typed from the negated value.
                 let is_int_min_magnitude = matches!(
                     tokens.get(1),
                     Some(SpannedToken { token: Token::ConstantInt(v), .. })
                         if v.parse::<i32>().is_err() && format!("-{v}").parse::<i32>().is_ok()
+                );
+                let is_octal = matches!(
+                    tokens.get(1),
+                    Some(SpannedToken { token: Token::ConstantInt(v) | Token::ConstantLong(v), .. })
+                        if is_octal_literal(v)
                 );
                 if let Some(SpannedToken {
                     token: Token::ConstantInt(value_str) | Token::ConstantLong(value_str),
                     span: _,
                 }) = tokens.get_mut(1)
                     && !is_int_min_magnitude
+                    && !is_octal
                 {
                     *value_str = format!("-{value_str}");
                     tokens.pop_front();
@@ -1055,7 +1078,7 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
             expect(&Token::CloseParen, tokens)?;
             let stmt = parse_statement(tokens)?;
             // check for stmt before first case
-            warn_switch_unreachable(&stmt);
+            check_switch_unreachable(&stmt);
             Ok(SpannedStmt {
                 stmt: Stmt::Switch(exp, Box::from(stmt), 0, Vec::new()),
                 span,
@@ -1072,23 +1095,85 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
     }
 }
 
-/// `-Wswitch-unreachable`: a statement before the first `case`/`default` label, which can never be
-/// executed. Recurses into a leading compound block to find the first real statement.
-fn warn_switch_unreachable(stmt: &SpannedStmt) {
+/// `-Wswitch-unreachable`: code between `switch (...)` and the first label in its body can never
+/// run. Emits the warning at the first such statement (or initialized declaration), matching gcc:
+/// - empty statements and declarations without an initializer are skipped (they do nothing);
+/// - a leading `{ ... }` is searched in order, item by item;
+/// - a labeled statement (`case`/`default`, or a `goto` target) is reachable;
+/// - a `while`/`do`/`for (;...)` loop with a label inside is reachable: jumping to the label
+///   skips nothing (the condition runs after the body);
+/// - but an `if` condition, a `for` initializer, or a nested `switch`'s controlling expression
+///   always runs first, so it's unreachable even when a label sits inside.
+fn check_switch_unreachable(body: &SpannedStmt) {
+    first_unreachable(body);
+}
+
+/// Scans `stmt` in execution order for the first item that does something; emits
+/// `-Wswitch-unreachable` if that item can't be reached. Returns true once the scan is decided (a
+/// warning was emitted, or a reachable label was found); false if everything so far was skippable
+/// and the caller should keep looking at the following items.
+fn first_unreachable(stmt: &SpannedStmt) -> bool {
+    let has_for_init = |init: &ForInit| match init {
+        ForInit::InitDecl(decl) => decl.init.is_some(),
+        ForInit::InitExp(exp) => exp.is_some(),
+    };
     match &stmt.stmt {
-        Stmt::Case(..) | Stmt::Default(..) | Stmt::Null => {}
-        Stmt::Compound(block) => {
-            if let Some(BlockItem::Statement(s)) = block.first() {
-                warn_switch_unreachable(s)
+        Stmt::Null => false,
+        Stmt::Compound(block) => block.iter().any(|item| match item {
+            BlockItem::Statement(s) => first_unreachable(s),
+            BlockItem::Declaration(Declaration::VarDeclaration(VarDeclaration {
+                init: Some(_), span, ..
+            })) => {
+                warn_switch_unreachable(*span);
+                true
             }
+            BlockItem::Declaration(_) => false,
+        }),
+        Stmt::Labeled(..) | Stmt::Case(..) | Stmt::Default(..) => true,
+        Stmt::While(..) | Stmt::DoWhile(..) if contains_label(stmt, false) => true,
+        Stmt::For(init, ..) if !has_for_init(init) && contains_label(stmt, false) => true,
+        _ => {
+            warn_switch_unreachable(stmt.span);
+            true
         }
-        _ => eprintln!(
-            "{}: {}: statement will never be executed {}",
-            stmt.span,
-            "warning".purple(),
-            "[-Wswitch-unreachable]".purple()
-        ),
     }
+}
+
+/// True if `stmt` contains a label that control can jump to from outside it: any `goto` label, or
+/// a `case`/`default` that belongs to the enclosing switch (`in_nested_switch` excludes the ones
+/// owned by a switch nested inside `stmt`).
+fn contains_label(stmt: &SpannedStmt, in_nested_switch: bool) -> bool {
+    match &stmt.stmt {
+        Stmt::Labeled(..) => true,
+        Stmt::Case(..) | Stmt::Default(..) if !in_nested_switch => true,
+        Stmt::Case(_, s, _) | Stmt::Default(s, _) => contains_label(s, in_nested_switch),
+        Stmt::Switch(_, s, _, _) => contains_label(s, true),
+        Stmt::If(_, then_s, else_s) => {
+            contains_label(then_s, in_nested_switch)
+                || else_s
+                    .as_ref()
+                    .as_ref()
+                    .is_some_and(|e| contains_label(e, in_nested_switch))
+        }
+        Stmt::While(_, s, _) | Stmt::DoWhile(s, _, _) | Stmt::For(_, _, _, s, _) => contains_label(s, in_nested_switch),
+        Stmt::Compound(block) => block.iter().any(|item| match item {
+            BlockItem::Statement(s) => contains_label(s, in_nested_switch),
+            BlockItem::Declaration(_) => false,
+        }),
+        Stmt::Return(_) | Stmt::Expression(_) | Stmt::Goto(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Null => {
+            false
+        }
+    }
+}
+
+/// `-Wswitch-unreachable`: the code at `span` comes before every label in a switch body.
+fn warn_switch_unreachable(span: Span) {
+    eprintln!(
+        "{}: {}: statement will never be executed {}",
+        span,
+        "warning".purple(),
+        "[-Wswitch-unreachable]".purple()
+    );
 }
 
 /// `-Woverflow`: a floating-point literal that can't be represented in `double`. C makes an
@@ -1173,7 +1258,7 @@ fn parse_declaration(
         if tokens.front().map(|t| &t.token) == Some(&Token::OpenParen) {
             // function declaration
             tokens.pop_front();
-            let (params, types) = parse_function_params(tokens, &Some(span))?;
+            let (params, param_spans, types) = parse_function_params(tokens, &Some(span))?;
 
             let body = parse_function_body(tokens)?;
             let defined = body.is_some();
@@ -1181,6 +1266,7 @@ fn parse_declaration(
             Ok(Some(Declaration::FunDeclaration(FunDeclaration {
                 name,
                 params,
+                param_spans,
                 body,
                 fun_type: Type::FunType {
                     params: types,
@@ -1203,6 +1289,7 @@ fn parse_declaration(
                 var_type: type_class,
                 storage_class,
                 span,
+                prior_linkage_hidden: false,
             })))
         }
     } else {
@@ -1255,15 +1342,19 @@ fn parse_arg_comma(tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxErro
     }
 }
 
+/// Parameter names, their spans, and their types, as parallel vecs.
+type ParamList = (Vec<Identifier>, Vec<Span>, Vec<Type>);
+
 /// Parses a function's parameter list (after the opening parenthesis).
 ///
 /// Handles `void` for no parameters, or a comma-separated list of typed parameters.
-/// Consumes the closing `)`. Returns parallel vecs of parameter names and their types.
+/// Consumes the closing `)`. Returns parallel vecs of parameter names, their spans, and their types.
 fn parse_function_params(
     tokens: &mut VecDeque<SpannedToken>,
     err_span: &Option<Span>,
-) -> Result<(Vec<Identifier>, Vec<Type>), SyntaxError> {
+) -> Result<ParamList, SyntaxError> {
     let mut params = vec![];
+    let mut spans = vec![];
     let mut types = vec![];
     if let Some(front) = tokens.front().cloned() {
         if front.token == Token::VoidKeyword {
@@ -1285,13 +1376,14 @@ fn parse_function_params(
                     ));
                 }
                 types.push(parse_type(&type_tokens, &err_span)?);
-                let (name, _span) = parse_identifier(tokens)?;
+                let (name, span) = parse_identifier(tokens)?;
                 params.push(name.clone());
+                spans.push(span);
                 parse_arg_comma(tokens)?;
             }
         }
         expect(&Token::CloseParen, tokens)?;
-        Ok((params, types))
+        Ok((params, spans, types))
     } else {
         Err(SyntaxError::with_span(
             "EOF when parsing function parameters".to_string(),

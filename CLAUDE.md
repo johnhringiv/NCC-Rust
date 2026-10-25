@@ -93,7 +93,7 @@ Source .c → Lexer → Parser → Validator → Tackifier → Codegen → Emitt
 
 ### Core Passes (src/)
 
-**Lexer** (`lexer.rs`): Tokenizes source using regex patterns with maximal munch. Each token carries a `Span` (file, line, column) for error reporting. Exit code 10 on error.
+**Lexer** (`lexer.rs`): Joins backslash-newline line splices first, then tokenizes using regex patterns with maximal munch. Each token carries a `Span` (file, line, column) for error reporting. Exit code 10 on error.
 
 **Parser** (`parser.rs`): Recursive descent parser with precedence climbing. Builds an abstract AST representing C syntax. No semantic analysis yet—identifiers are just strings, types are not checked. Exit code 20 on error.
 

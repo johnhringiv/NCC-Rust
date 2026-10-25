@@ -143,5 +143,11 @@
   },
   "double_negation_mask.c": {
     "return_code": 5
+  },
+  "lexer/octal_literals.c": {
+    "return_code": 10
+  },
+  "lexer/line_splice.c": {
+    "return_code": 21
   }
 }
