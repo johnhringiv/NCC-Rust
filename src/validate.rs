@@ -1834,7 +1834,8 @@ enum Wide {
 // truncated value is already in range. So: explicit range/NaN check returning the indefinite value
 // on failure, and plain `as` (which truncates toward zero, matching cvttsd2si) on success.
 //
-// `double_to_u32`/`u64` build on the signed path because `cvttsd2si` is signed-only (see each fn).
+// `double_to_u64` builds on the signed path because `cvttsd2si` is signed-only; `double_to_u32`
+// range-checks directly, mirroring the runtime lowering (invalid -> 0, the unsigned "indefinite").
 fn double_to_i32(d: f64) -> i32 {
     // cvttsd2si: valid iff trunc(d) fits in i32; NaN/inf/overflow -> indefinite (INT_MIN)
     if d.is_nan() || d < i32::MIN as f64 || d >= 2147483648.0
@@ -1868,8 +1869,15 @@ fn double_to_u64(d: f64) -> u64 {
 }
 
 fn double_to_u32(d: f64) -> u32 {
-    // u32's full range fits in i64, so convert via the signed 64-bit path and truncate.
-    double_to_i64(d) as u32
+    // valid iff trunc(d) fits in u32; NaN/inf/overflow -> unsigned "indefinite" = 0 (u32 MIN),
+    // mirroring the runtime lowering's range check. Note (-1.0, 0.0) truncates to 0 and is valid.
+    if d.is_nan() || d <= -1.0 || d >= 4294967296.0
+    /* 2^32 */
+    {
+        0
+    } else {
+        d as u32 // in range: truncates toward zero, matches cvttsd2si
+    }
 }
 
 /// Casts a normalized value (`i64`/`u64`) to each target type, yielding `(result, out_of_range)`

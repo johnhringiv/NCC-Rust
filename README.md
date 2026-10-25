@@ -306,8 +306,10 @@ NCC provides several safety features and guarantees to help developers write mor
 #### Guaranteed Behaviors
 
 - **Deterministic integer overflow**: Signed integer arithmetic uses two's complement wrapping (`int`: 32-bit,
-  `long`: 64-bit) instead of being undefined — e.g. `INT_MAX + 1` reliably wraps to `INT_MIN`. Unsigned arithmetic
-  (`unsigned int`, `unsigned long`) already wraps modulo 2^N per the C standard.
+  `long`: 64-bit) instead of being undefined — e.g. `INT_MAX + 1` reliably wraps to `INT_MIN`. This includes
+  division overflow: `INT_MIN / -1` wraps to `INT_MIN` (and `INT_MIN % -1` is `0`) rather than trapping with
+  SIGFPE as x86 `idiv` natively would. Unsigned arithmetic (`unsigned int`, `unsigned long`) already wraps
+  modulo 2^N per the C standard.
 - **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from
   evaluation order.
 - **Type conversions**: Narrowing (e.g. `long` to `int`) truncates to the lower 32 bits using two's complement
