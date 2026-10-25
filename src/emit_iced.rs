@@ -447,12 +447,17 @@ fn emit_object_with_labels(
     // compiled objects, which a whole-program compiler essentially never produces.
     let rodata = obj.section_id(StandardSection::ReadOnlyData);
     for codegen::StaticConstant { name, init, alignment } in &program.static_constants {
-        let bytes = init.to_le_bytes();
+        let mut bytes = init.to_le_bytes();
+        // A 16-aligned constant is the `xorps` sign-flip mask, and `xorps m128` reads 16 bytes.
+        // Pad it with a zero upper lane (as gcc does) so the read never runs past the entry,
+        // which matters when it is the last thing in `.rodata` (the pool sorts by bit pattern,
+        // so `-0.0` = 0x8000... usually is).
+        bytes.resize(*alignment.max(&8) as usize, 0);
         let offset = obj.append_section_data(rodata, &bytes, *alignment);
         let sym_id = obj.add_symbol(Symbol {
             name: name.as_bytes().to_vec(),
             value: offset,
-            size: 8,
+            size: bytes.len() as u64,
             kind: SymbolKind::Data,
             scope: SymbolScope::Compilation,
             weak: false,

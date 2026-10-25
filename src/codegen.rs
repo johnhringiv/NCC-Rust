@@ -1308,47 +1308,50 @@ struct StackMapping<'a> {
     /// Names of variables that should use Data operands (RIP-relative addressing).
     /// Includes both static variables defined in this file and extern variables.
     data_vars: &'a HashSet<Rc<str>>,
+    /// Source of each pseudo's type, which decides its slot size.
+    symbols: &'a BackendSymbolTable,
 }
 
 impl<'a> StackMapping<'a> {
-    fn from_data_vars(data_vars: &'a HashSet<Rc<str>>) -> Self {
+    fn new(data_vars: &'a HashSet<Rc<str>>, symbols: &'a BackendSymbolTable) -> Self {
         StackMapping {
             stack_mapping: HashMap::new(),
             offset: 0,
             data_vars,
+            symbols,
         }
     }
 
     /// Returns the stack operand for a pseudo-register, allocating a new slot if needed.
     ///
-    /// Stack grows downward: each new allocation decrements the offset by the type's size.
-    fn get_stack_location(&mut self, pseudo: &str, asm_type: AssemblyType) -> Operand {
-        let offset_option = self.stack_mapping.get(pseudo);
-        let offset = match offset_option {
-            Some(offset) => offset,
+    /// Stack grows downward: each new allocation decrements the offset by the size of the
+    /// pseudo's *declared type*. Sizing from the type (not from the width of whichever
+    /// instruction touches the pseudo first) matters: narrowing reads (`Truncate`) and shift
+    /// counts touch an operand at a different width than its type, and a slot sized from
+    /// them would be too small, so later full-width writes would clobber the neighbouring slot.
+    fn get_stack_location(&mut self, pseudo: &str) -> Operand {
+        let offset = match self.stack_mapping.get(pseudo) {
+            Some(offset) => *offset,
             None => {
-                self.offset -= asm_type.size() as i32;
+                self.offset -= self.symbols.get_obj_type(pseudo).size() as i32;
                 self.stack_mapping.insert(Rc::from(pseudo), self.offset);
-                &self.offset
+                self.offset
             }
         };
-        Operand::Stack(*offset)
+        Operand::Stack(offset)
     }
 
     /// Replaces pseudo-register operands with their actual locations.
     ///
     /// Static/extern variables become `Data` operands (RIP-relative addressing).
     /// Local variables become `Stack` operands (RBP-relative addressing).
-    fn replace_pseudo(&mut self, operand: &Operand, asm_type: AssemblyType) -> Operand {
-        match operand {
-            Operand::Pseudo(pseudo) => {
-                if self.data_vars.contains(pseudo) {
-                    Operand::Data(pseudo.clone())
-                } else {
-                    self.get_stack_location(pseudo, asm_type)
-                }
-            }
-            _ => operand.clone(),
+    fn replace_pseudo(&mut self, operand: &mut Operand) {
+        if let Operand::Pseudo(pseudo) = operand {
+            *operand = if self.data_vars.contains(pseudo) {
+                Operand::Data(pseudo.clone())
+            } else {
+                self.get_stack_location(pseudo)
+            };
         }
     }
 }
@@ -1364,41 +1367,25 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
 
     let mut offsets = HashMap::new();
     for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {
-        let mut stack_mapping = StackMapping::from_data_vars(&data_vars);
+        let mut stack_mapping = StackMapping::new(&data_vars, symbols);
 
         for ins in body.iter_mut() {
             match ins {
-                Instruction::Mov { src, dst, size } | Instruction::Binary { op: _, src, dst, size } => {
-                    *src = stack_mapping.replace_pseudo(src, *size);
-                    *dst = stack_mapping.replace_pseudo(dst, *size);
+                Instruction::Mov { src, dst, .. }
+                | Instruction::Binary { src, dst, .. }
+                | Instruction::Cvttsd2si { src, dst, .. }
+                | Instruction::Cvtsi2sd { src, dst, .. }
+                | Instruction::Movsx { src, dst }
+                | Instruction::MovZeroExtend { src, dst }
+                | Instruction::Cmp { v1: src, v2: dst, .. } => {
+                    stack_mapping.replace_pseudo(src);
+                    stack_mapping.replace_pseudo(dst);
                 }
-                Instruction::Cvttsd2si { src, dst, size } => {
-                    *src = stack_mapping.replace_pseudo(src, AssemblyType::Double); // src is double
-                    *dst = stack_mapping.replace_pseudo(dst, *size); // dst is integer
-                }
-                Instruction::Cvtsi2sd { src, dst, size } => {
-                    *src = stack_mapping.replace_pseudo(src, *size); // src is integer
-                    *dst = stack_mapping.replace_pseudo(dst, AssemblyType::Double); // dst is double
-                }
-                Instruction::Unary { op: _, dst, size } => *dst = stack_mapping.replace_pseudo(dst, *size),
-                Instruction::Movsx { src, dst } | Instruction::MovZeroExtend { src, dst } => {
-                    *src = stack_mapping.replace_pseudo(src, AssemblyType::Longword);
-                    *dst = stack_mapping.replace_pseudo(dst, AssemblyType::Quadword);
-                }
-                Instruction::Idiv(src, size) | Instruction::Div(src, size) => {
-                    *src = stack_mapping.replace_pseudo(src, *size);
-                }
-                Instruction::Cmp { v1, v2, size } => {
-                    *v1 = stack_mapping.replace_pseudo(v1, *size);
-                    *v2 = stack_mapping.replace_pseudo(v2, *size);
-                }
-                Instruction::SetCC { op, .. } => {
-                    if let Operand::Pseudo(name) = op {
-                        let size = symbols.get_obj_type(name);
-                        *op = stack_mapping.replace_pseudo(op, size);
-                    }
-                }
-                Instruction::Push(op) => *op = stack_mapping.replace_pseudo(op, AssemblyType::Quadword),
+                Instruction::Unary { dst: op, .. }
+                | Instruction::Idiv(op, _)
+                | Instruction::Div(op, _)
+                | Instruction::SetCC { op, .. }
+                | Instruction::Push(op) => stack_mapping.replace_pseudo(op),
                 Instruction::Ret
                 | Instruction::Call(_)
                 | Instruction::Label(_)

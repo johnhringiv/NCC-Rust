@@ -128,5 +128,20 @@
   },
   "compare_result_width.c": {
     "return_code": 93
+  },
+  "stack_slot_width.c": {
+    "return_code": 2
+  },
+  "types/int_min_literal_is_long.c": {
+    "return_code": 3
+  },
+  "lexer/comment_slash_star_slash.c": {
+    "return_code": 1
+  },
+  "lexer/formfeed_vtab_whitespace.c": {
+    "return_code": 7
+  },
+  "double_negation_mask.c": {
+    "return_code": 5
   }
 }

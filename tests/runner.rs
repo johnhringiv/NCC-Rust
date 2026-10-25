@@ -1026,6 +1026,60 @@ fn test_function_symbol_sizes() {
     );
 }
 
+// Same as above: nm -S needs ELF symbol sizes, so Linux-only.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_double_negation_mask_size() {
+    // Regression test: the `xorps` sign-flip mask must be a 16-byte .rodata entry, because
+    // `xorps m128` reads 16 bytes. An 8-byte entry let the read run past the end of .rodata
+    // (harmless unless the section ends at a page boundary, so only visible in the object).
+    let test_file = "tests/c_programs/double_negation_mask.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    // `-c` writes `<input>.o` next to the input, so compile a copy in the temp dir.
+    let src_path = std::env::temp_dir().join("ncc_negation_mask_test.c");
+    let obj_path = std::env::temp_dir().join("ncc_negation_mask_test.o");
+    std::fs::copy(test_file, &src_path).expect("failed to copy test source to temp dir");
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(&src_path)
+        .arg("-c")
+        .output()
+        .expect("Failed to execute ncc");
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    let nm = std::process::Command::new("nm")
+        .arg("-S")
+        .arg(&obj_path)
+        .output()
+        .expect("Failed to execute nm");
+    assert!(nm.status.success(), "nm failed on {}", obj_path.display());
+
+    // nm -S read-only data lines: "<value> <size> r <name>"
+    let nm_output = String::from_utf8_lossy(&nm.stdout);
+    let rodata_sizes: Vec<u64> = nm_output
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            match parts.as_slice() {
+                [_, size, "r", _] => u64::from_str_radix(size, 16).ok(),
+                _ => None,
+            }
+        })
+        .collect();
+
+    let _ = std::fs::remove_file(&obj_path);
+    let _ = std::fs::remove_file(&src_path);
+
+    assert!(
+        rodata_sizes.contains(&16),
+        "expected a 16-byte .rodata entry for the negation mask, got sizes {rodata_sizes:?}:\n{nm_output}"
+    );
+
+    println!("✓ Double negation mask size test passed");
+}
+
 #[test]
 fn test_parser_printing() {
     // Test with a file that should generate labels

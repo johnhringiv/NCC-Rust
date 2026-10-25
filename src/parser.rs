@@ -594,13 +594,21 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 parse_constant(spanned)
             }
             Token::Negation => {
-                // Fold a leading `-` into the literal so INT_MIN / LONG_MIN keep the right type:
-                // their magnitude (2^31 / 2^63) isn't representable in the positive range, so
-                // parsing the magnitude then negating would overflow-promote and mistype them.
+                // Fold a leading `-` into the literal. Needed for LONG_MIN: its magnitude 2^63 has
+                // no 64-bit type, so parsing it then negating would be a parse error. Folding is
+                // harmless whenever it keeps C's type for `-literal` (the type of the magnitude).
+                // The exception is 2147483648: C types it `long`, so `-2147483648` is a `long`,
+                // but folded it would fit `int`. Leave that one as a negation.
+                let is_int_min_magnitude = matches!(
+                    tokens.get(1),
+                    Some(SpannedToken { token: Token::ConstantInt(v), .. })
+                        if v.parse::<i32>().is_err() && format!("-{v}").parse::<i32>().is_ok()
+                );
                 if let Some(SpannedToken {
                     token: Token::ConstantInt(value_str) | Token::ConstantLong(value_str),
                     span: _,
                 }) = tokens.get_mut(1)
+                    && !is_int_min_magnitude
                 {
                     *value_str = format!("-{value_str}");
                     tokens.pop_front();
@@ -1005,13 +1013,13 @@ fn parse_statement(tokens: &mut VecDeque<SpannedToken>) -> Result<SpannedStmt, S
                     }
                 }
             } else {
-                let init = parse_exp(tokens, 0).ok();
+                let init = parse_optional_exp(tokens, &Token::Semicolon)?;
                 expect(&Token::Semicolon, tokens)?;
                 ForInit::InitExp(init)
             };
-            let condition = parse_exp(tokens, 0).ok();
+            let condition = parse_optional_exp(tokens, &Token::Semicolon)?;
             expect(&Token::Semicolon, tokens)?;
-            let post = parse_exp(tokens, 0).ok();
+            let post = parse_optional_exp(tokens, &Token::CloseParen)?;
             expect(&Token::CloseParen, tokens)?;
             let body = parse_statement(tokens)?;
             Ok(SpannedStmt {
@@ -1205,19 +1213,46 @@ fn parse_declaration(
     }
 }
 
-fn parse_arg_comma(tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
-    if let Some(next_token) = tokens.front().cloned()
-        && next_token.token == Token::Comma
-    {
-        tokens.pop_front();
-        if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
-            return Err(SyntaxError::with_span(
-                "Trailing comma not allowed.".to_string(),
-                Some(next_token.span),
-            ));
-        }
+/// Parses an optional `for`-header expression: `None` if the next token is `terminator` (the
+/// clause is empty), otherwise the expression. A malformed expression is an error, not an empty
+/// clause; `parse_exp` may already have consumed tokens, so its error must not be discarded.
+fn parse_optional_exp(tokens: &mut VecDeque<SpannedToken>, terminator: &Token) -> Result<Option<Expr>, SyntaxError> {
+    if tokens.front().map(|t| &t.token) == Some(terminator) {
+        Ok(None)
+    } else {
+        parse_exp(tokens, 0).map(Some)
     }
-    Ok(())
+}
+
+/// Consumes the separator after a parameter or argument: a `,` (not followed by `)`), or nothing
+/// if the list ends here. Anything else is an error. Without this, `f(int a int b)` and `f(1 2)`
+/// would parse as if the commas were there.
+fn parse_arg_comma(tokens: &mut VecDeque<SpannedToken>) -> Result<(), SyntaxError> {
+    match tokens.front().cloned() {
+        Some(SpannedToken {
+            token: Token::Comma,
+            span,
+        }) => {
+            tokens.pop_front();
+            if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                return Err(SyntaxError::with_span(
+                    "Trailing comma not allowed.".to_string(),
+                    Some(span),
+                ));
+            }
+            Ok(())
+        }
+        Some(SpannedToken {
+            token: Token::CloseParen,
+            ..
+        }) => Ok(()),
+        Some(SpannedToken { token, span }) => Err(SyntaxError::with_span(
+            format!("Expected ',' or ')' but found {token:?}"),
+            Some(span),
+        )),
+        // EOF is reported by the caller's `expect(CloseParen)`
+        None => Ok(()),
+    }
 }
 
 /// Parses a function's parameter list (after the opening parenthesis).
@@ -1267,17 +1302,14 @@ fn parse_function_params(
 
 fn parse_function_args(tokens: &mut VecDeque<SpannedToken>, err_span: &Option<Span>) -> Result<Vec<Expr>, SyntaxError> {
     let mut params = vec![];
-    if let Some(front) = tokens.front().cloned() {
-        if front.token == Token::VoidKeyword {
-            tokens.pop_front();
-        } else {
-            loop {
-                if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
-                    break;
-                }
-                params.push(parse_exp(tokens, 0)?);
-                parse_arg_comma(tokens)?;
+    // Unlike parameter lists, `void` has no special meaning here: `f(void)` is not a call.
+    if tokens.front().is_some() {
+        loop {
+            if tokens.front().map(|t| &t.token) == Some(&Token::CloseParen) {
+                break;
             }
+            params.push(parse_exp(tokens, 0)?);
+            parse_arg_comma(tokens)?;
         }
         expect(&Token::CloseParen, tokens)?;
         Ok(params)

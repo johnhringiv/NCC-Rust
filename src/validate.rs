@@ -823,7 +823,7 @@ fn warn_shift_count(left_type: &Type, rhs: &ParserExpr, span: Span) {
         && !matches!(v, StaticInit::DoubleInit(_))
     {
         let width: i64 = match left_type {
-            Type::Long => 64,
+            Type::Long | Type::ULong => 64,
             _ => 32,
         };
         let count = v.as_i64();

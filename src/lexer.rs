@@ -320,7 +320,8 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
     let mut line = 1;
     let mut col = 1;
     while !input.is_empty() {
-        let trimmed = input.trim_start_matches([' ', '\t', '\r']);
+        // C whitespace also includes form feed and vertical tab
+        let trimmed = input.trim_start_matches([' ', '\t', '\r', '\x0C', '\x0B']);
         col += input.len() - trimmed.len();
         input = trimmed;
 
@@ -338,7 +339,8 @@ pub(crate) fn tokenizer(mut input: &str) -> Result<VecDeque<SpannedToken>, Lexer
             }
             continue;
         } else if input.starts_with("/*") {
-            if let Some(end_comment_index) = input.find("*/") {
+            // Search past the opening `/*` so `/*/` doesn't pair its own `*` with the `/`
+            if let Some(end_comment_index) = input[2..].find("*/").map(|i| i + 2) {
                 let comment = &input[..end_comment_index + 2];
                 let newline_count = comment.matches('\n').count();
                 if newline_count > 0 {
