@@ -152,5 +152,8 @@
   },
   "static_vars/const_eval_conversions.c": {
     "return_code": 8
+  },
+  "conversions/double_to_ulong_nan.c": {
+    "return_code": 3
   }
 }

@@ -331,7 +331,9 @@ NCC provides several safety features and guarantees to help developers write mor
   constant too large for `double` rounds to ±infinity and one too small rounds to zero (both flagged by
   `-Woverflow`), where C §6.4.4.2 leaves an out-of-range floating constant undefined. Converting a `double` to an
   integer truncates toward zero; out-of-range or NaN values produce the x86 `cvttsd2si` "integer indefinite" result
-  (the target type's minimum, e.g. `INT_MIN`), where C §6.3.1.4 leaves the conversion undefined.
+  (the target type's minimum, e.g. `INT_MIN`), where C §6.3.1.4 leaves the conversion undefined. `unsigned long`
+  follows its two-step lowering instead: values below 2^63 (including negatives) and NaN convert as `long` and
+  are reinterpreted (`-1.0` → `ULONG_MAX`, NaN → 2^63), and values at or above 2^64 give 0.
 - **Consistent compile-time and runtime behavior**: Constant expressions (static initializers, case labels) are
   folded with the *same* arithmetic and type-conversion rules as runtime expressions — including all of the
   deterministic resolutions above. Where standard C would make an overflowing or out-of-range constant expression a

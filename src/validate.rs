@@ -1941,8 +1941,10 @@ fn double_to_i64(d: f64) -> i64 {
 
 fn double_to_u64(d: f64) -> u64 {
     const TWO_POW_63: f64 = 9223372036854775808.0; // 2^63
-    if d < TWO_POW_63 {
-        double_to_i64(d) as u64 // fits signed range
+    // NaN fails the `comisd` range check too, so like the runtime it takes the direct conversion
+    // (indefinite = 2^63) rather than the subtract-2^63 path.
+    if d.is_nan() || d < TWO_POW_63 {
+        double_to_i64(d) as u64 // fits signed range, or NaN
     } else {
         // subtract 2^63, convert the (now in-range) remainder, restore the top bit
         (double_to_i64(d - TWO_POW_63) as u64).wrapping_add(1u64 << 63)

@@ -152,7 +152,7 @@ Tests validate both successful compilation and error handling:
 
 **Integer Arithmetic**: Signed overflow wraps deterministically (non-standard C extension; standard C makes it UB); unsigned wraps mod 2^N (standard). Shift amounts are masked to prevent undefined behavior. The `-Woverflow` warning fires only for signed overflow.
 
-**Floating Point**: `double` arithmetic/comparisons use SSE2 (`addsd`/`comisd`/etc.); constants live in a `.rodata` pool. Comparisons follow IEEE-754 ordering — a `NaN` operand is unordered (relationals and `==` are false, `!=` true, `NaN` is truthy in conditions), implemented via the parity flag. `double`→integer truncates toward zero; out-of-range or `NaN` yields the x86 `cvttsd2si` "integer indefinite" value (target MIN). Unsigned↔`double` conversions use SSE2 workarounds (no native unsigned convert pre-AVX-512). An out-of-range floating constant rounds to ±infinity or zero (`-Woverflow`).
+**Floating Point**: `double` arithmetic/comparisons use SSE2 (`addsd`/`comisd`/etc.); constants live in a `.rodata` pool. Comparisons follow IEEE-754 ordering — a `NaN` operand is unordered (relationals and `==` are false, `!=` true, `NaN` is truthy in conditions), implemented via the parity flag. `double`→integer truncates toward zero; out-of-range or `NaN` yields the x86 `cvttsd2si` "integer indefinite" value (target MIN), except `unsigned long`, which converts values below 2^63 and NaN as `long` (`-1.0` → `ULONG_MAX`, NaN → 2^63). Unsigned↔`double` conversions use SSE2 workarounds (no native unsigned convert pre-AVX-512). An out-of-range floating constant rounds to ±infinity or zero (`-Woverflow`).
 
 **Evaluation Order**: Left-to-right (non-standard, eliminates UB).
 
