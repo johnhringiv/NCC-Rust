@@ -245,7 +245,7 @@ The compiler currently implements a subset of C with the following grammar:
          | "==" | "!=" | "<" | "<=" | ">" | ">="
 <assign-op> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
 <identifier> ::= ? An identifier token ?
-<int> ::= ? An integer constant token: decimal, or octal with a leading 0 (e.g. 017) ?
+<int> ::= ? An integer constant token: decimal, octal with a leading 0 (e.g. 017), or hex with 0x (e.g. 0x1F) ?
 <long> ::= ? A long integer constant token (suffix 'l' or 'L') ?
 <uint> ::= ? An unsigned int constant token (suffix 'u' or 'U') ?
 <ulong> ::= ? An unsigned long constant token (suffix combining 'u'/'U' and 'l'/'L') ?
@@ -298,10 +298,10 @@ The compiler supports:
     - `goto` and labeled statements
     - `return` statements
 - **Expression statements** and **null statements**
-- **Integer literals**: decimal and octal (a leading `0`, e.g. `0755`), with `u`/`l` suffixes. Each literal takes the
-  first type that holds its value, per C11 6.4.4.1: decimal goes `int` → `long`, while octal can also become
-  unsigned (`int` → `unsigned int` → `long` → `unsigned long`), so `037777777777` is an `unsigned int`. Hexadecimal
-  is not supported yet
+- **Integer literals**: decimal, octal (a leading `0`, e.g. `0755`), and hexadecimal (`0x`/`0X`, e.g. `0xFF`), with
+  `u`/`l` suffixes. Each literal takes the first type that holds its value, per C11 6.4.4.1: decimal goes `int` →
+  `long`, while octal and hex can also become unsigned (`int` → `unsigned int` → `long` → `unsigned long`), so
+  `0xFFFFFFFF` is an `unsigned int`. Hexadecimal floating literals (`0x1p3`) are not supported
 - **Line splicing**: a backslash at the end of a line joins it with the next before tokenizing, anywhere in the source
   (inside tokens and `//` comments too). There is no preprocessor: a line whose first non-blank character is `#` is
   skipped, along with any lines spliced onto it
@@ -359,14 +359,16 @@ NCC provides several safety features and guarantees to help developers write mor
   `double` one (`1.0 / 0` folds to infinity) or sits in an operand that is never evaluated (`1 || 1 / 0`)
 - **Out-of-range shift count** (`-Wshift-count-overflow`, `-Wshift-count-negative`): Warns when a `<<` or `>>`
   (including `<<=` / `>>=`) has a constant shift count that is negative or `>=` the width of the left operand's type
-  (32 for 32-bit types, 64 for 64-bit types), e.g. `1 << 32` or `1 << -1`
+  (32 for 32-bit types, 64 for 64-bit types), e.g. `1 << 32` or `1 << -1`. An unsigned count is never negative, so
+  `1 << 18446744073709551615ul` is reported as too wide
 - **Integer overflow in a constant expression** (`-Woverflow`): Warns when folding a *signed* constant expression in a
   static initializer or case label overflows the result type (e.g. `int x = 2147483647 + 1;`). NCC wraps
   deterministically (two's complement) rather than treating it as undefined, so this flags non-portable code instead of
   erroring. Unsigned wraparound is well-defined and is *not* warned (matching gcc/clang)
 - **Constant changed by an implicit conversion** (`-Wconstant-conversion`): Warns when a constant initializer (of a
   static, file-scope, or automatic variable) is implicitly narrowed to a type that can't hold it (e.g.
-  `int x = 2147483648;`, which truncates to `-2147483648`). An explicit cast (`int x = (int)2147483648;`) silences it
+  `int x = 2147483648;`, which truncates to `-2147483648`), and when a `case` value is narrowed to the switch's type
+  (`case 4294967296L:` in an `int` switch is `case 0:`). An explicit cast (`int x = (int)2147483648;`) silences it
 - **Unsequenced modification** (`-Wsequence-point`): Warns when the same object is modified more than once between
   sequence points (e.g. `i = i++`, `i++ + i++`, `f(i++, i++)`, `i++ + f(i++)`) — undefined in standard C. `&&`, `||`
   and `?:` sequence their own operands, but not against the rest of the expression, so `(j && i++) + i++` also warns.

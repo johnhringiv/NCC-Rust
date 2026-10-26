@@ -1246,6 +1246,29 @@ fn test_warnings_outside_function_bodies() {
 }
 
 #[test]
+fn test_case_label_constant_conversion() {
+    // A case value narrowed to the switch type warns; sign-only changes and widenings don't
+    let stderr = validate_stderr("tests/c_programs/warnings/case_conversion.c");
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.contains("-Wconstant-conversion")).collect();
+    assert_eq!(lines.len(), 3, "stderr was: {stderr}");
+    for (line, pos) in lines.iter().zip([":9:5:", ":11:5:", ":17:5:"]) {
+        assert!(line.contains(pos), "expected a warning at {pos}, stderr was: {stderr}");
+    }
+}
+
+#[test]
+fn test_shift_count_huge_unsigned() {
+    // A huge unsigned count is too wide, not negative
+    let stderr = validate_stderr("tests/c_programs/warnings/shift_count_huge_unsigned.c");
+    assert_eq!(
+        stderr.matches("-Wshift-count-overflow").count(),
+        2,
+        "stderr was: {stderr}"
+    );
+    assert!(!stderr.contains("-Wshift-count-negative"), "stderr was: {stderr}");
+}
+
+#[test]
 fn test_semantic_error_messages() {
     // (file, text the error must contain, text it must not contain)
     let cases = [

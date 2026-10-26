@@ -20,8 +20,9 @@
 //! - Produces a [`VecDeque<SpannedToken>`] carrying line/column [`Span`]s for error reporting
 //! - Detects lexer errors (unexpected characters, unterminated comments) and exits with code 10
 //! - Promotes integer literals with an `L`/`l` suffix to [`Token::ConstantLong`]
-//! - Keeps integer lexemes as written (a leading `0` marks octal, which the parser reads in base 8)
-//!   and rejects the digits 8 and 9 in octal literals
+//! - Keeps integer lexemes as written (a `0x` prefix marks hex and a leading `0` marks octal; the
+//!   parser reads them in that base, see [`literal_radix`]) and rejects the digits 8 and 9 in octal
+//!   literals
 //! - Recognizes floating-point literals (fraction and/or exponent) as [`Token::ConstantDouble`]
 //!
 //! ## Call Order
@@ -113,11 +114,18 @@ pub enum Token {
 const TOKEN_PATTERNS: &[(&str, Token)] = &[
     // Special handling tokens (handled differently in next_token)
     (r"^[a-zA-Z_]\w*\b", Token::Identifier(String::new())),
-    (r"^[0-9]+\b", Token::ConstantInt(String::new())),
-    (r"^[0-9]+[lL]\b", Token::ConstantLong(String::new())),
-    (r"^[0-9]+[uU]\b", Token::ConstantUnsignedInt(String::new())),
+    // Integer literals: hex (`0x1F`) or decimal/octal digits, then an optional suffix.
+    (r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)\b", Token::ConstantInt(String::new())),
     (
-        r"^[0-9]++([lL][uU]|[uU][lL])\b",
+        r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)[lL]\b",
+        Token::ConstantLong(String::new()),
+    ),
+    (
+        r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)[uU]\b",
+        Token::ConstantUnsignedInt(String::new()),
+    ),
+    (
+        r"^(?:0[xX][0-9a-fA-F]++|[0-9]++)([lL][uU]|[uU][lL])\b",
         Token::ConstantUnsignedLong(String::new()),
     ),
     (
@@ -250,6 +258,19 @@ pub struct SpannedToken {
     pub span: Span,
 }
 
+/// The base of an integer lexeme as written (suffix already removed): 16 for a `0x`/`0X` prefix,
+/// 8 for a leading `0` followed by more digits, otherwise 10. A lone `0` counts as decimal; both
+/// readings give the same value.
+pub(crate) fn literal_radix(lexeme: &str) -> u32 {
+    if lexeme.starts_with("0x") || lexeme.starts_with("0X") {
+        16
+    } else if lexeme.len() > 1 && lexeme.starts_with('0') {
+        8
+    } else {
+        10
+    }
+}
+
 fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
     let mut matches = vec![];
     for TokenDef { regex, variant } in TOKEN_DEFS.iter() {
@@ -290,7 +311,7 @@ fn next_token(input: &str, span: Span) -> Result<TokenMatch, LexerError> {
         | Token::ConstantLong(digits)
         | Token::ConstantUnsignedInt(digits)
         | Token::ConstantUnsignedLong(digits) = &best_match.token
-            && digits.starts_with('0')
+            && literal_radix(digits) == 8
             && digits.contains(['8', '9'])
         {
             return Err(LexerError::with_span(

@@ -35,7 +35,7 @@
 //!        └─ parse_block_item()            — compound statements (recursive)
 //! ```
 //!
-use crate::lexer::{Span, SpannedToken, Token};
+use crate::lexer::{Span, SpannedToken, Token, literal_radix};
 use colored::*;
 use std::collections::VecDeque;
 use std::fmt;
@@ -493,10 +493,11 @@ fn expect(expected: &Token, tokens: &mut VecDeque<SpannedToken>) -> Result<Span,
 /// Parses a numeric literal token into a constant expression.
 ///
 /// An integer literal takes the first type in its ladder that can hold its value (C11 6.4.4.1).
-/// Decimal literals stay signed unless suffixed `u`; octal literals (a leading `0`, e.g. `017`)
-/// may also become unsigned, so a value that only fits the unsigned type keeps its bit pattern:
+/// Decimal literals stay signed unless suffixed `u`; octal (a leading `0`, e.g. `017`) and hex
+/// (`0x1F`) literals may also become unsigned, so a value that only fits the unsigned type keeps
+/// its bit pattern:
 ///
-/// | suffix | decimal          | octal                                  |
+/// | suffix | decimal          | octal and hex                          |
 /// |--------|------------------|----------------------------------------|
 /// | none   | `int`, `long`    | `int`, `unsigned int`, `long`, `unsigned long` |
 /// | `u`    | `unsigned int`, `unsigned long` | same                    |
@@ -520,10 +521,10 @@ fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
     let ulong: Candidate = |v| u64::try_from(v).ok().map(ConstULong);
 
     let (value_str, ladder): (&String, &[Candidate]) = match &token.token {
-        Token::ConstantInt(v) if is_octal_literal(v) => (v, &[int, uint, long, ulong]),
+        Token::ConstantInt(v) if literal_radix(v) != 10 => (v, &[int, uint, long, ulong]),
         Token::ConstantInt(v) => (v, &[int, long]),
         Token::ConstantUnsignedInt(v) => (v, &[uint, ulong]),
-        Token::ConstantLong(v) if is_octal_literal(v) => (v, &[long, ulong]),
+        Token::ConstantLong(v) if literal_radix(v) != 10 => (v, &[long, ulong]),
         Token::ConstantLong(v) => (v, &[long]),
         Token::ConstantUnsignedLong(v) => (v, &[ulong]),
         Token::ConstantDouble(value_str) => {
@@ -540,7 +541,8 @@ fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
         Some(rest) => (true, rest),
         None => (false, value_str.as_str()),
     };
-    let radix = if is_octal_literal(digits) { 8 } else { 10 };
+    let radix = literal_radix(digits);
+    let digits = if radix == 16 { &digits[2..] } else { digits };
     // i128 holds every 64-bit magnitude; anything that doesn't parse is too big for any type.
     let value = i128::from_str_radix(digits, radix)
         .ok()
@@ -552,12 +554,6 @@ fn parse_constant(token: &SpannedToken) -> Result<Expr, SyntaxError> {
             Some(token.span),
         )),
     }
-}
-
-/// True for an octal integer lexeme: a leading `0` followed by more digits (`0` alone is decimal,
-/// though the two readings agree). The lexer has already rejected the digits 8 and 9 in these.
-fn is_octal_literal(digits: &str) -> bool {
-    digits.len() > 1 && digits.starts_with('0')
 }
 
 /// True if `t` is a type-specifier keyword (`int`, `long`, `signed`, `unsigned`, `double`).
@@ -614,24 +610,24 @@ fn parse_factor(tokens: &mut VecDeque<SpannedToken>) -> Result<Expr, SyntaxError
                 // harmless whenever it keeps C's type for `-literal` (the type of the magnitude).
                 // The exception is 2147483648: C types it `long`, so `-2147483648` is a `long`,
                 // but folded it would fit `int`. Leave that one as a negation.
-                // Octal literals are never folded: their ladder includes unsigned types, so
-                // `-literal` can't in general be re-typed from the negated value.
+                // Octal and hex literals are never folded: their ladder includes unsigned types,
+                // so `-literal` can't in general be re-typed from the negated value.
                 let is_int_min_magnitude = matches!(
                     tokens.get(1),
                     Some(SpannedToken { token: Token::ConstantInt(v), .. })
                         if v.parse::<i32>().is_err() && format!("-{v}").parse::<i32>().is_ok()
                 );
-                let is_octal = matches!(
+                let is_octal_or_hex = matches!(
                     tokens.get(1),
                     Some(SpannedToken { token: Token::ConstantInt(v) | Token::ConstantLong(v), .. })
-                        if is_octal_literal(v)
+                        if literal_radix(v) != 10
                 );
                 if let Some(SpannedToken {
                     token: Token::ConstantInt(value_str) | Token::ConstantLong(value_str),
                     span: _,
                 }) = tokens.get_mut(1)
                     && !is_int_min_magnitude
-                    && !is_octal
+                    && !is_octal_or_hex
                 {
                     *value_str = format!("-{value_str}");
                     tokens.pop_front();

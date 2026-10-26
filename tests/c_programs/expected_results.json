@@ -155,5 +155,8 @@
   },
   "conversions/double_to_ulong_nan.c": {
     "return_code": 3
+  },
+  "lexer/hex_literals.c": {
+    "return_code": 10
   }
 }

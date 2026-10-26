@@ -874,15 +874,19 @@ fn warn_shift_count(left_type: &Type, rhs: &ParserExpr, span: Span) {
             Type::Long | Type::ULong => 64,
             _ => 32,
         };
-        let count = v.as_i64();
-        if count < 0 {
+        // An unsigned count is never negative, however large (`1 << 18446744073709551615ul`).
+        let (negative, too_wide) = match v.wide() {
+            Wide::Signed(n) => (n < 0, n >= width),
+            Wide::Unsigned(n) => (false, n >= width as u64),
+        };
+        if negative {
             eprintln!(
                 "{}: {}: shift count is negative {}",
                 span,
                 "warning".purple(),
                 "[-Wshift-count-negative]".purple()
             );
-        } else if count >= width {
+        } else if too_wide {
             eprintln!(
                 "{}: {}: shift count >= width of type ({}) {}",
                 span,
@@ -891,6 +895,17 @@ fn warn_shift_count(left_type: &Type, rhs: &ParserExpr, span: Span) {
                 "[-Wshift-count-overflow]".purple()
             );
         }
+    }
+}
+
+/// A `case` value as a constant, or `None` for `default`.
+fn case_constant(case: &SwitchIntType) -> Option<StaticInit> {
+    match *case {
+        SwitchIntType::Int(v) => Some(StaticInit::IntInit(v)),
+        SwitchIntType::Long(v) => Some(StaticInit::LongInit(v)),
+        SwitchIntType::UInt(v) => Some(StaticInit::UIntInit(v)),
+        SwitchIntType::ULong(v) => Some(StaticInit::ULongInit(v)),
+        SwitchIntType::Default => None,
     }
 }
 
@@ -1359,7 +1374,8 @@ fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Typ
 ///
 /// `ret_type` is the enclosing function's return type, used to insert implicit casts
 /// on `return` expressions. Switch statements normalize case values to the controlling
-/// expression's type and check for duplicates.
+/// expression's type and check for duplicates; emits `-Wconstant-conversion` for a case value the
+/// conversion changes.
 /// `span` is the statement's location, for diagnostics about the statement as a whole.
 fn typecheck_stmt(
     stmt: ParserStmt,
@@ -1428,6 +1444,11 @@ fn typecheck_stmt(
             // Normalize cases and check for duplicates
             let mut normalized: HashMap<Option<i64>, Span> = HashMap::new();
             for (case, case_span) in cases.iter() {
+                // Each case value converts to the switch type; warn if that narrowing changes it.
+                if let Some(c) = case_constant(case) {
+                    let (converted, truncated) = convert_to_type(c, switch_type);
+                    warn_constant_conversion(truncated, &c, &converted, *case_span);
+                }
                 let norm_value = case.as_i64(switch_type);
                 if let Some(previous_span) = normalized.insert(norm_value, *case_span) {
                     let (message, prev_note) = match norm_value {
