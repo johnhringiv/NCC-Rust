@@ -149,5 +149,8 @@
   },
   "lexer/line_splice.c": {
     "return_code": 21
+  },
+  "static_vars/const_eval_conversions.c": {
+    "return_code": 8
   }
 }

@@ -353,7 +353,8 @@ NCC provides several safety features and guarantees to help developers write mor
   function body
 - **Division by zero** (`-Wdiv-by-zero`): Warns when `/` or `%`, including the compound forms `/=` and `%=`, has
   a constant zero divisor (e.g. `x / 0`, `x % 0`, `x /= 0`, `x %= 0`). A constant zero divisor in a context that
-  requires a constant expression (such as a static initializer) is a hard error instead
+  requires a constant expression (such as a static initializer) is a hard error instead, unless the division is a
+  `double` one (`1.0 / 0` folds to infinity) or sits in an operand that is never evaluated (`1 || 1 / 0`)
 - **Out-of-range shift count** (`-Wshift-count-overflow`, `-Wshift-count-negative`): Warns when a `<<` or `>>`
   (including `<<=` / `>>=`) has a constant shift count that is negative or `>=` the width of the left operand's type
   (32 for 32-bit types, 64 for 64-bit types), e.g. `1 << 32` or `1 << -1`

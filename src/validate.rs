@@ -970,6 +970,39 @@ fn warn_unused_parameter(used: bool, name: &str, span: Span) {
     }
 }
 
+/// The type rules for a binary operator, shared by `typecheck_exp` and `eval_constant_expr` so
+/// runtime code and compile-time folding convert operands the same way.
+///
+/// Returns `(operand_type, result_type)`. `operand_type` is the common type both operands convert
+/// to (the usual arithmetic conversions), or `None` when each keeps its own type: `&&`/`||` test
+/// each operand for truthiness, and shifts use the left operand's type and leave the count alone.
+fn binary_types(op: BinOp, left: &Type, right: &Type) -> (Option<Type>, Type) {
+    match op {
+        BinOp::And | BinOp::Or => (None, Type::Int),
+        BinOp::BitwiseLeftShift | BinOp::BitwiseRightShift => (None, left.clone()),
+        BinOp::Equal
+        | BinOp::NotEqual
+        | BinOp::LessThan
+        | BinOp::LessOrEqual
+        | BinOp::GreaterThan
+        | BinOp::GreaterOrEqual => (Some(left.common_with(right)), Type::Int),
+        BinOp::Add
+        | BinOp::Subtract
+        | BinOp::Multiply
+        | BinOp::Divide
+        | BinOp::Remainder
+        | BinOp::BitwiseAnd
+        | BinOp::BitwiseOr
+        | BinOp::BitwiseXOr => {
+            let common = left.common_with(right);
+            (Some(common.clone()), common)
+        }
+        BinOp::Assignment | BinOp::CompoundAssignment | BinOp::Conditional => {
+            unreachable!("only used for parsing")
+        }
+    }
+}
+
 /// Type-checks an expression, returning a `TypedExpression` with a resolved type.
 ///
 /// Inserts implicit casts where operand types differ (using the common-type rule),
@@ -1072,40 +1105,12 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
             {
                 return Err(SemanticError::with_span(INTEGER_OPERANDS_MSG.to_string(), span));
             }
-            if matches!(op, BinOp::And | BinOp::Or) {
-                let binary_exp = Expr::Binary(op, Box::new(typed_lhs), Box::new(typed_rhs));
-                return Ok(binary_exp.with_type(Type::Int));
+            let (operand_type, result_type) = binary_types(op, &typed_lhs.exp_type, &typed_rhs.exp_type);
+            let (lhs, rhs) = match &operand_type {
+                Some(t) => (convert_to(typed_lhs, t), convert_to(typed_rhs, t)),
+                None => (typed_lhs, typed_rhs),
             };
-
-            // Bitshift: result type is the type of left operand (not common type)
-            if matches!(op, BinOp::BitwiseLeftShift | BinOp::BitwiseRightShift) {
-                let result_type = typed_lhs.exp_type.clone();
-                let binary_exp = Expr::Binary(op, Box::new(typed_lhs), Box::new(typed_rhs));
-                return Ok(binary_exp.with_type(result_type));
-            }
-
-            let common_type = typed_lhs.exp_type.common_with(&typed_rhs.exp_type);
-            let converted_lhs = convert_to(typed_lhs, &common_type);
-            let converted_rhs = convert_to(typed_rhs, &common_type);
-            let binary_exp = Expr::Binary(op, Box::new(converted_lhs), Box::new(converted_rhs));
-            let result_type = match op {
-                BinOp::Add
-                | BinOp::Subtract
-                | BinOp::Multiply
-                | BinOp::Divide
-                | BinOp::Remainder
-                | BinOp::BitwiseAnd
-                | BinOp::BitwiseOr
-                | BinOp::BitwiseXOr => common_type,
-                BinOp::Equal
-                | BinOp::NotEqual
-                | BinOp::LessThan
-                | BinOp::LessOrEqual
-                | BinOp::GreaterThan
-                | BinOp::GreaterOrEqual => Type::Int,
-                _ => unreachable!(),
-            };
-            Ok(binary_exp.with_type(result_type))
+            Ok(Expr::Binary(op, Box::new(lhs), Box::new(rhs)).with_type(result_type))
         }
         ParserExpr::Assignment(lhs, rhs, _) => {
             let typed_lhs = typecheck_exp(*lhs, symbols)?;
@@ -2052,37 +2057,48 @@ fn eval_static_initializer(
 
 /// Evaluates a compile-time constant expression from the parser AST.
 ///
-/// Handles all arithmetic, bitwise, comparison, and logical operations with proper
-/// type promotion (Int + Long = Long). Type conversions follow implementation-defined
-/// behavior documented in README (wrapping arithmetic, shift masking, etc.).
+/// Handles all arithmetic, bitwise, comparison, and logical operations. Operands are converted
+/// with the same rules `typecheck_exp` uses (see [`binary_types`] and the `?:` common type), so a
+/// constant folds to the value the runtime code would compute. Type conversions follow
+/// implementation-defined behavior documented in README (wrapping arithmetic, shift masking, etc.).
 ///
 /// Used for static initializers, case labels, and other contexts requiring constant
 /// expressions. Does NOT call typecheck_exp to avoid mixing with general expression
 /// transformations that will be added in later chapters.
 ///
-/// On success returns `(value, overflowed)`, where `overflowed` is true if any sub-operation
-/// wrapped the result type during the fold (`INT_MAX + 1`, `-INT_MIN`, `INT_MIN / -1`, …). The
-/// value is still the well-defined wrapped result — callers use the flag to emit `-Woverflow`.
+/// On success returns `(value, overflowed)`, where `overflowed` is true if any evaluated
+/// sub-operation wrapped the result type during the fold (`INT_MAX + 1`, `-INT_MIN`,
+/// `INT_MIN / -1`, …). The value is still the well-defined wrapped result — callers use the
+/// flag to emit `-Woverflow`.
 ///
 /// Returns `Err(ConstEvalError::NotConstant)` if the expression contains non-constant
 /// elements (variables, function calls, assignments, etc.), or
-/// `Err(ConstEvalError::DivByZero)` if a `/` or `%` has a zero divisor.
+/// `Err(ConstEvalError::DivByZero)` if an evaluated `/` or `%` has a zero divisor.
 fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEvalError> {
-    match expr {
-        ParserExpr::Constant(Const::ConstInt(val)) => Ok((StaticInit::IntInit(*val), false)),
-        ParserExpr::Constant(Const::ConstLong(val)) => Ok((StaticInit::LongInit(*val), false)),
-        ParserExpr::Constant(Const::ConstUInt(val)) => Ok((StaticInit::UIntInit(*val), false)),
-        ParserExpr::Constant(Const::ConstULong(val)) => Ok((StaticInit::ULongInit(*val), false)),
-        ParserExpr::Constant(Const::ConstDouble(val)) => Ok((StaticInit::DoubleInit(*val), false)),
+    fold_constant(expr, true)
+}
+
+/// The worker for [`eval_constant_expr`]. `live` is false inside an operand C doesn't evaluate:
+/// the right side of a short-circuited `&&`/`||`, or the untaken branch of `?:`. That operand
+/// must still be a constant expression, and its type still matters (the untaken branch decides
+/// the `?:` result type), so it is folded anyway, but a zero divisor there isn't an error and
+/// overflow there doesn't warn.
+fn fold_constant(expr: &ParserExpr, live: bool) -> Result<(StaticInit, bool), ConstEvalError> {
+    let (value, overflowed) = match expr {
+        ParserExpr::Constant(Const::ConstInt(val)) => (StaticInit::IntInit(*val), false),
+        ParserExpr::Constant(Const::ConstLong(val)) => (StaticInit::LongInit(*val), false),
+        ParserExpr::Constant(Const::ConstUInt(val)) => (StaticInit::UIntInit(*val), false),
+        ParserExpr::Constant(Const::ConstULong(val)) => (StaticInit::ULongInit(*val), false),
+        ParserExpr::Constant(Const::ConstDouble(val)) => (StaticInit::DoubleInit(*val), false),
         ParserExpr::Cast(target, val) => {
-            let (v, o) = eval_constant_expr(val)?;
+            let (v, o) = fold_constant(val, live)?;
             // Explicit cast: suppress the conversion-truncation warning (programmer intent), but
             // keep `o` so arithmetic overflow inside the cast operand still surfaces.
             let (cv, _truncated) = convert_to_type(v, target);
-            Ok((cv, o))
+            (cv, o)
         }
         ParserExpr::Unary(op, inner, _) => {
-            let (v, o) = eval_constant_expr(inner)?;
+            let (v, o) = fold_constant(inner, live)?;
             let (r, o2) = match op {
                 UnaryOp::Negate => v.neg(),
                 UnaryOp::BitwiseComplement => (
@@ -2099,11 +2115,17 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
             };
             // Unsigned wraparound is well-defined, not overflow — only signed ops warn (-Woverflow).
             let o2 = o2 && r.get_type().is_signed();
-            Ok((r, o | o2))
+            (r, o | o2)
         }
         ParserExpr::Binary(op, left, right, _) => {
-            let (l, lo) = eval_constant_expr(left)?;
-            let (r, ro) = eval_constant_expr(right)?;
+            let (l, lo) = fold_constant(left, live)?;
+            // `&&`/`||` don't evaluate the right side once the left side decides the result.
+            let short_circuits = match op {
+                BinOp::And => l.is_zero(),
+                BinOp::Or => !l.is_zero(),
+                _ => false,
+            };
+            let (r, ro) = fold_constant(right, live && !short_circuits)?;
             if (matches!(l, StaticInit::DoubleInit(_)) || matches!(r, StaticInit::DoubleInit(_)))
                 && matches!(
                     op,
@@ -2117,13 +2139,23 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
             {
                 return Err(ConstEvalError::InvalidType(INTEGER_OPERANDS_MSG));
             }
-            let base = lo | ro;
+            // Usual arithmetic conversions, before the operation: `1.0 / 0` divides by `0.0`.
+            let (l, r) = match binary_types(*op, &l.get_type(), &r.get_type()).0 {
+                // Converting to the common type only widens or reinterprets, so it never truncates.
+                Some(t) => (convert_to_type(l, &t).0, convert_to_type(r, &t).0),
+                None => (l, r),
+            };
+            // A zero divisor in an unevaluated operand is fine; any value of the right type will do.
+            let div = |result: Result<(StaticInit, bool), ConstEvalError>| match result {
+                Err(ConstEvalError::DivByZero) if !live => Ok((l, false)),
+                other => other,
+            };
             let (v, op_ovf) = match op {
                 BinOp::Add => l.add(r),
                 BinOp::Subtract => l.sub(r),
                 BinOp::Multiply => l.mul(r),
-                BinOp::Divide => l.div(r)?,
-                BinOp::Remainder => l.rem(r)?,
+                BinOp::Divide => div(l.div(r))?,
+                BinOp::Remainder => div(l.rem(r))?,
                 BinOp::BitwiseAnd => (l.bitwise_and(r), false),
                 BinOp::BitwiseOr => (l.bitwise_or(r), false),
                 BinOp::BitwiseXOr => (l.bitwise_xor(r), false),
@@ -2143,20 +2175,24 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
             };
             // Unsigned wraparound is well-defined, not overflow — only signed ops warn (-Woverflow).
             let op_ovf = op_ovf && v.get_type().is_signed();
-            Ok((v, base | op_ovf))
+            (v, lo | ro | op_ovf)
         }
         ParserExpr::Conditional(cond, true_expr, false_expr) => {
-            let (cond_val, co) = eval_constant_expr(cond)?;
-            let (v, o) = if cond_val.is_zero() {
-                eval_constant_expr(false_expr)?
-            } else {
-                eval_constant_expr(true_expr)?
-            };
-            Ok((v, co | o))
+            let (cond_val, co) = fold_constant(cond, live)?;
+            let take_true = !cond_val.is_zero();
+            // Both branches are folded: the untaken one still sets the result type.
+            let (t, to) = fold_constant(true_expr, live && take_true)?;
+            let (f, fo) = fold_constant(false_expr, live && !take_true)?;
+            let common_type = t.get_type().common_with(&f.get_type());
+            let (v, o) = if take_true { (t, to) } else { (f, fo) };
+            // Converting to the common type only widens or reinterprets, so it never truncates.
+            (convert_to_type(v, &common_type).0, co | o)
         }
         // Variables, assignments, function calls etc. are not constant
-        _ => Err(ConstEvalError::NotConstant),
-    }
+        _ => return Err(ConstEvalError::NotConstant),
+    };
+    // Overflow in an unevaluated operand never happens at runtime, so it doesn't warn.
+    Ok((value, overflowed && live))
 }
 
 enum LabelTag {
