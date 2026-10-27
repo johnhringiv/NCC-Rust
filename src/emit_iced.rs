@@ -351,9 +351,15 @@ fn emit_object_with_labels(
     let text = obj.section_id(StandardSection::Text);
     obj.append_section_data(text, &code, 1);
 
-    // Add all function symbols
-    for (func_name, func_off, global) in &func_offsets {
-        let func_size = code.len() as u64 - func_off;
+    // Add all function symbols. Functions are appended to .text in order, so each one ends
+    // where the next begins (the last ends at end-of-text) — sizing to end-of-text instead
+    // would make every st_size overlap all following functions, corrupting profilers,
+    // debuggers, and size-based tooling like `nm -S`.
+    for (i, (func_name, func_off, global)) in func_offsets.iter().enumerate() {
+        let func_end = func_offsets
+            .get(i + 1)
+            .map_or(code.len() as u64, |(_, next_off, _)| *next_off);
+        let func_size = func_end - func_off;
         obj.add_symbol(Symbol {
             name: func_name.as_bytes().to_vec(),
             value: *func_off,
@@ -441,12 +447,17 @@ fn emit_object_with_labels(
     // compiled objects, which a whole-program compiler essentially never produces.
     let rodata = obj.section_id(StandardSection::ReadOnlyData);
     for codegen::StaticConstant { name, init, alignment } in &program.static_constants {
-        let bytes = init.to_le_bytes();
+        let mut bytes = init.to_le_bytes();
+        // A 16-aligned constant is the `xorps` sign-flip mask, and `xorps m128` reads 16 bytes.
+        // Pad it with a zero upper lane (as gcc does) so the read never runs past the entry,
+        // which matters when it is the last thing in `.rodata` (the pool sorts by bit pattern,
+        // so `-0.0` = 0x8000... usually is).
+        bytes.resize(*alignment.max(&8) as usize, 0);
         let offset = obj.append_section_data(rodata, &bytes, *alignment);
         let sym_id = obj.add_symbol(Symbol {
             name: name.as_bytes().to_vec(),
             value: offset,
-            size: 8,
+            size: bytes.len() as u64,
             kind: SymbolKind::Data,
             scope: SymbolScope::Compilation,
             weak: false,
@@ -582,6 +593,23 @@ fn gpr32(reg: &Reg) -> AsmRegister32 {
         R8 => registers::gpr32::r8d,
         R9 => registers::gpr32::r9d,
         SP => registers::gpr32::esp,
+        _ => unreachable!("Only for GP reg"),
+    }
+}
+
+fn gpr8_reg(reg: &Reg) -> AsmRegister8 {
+    use codegen::Reg::*;
+    match reg {
+        AX => gpr8::al,
+        DX => gpr8::dl,
+        R10 => gpr8::r10b,
+        R11 => gpr8::r11b,
+        CX => gpr8::cl,
+        DI => gpr8::dil,
+        SI => gpr8::sil,
+        R8 => gpr8::r8b,
+        R9 => gpr8::r9b,
+        SP => gpr8::spl,
         _ => unreachable!("Only for GP reg"),
     }
 }
@@ -975,8 +1003,13 @@ fn emit_instruction(
             },
             BinaryOp::BitXOr => match (src, dst, size) {
                 (Operand::Reg(s), Operand::Reg(d), AssemblyType::Double) => a.xorps(xmm_reg(d), xmm_reg(s))?,
-                (Operand::Stack(off), Operand::Reg(d), AssemblyType::Double) => {
-                    a.xorps(xmm_reg(d), mem_rbp(*off, *size))?
+                (Operand::Stack(_), Operand::Reg(_), AssemblyType::Double) => {
+                    // A working-looking encode here would be a trap: `xorps xmm, m128` reads 16
+                    // bytes and requires 16-byte alignment, but an rbp-relative double slot is 8
+                    // bytes and 8-aligned (#GP + out-of-bounds read if ever executed). Double xor
+                    // only exists for negation, whose sign-bit mask is always a 16-aligned
+                    // `.rodata` Data operand; the validator rejects bitwise ops on doubles.
+                    unreachable!("double xor src is never a stack slot (negation mask lives in .rodata)")
                 }
                 (Operand::Data(name), Operand::Reg(d), AssemblyType::Double) => {
                     let lbl = data_labels.get(name).unwrap();
@@ -1169,7 +1202,7 @@ fn emit_instruction(
             };
         }
         Instruction::SetCC { code, op } => match op {
-            Operand::Reg(_r) => emit_setcc!(a, code, gpr8::al),
+            Operand::Reg(r) => emit_setcc!(a, code, gpr8_reg(r)),
             Operand::Stack(off) => emit_setcc!(a, code, byte_ptr(gpr64::rbp - (-*off))),
             Operand::Data(name) => {
                 let lbl = data_labels.get(name).unwrap();

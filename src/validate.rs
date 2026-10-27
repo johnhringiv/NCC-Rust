@@ -469,6 +469,9 @@ struct VarInfo {
     renamed: Rc<str>,
     span: Span,
     ext_link: bool,
+    /// Functions and variables share the identifier namespace. Like gcc, `-Wshadow` doesn't
+    /// fire when a variable shadows a function.
+    is_function: bool,
 }
 
 pub struct NameGenerator {
@@ -505,6 +508,7 @@ impl NameGenerator {
 ///
 /// **none (automatic)**: Regular local variable with automatic storage
 /// - Initializer is typechecked and converted to variable's type
+/// - A constant initializer whose value the conversion changes emits `-Wconstant-conversion`
 /// - Added to symbol table with `global: false`
 /// - `defined: true` (allocates stack storage)
 ///
@@ -522,9 +526,26 @@ fn typecheck_local_variable_declaration(
         }
         if let Some(old_dec) = symbols.get(&decl.name.0) {
             if old_dec.symbol_type != decl.var_type {
+                let what = if matches!(old_dec.symbol_type, Type::FunType { .. }) {
+                    "redeclared as different kind of symbol"
+                } else {
+                    "has conflicting types"
+                };
                 return Err(SemanticError::with_span(
                     format!(
-                        "'{}' redeclared as different kind of symbol\n{}: {}: previous declaration was here",
+                        "'{}' {what}\n{}: {}: previous declaration was here",
+                        decl.name.0.bold(),
+                        old_dec.span,
+                        "note".cyan()
+                    ),
+                    decl.span,
+                ));
+            }
+            if decl.prior_linkage_hidden && !old_dec.global {
+                return Err(SemanticError::with_span(
+                    format!(
+                        "'{}' declared 'extern' while a local hides its 'static' declaration, so it \
+                         would need both external and internal linkage\n{}: {}: 'static' declaration was here",
                         decl.name.0.bold(),
                         old_dec.span,
                         "note".cyan()
@@ -567,7 +588,13 @@ fn typecheck_local_variable_declaration(
             },
         );
     } else {
-        // Automatic storage (no storage class specifier)
+        // Automatic storage (no storage class specifier). A constant initializer is converted at
+        // run time, but its value is known now, so a lossy conversion still gets
+        // -Wconstant-conversion, as for statics. Non-constant initializers are skipped.
+        if let Some(Ok((value, _))) = decl.init.as_ref().map(eval_constant_expr) {
+            let (converted, changed) = convert_to_type(value, &decl.var_type);
+            warn_constant_conversion(changed, &value, &converted, decl.span);
+        }
         symbols.insert(
             decl.name.0.clone(),
             Symbol {
@@ -613,7 +640,11 @@ fn typecheck_file_variable_declaration(
     symbols: &mut SymbolTable,
 ) -> Result<TypedVarDeclaration, SemanticError> {
     let mut initial_value = if let Some(expr) = &decl.init {
-        eval_static_initializer(expr, &decl.var_type, &decl.name, decl.span)?
+        let value = eval_static_initializer(expr, &decl.var_type, &decl.name, decl.span)?;
+        // The value comes from constant evaluation; type-checking the expression too (result
+        // discarded) emits its expression-level warnings, e.g. -Wshift-count-*, as for locals.
+        typecheck_exp(expr.clone(), symbols)?;
+        value
     } else if decl.storage_class == Some(StorageClass::Extern) {
         InitialValue::NoInitializer
     } else {
@@ -736,8 +767,13 @@ fn check_sequence_points(expr: &ParserExpr) {
 }
 
 /// Walks `expr` within the current unsequenced region, recording modifications into `region`.
-/// Sequence-point operators (`&&`, `||`, `?:`, and function-call arguments) start fresh regions
-/// via [`check_sequence_points`]; everything else shares the region with its operands.
+///
+/// `&&`, `||` and `?:` have a sequence point after their first operand, so each operand is walked
+/// in its own region (catching double modifications inside it). The operator as a whole is still
+/// unsequenced relative to its siblings, though: `(j && i++) + i++` modifies `i` twice. So the
+/// operands' modifications are then merged into `region`, as a union first, since `i++ && i++`
+/// itself is fine. Call arguments are unsequenced among themselves *and* relative to the rest of
+/// the enclosing expression (`i++ + f(i++)`), so they share `region` directly.
 fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
     match expr {
         ParserExpr::Assignment(lhs, rhs, span) | ParserExpr::CompoundAssignment(_, lhs, rhs, span) => {
@@ -749,25 +785,17 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
         }
         ParserExpr::Binary(op, lhs, rhs, _) => {
             if matches!(op, BinOp::And | BinOp::Or) {
-                // sequence points
-                check_sequence_points(lhs);
-                check_sequence_points(rhs);
+                walk_sequenced(&[lhs, rhs], region);
             } else {
                 walk_region(lhs, region);
                 walk_region(rhs, region);
             }
         }
         ParserExpr::Unary(_, e, _) | ParserExpr::Cast(_, e) => walk_region(e, region),
-        ParserExpr::Conditional(c, t, f) => {
-            check_sequence_points(c);
-            check_sequence_points(t);
-            check_sequence_points(f);
-        }
+        ParserExpr::Conditional(c, t, f) => walk_sequenced(&[c, t, f], region),
         ParserExpr::FunctionCall(_, args, _) => {
-            // args have no sequence points between them
-            let mut arg_region = HashMap::new();
             for a in args {
-                walk_region(a, &mut arg_region);
+                walk_region(a, region);
             }
         }
         ParserExpr::Var(..) | ParserExpr::Constant(..) => {}
@@ -778,9 +806,29 @@ fn walk_region(expr: &ParserExpr, region: &mut HashMap<Rc<str>, Span>) {
 /// subset). A second modification of the same object in the current region is an unsequenced
 /// double-modification — emit `-Wsequence-point`.
 fn warn_sequence_point(target: &ParserExpr, span: Span, region: &mut HashMap<Rc<str>, Span>) {
-    if let ParserExpr::Var(Identifier(name), _) = target
-        && region.insert(name.clone(), span).is_some()
-    {
+    if let ParserExpr::Var(Identifier(name), _) = target {
+        record_modification(name, span, region);
+    }
+}
+
+/// Walks operands that are separated by sequence points (see [`walk_region`]): each in its own
+/// region, then the union of their modifications is recorded in the enclosing `region`.
+fn walk_sequenced(operands: &[&ParserExpr], region: &mut HashMap<Rc<str>, Span>) {
+    let mut modified: HashMap<Rc<str>, Span> = HashMap::new();
+    for operand in operands {
+        let mut own = HashMap::new();
+        walk_region(operand, &mut own);
+        modified.extend(own);
+    }
+    for (name, span) in modified {
+        record_modification(&name, span, region);
+    }
+}
+
+/// `-Wsequence-point`: records that `name` is modified at `span`, and emits the warning if
+/// `region` already has a modification of it.
+fn record_modification(name: &Rc<str>, span: Span, region: &mut HashMap<Rc<str>, Span>) {
+    if region.insert(name.clone(), span).is_some() {
         eprintln!(
             "{}: {}: '{}' modified more than once between sequence points (undefined in standard C; NCC evaluates left-to-right) {}",
             span,
@@ -823,18 +871,22 @@ fn warn_shift_count(left_type: &Type, rhs: &ParserExpr, span: Span) {
         && !matches!(v, StaticInit::DoubleInit(_))
     {
         let width: i64 = match left_type {
-            Type::Long => 64,
+            Type::Long | Type::ULong => 64,
             _ => 32,
         };
-        let count = v.as_i64();
-        if count < 0 {
+        // An unsigned count is never negative, however large (`1 << 18446744073709551615ul`).
+        let (negative, too_wide) = match v.wide() {
+            Wide::Signed(n) => (n < 0, n >= width),
+            Wide::Unsigned(n) => (false, n >= width as u64),
+        };
+        if negative {
             eprintln!(
                 "{}: {}: shift count is negative {}",
                 span,
                 "warning".purple(),
                 "[-Wshift-count-negative]".purple()
             );
-        } else if count >= width {
+        } else if too_wide {
             eprintln!(
                 "{}: {}: shift count >= width of type ({}) {}",
                 span,
@@ -843,6 +895,17 @@ fn warn_shift_count(left_type: &Type, rhs: &ParserExpr, span: Span) {
                 "[-Wshift-count-overflow]".purple()
             );
         }
+    }
+}
+
+/// A `case` value as a constant, or `None` for `default`.
+fn case_constant(case: &SwitchIntType) -> Option<StaticInit> {
+    match *case {
+        SwitchIntType::Int(v) => Some(StaticInit::IntInit(v)),
+        SwitchIntType::Long(v) => Some(StaticInit::LongInit(v)),
+        SwitchIntType::UInt(v) => Some(StaticInit::UIntInit(v)),
+        SwitchIntType::ULong(v) => Some(StaticInit::ULongInit(v)),
+        SwitchIntType::Default => None,
     }
 }
 
@@ -881,6 +944,12 @@ fn warn_constant_conversion(changed: bool, from: &StaticInit, to: &StaticInit, s
     }
 }
 
+/// The span to report for `-Wshadow` when a declaration replaced `shadow` in the scope map:
+/// `None` if nothing was shadowed or the shadowed name is a function (gcc doesn't warn then).
+fn shadowed_variable_span(shadow: Option<&VarInfo>) -> Option<Span> {
+    shadow.filter(|s| !s.is_function).map(|s| s.span)
+}
+
 /// `-Wshadow`: a declaration shadows one in an outer scope. `prev` is the shadowed entry's span
 /// (the value returned when inserting into the scope map), or `None` if nothing was shadowed.
 /// Emits the warning plus a note pointing at the previous declaration.
@@ -913,6 +982,39 @@ fn warn_unused_parameter(used: bool, name: &str, span: Span) {
             name.bold(),
             "[-Wunused-parameter]".purple()
         );
+    }
+}
+
+/// The type rules for a binary operator, shared by `typecheck_exp` and `eval_constant_expr` so
+/// runtime code and compile-time folding convert operands the same way.
+///
+/// Returns `(operand_type, result_type)`. `operand_type` is the common type both operands convert
+/// to (the usual arithmetic conversions), or `None` when each keeps its own type: `&&`/`||` test
+/// each operand for truthiness, and shifts use the left operand's type and leave the count alone.
+fn binary_types(op: BinOp, left: &Type, right: &Type) -> (Option<Type>, Type) {
+    match op {
+        BinOp::And | BinOp::Or => (None, Type::Int),
+        BinOp::BitwiseLeftShift | BinOp::BitwiseRightShift => (None, left.clone()),
+        BinOp::Equal
+        | BinOp::NotEqual
+        | BinOp::LessThan
+        | BinOp::LessOrEqual
+        | BinOp::GreaterThan
+        | BinOp::GreaterOrEqual => (Some(left.common_with(right)), Type::Int),
+        BinOp::Add
+        | BinOp::Subtract
+        | BinOp::Multiply
+        | BinOp::Divide
+        | BinOp::Remainder
+        | BinOp::BitwiseAnd
+        | BinOp::BitwiseOr
+        | BinOp::BitwiseXOr => {
+            let common = left.common_with(right);
+            (Some(common.clone()), common)
+        }
+        BinOp::Assignment | BinOp::CompoundAssignment | BinOp::Conditional => {
+            unreachable!("only used for parsing")
+        }
     }
 }
 
@@ -977,10 +1079,9 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
             let unary_exp = Expr::Unary(op, Box::new(typed_inner));
             match op {
                 UnaryOp::Not => Ok(unary_exp.with_type(Type::Int)),
-                UnaryOp::BitwiseComplement if !inner_type.is_integer() => Err(SemanticError::with_span(
-                    "bitwise complement '~' requires an integer operand".to_string(),
-                    span,
-                )),
+                UnaryOp::BitwiseComplement if !inner_type.is_integer() => {
+                    Err(SemanticError::with_span(COMPLEMENT_DOUBLE_MSG.to_string(), span))
+                }
                 _ => Ok(unary_exp.with_type(inner_type)),
             }
         }
@@ -1017,45 +1118,14 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                         | BinOp::BitwiseXOr
                 )
             {
-                return Err(SemanticError::with_span(
-                    "bitwise, shift, and remainder operators require integer operands".to_string(),
-                    span,
-                ));
+                return Err(SemanticError::with_span(INTEGER_OPERANDS_MSG.to_string(), span));
             }
-            if matches!(op, BinOp::And | BinOp::Or) {
-                let binary_exp = Expr::Binary(op, Box::new(typed_lhs), Box::new(typed_rhs));
-                return Ok(binary_exp.with_type(Type::Int));
+            let (operand_type, result_type) = binary_types(op, &typed_lhs.exp_type, &typed_rhs.exp_type);
+            let (lhs, rhs) = match &operand_type {
+                Some(t) => (convert_to(typed_lhs, t), convert_to(typed_rhs, t)),
+                None => (typed_lhs, typed_rhs),
             };
-
-            // Bitshift: result type is the type of left operand (not common type)
-            if matches!(op, BinOp::BitwiseLeftShift | BinOp::BitwiseRightShift) {
-                let result_type = typed_lhs.exp_type.clone();
-                let binary_exp = Expr::Binary(op, Box::new(typed_lhs), Box::new(typed_rhs));
-                return Ok(binary_exp.with_type(result_type));
-            }
-
-            let common_type = typed_lhs.exp_type.common_with(&typed_rhs.exp_type);
-            let converted_lhs = convert_to(typed_lhs, &common_type);
-            let converted_rhs = convert_to(typed_rhs, &common_type);
-            let binary_exp = Expr::Binary(op, Box::new(converted_lhs), Box::new(converted_rhs));
-            let result_type = match op {
-                BinOp::Add
-                | BinOp::Subtract
-                | BinOp::Multiply
-                | BinOp::Divide
-                | BinOp::Remainder
-                | BinOp::BitwiseAnd
-                | BinOp::BitwiseOr
-                | BinOp::BitwiseXOr => common_type,
-                BinOp::Equal
-                | BinOp::NotEqual
-                | BinOp::LessThan
-                | BinOp::LessOrEqual
-                | BinOp::GreaterThan
-                | BinOp::GreaterOrEqual => Type::Int,
-                _ => unreachable!(),
-            };
-            Ok(binary_exp.with_type(result_type))
+            Ok(Expr::Binary(op, Box::new(lhs), Box::new(rhs)).with_type(result_type))
         }
         ParserExpr::Assignment(lhs, rhs, _) => {
             let typed_lhs = typecheck_exp(*lhs, symbols)?;
@@ -1099,10 +1169,7 @@ fn typecheck_exp(exp: ParserExpr, symbols: &mut SymbolTable) -> Result<TypedExpr
                         | AssignOp::BitwiseXOr
                 )
             {
-                return Err(SemanticError::with_span(
-                    "bitwise, shift, and remainder operators require integer operands".to_string(),
-                    span,
-                ));
+                return Err(SemanticError::with_span(INTEGER_OPERANDS_MSG.to_string(), span));
             }
             let left_type = typed_lhs.exp_type.clone();
             let op_type = match op {
@@ -1295,7 +1362,7 @@ fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Typ
                 typecheck_function_declaration(fun, symbols)?;
             }
             ParserBlockItem::Statement(stmt) => {
-                let typed_stmt = typecheck_stmt(stmt.stmt, symbols, ret_type)?;
+                let typed_stmt = typecheck_stmt(stmt.stmt, stmt.span, symbols, ret_type)?;
                 typed_items.push(BlockItem::Statement(typed_stmt));
             }
         }
@@ -1307,8 +1374,15 @@ fn typecheck_block(block: ParserBlock, symbols: &mut SymbolTable, ret_type: &Typ
 ///
 /// `ret_type` is the enclosing function's return type, used to insert implicit casts
 /// on `return` expressions. Switch statements normalize case values to the controlling
-/// expression's type and check for duplicates.
-fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) -> Result<Stmt, SemanticError> {
+/// expression's type and check for duplicates; emits `-Wconstant-conversion` for a case value the
+/// conversion changes.
+/// `span` is the statement's location, for diagnostics about the statement as a whole.
+fn typecheck_stmt(
+    stmt: ParserStmt,
+    span: Span,
+    symbols: &mut SymbolTable,
+    ret_type: &Type,
+) -> Result<Stmt, SemanticError> {
     match stmt {
         ParserStmt::Return(e1) => {
             let typed_e1 = typecheck_exp(e1, symbols)?;
@@ -1321,9 +1395,9 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
         }
         ParserStmt::If(cond, then_s, else_s) => {
             let typed_cond = typecheck_exp(cond, symbols)?;
-            let converted_then = typecheck_stmt(then_s.stmt, symbols, ret_type)?;
+            let converted_then = typecheck_stmt(then_s.stmt, then_s.span, symbols, ret_type)?;
             let typed_else = (*else_s)
-                .map(|e| typecheck_stmt(e.stmt, symbols, ret_type))
+                .map(|e| typecheck_stmt(e.stmt, e.span, symbols, ret_type))
                 .transpose()?
                 .map(Box::new);
             Ok(Stmt::If(typed_cond, Box::new(converted_then), typed_else))
@@ -1333,11 +1407,11 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
         ParserStmt::Break(lbl) => Ok(Stmt::Break(lbl)),
         ParserStmt::Continue(lbl) => Ok(Stmt::Continue(lbl)),
         ParserStmt::Labeled(lbl, s) => {
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::Labeled(lbl, Box::new(typed_s)))
         }
         ParserStmt::Default(s, lbl) => {
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::Default(Box::new(typed_s), lbl))
         }
         ParserStmt::Compound(block) => {
@@ -1346,12 +1420,12 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
         }
         ParserStmt::While(e, s, lbl) => {
             let typed_e = typecheck_exp(e, symbols)?;
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::While(typed_e, Box::new(typed_s), lbl))
         }
         ParserStmt::DoWhile(s, e, lbl) => {
             let typed_e = typecheck_exp(e, symbols)?;
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             Ok(Stmt::DoWhile(Box::new(typed_s), typed_e, lbl))
         }
         ParserStmt::Switch(e, s, lbl, cases) => {
@@ -1361,15 +1435,20 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
             // The controlling expression must have integer type (C §6.8.4.2). Reject `double` here,
             // before `as_i64` normalizes case values against it (that would otherwise panic).
             if !switch_type.is_integer() {
-                return Err(SemanticError {
-                    message: "switch controlling expression must have integer type".to_string(),
-                    span: None,
-                });
+                return Err(SemanticError::with_span(
+                    "switch controlling expression must have integer type".to_string(),
+                    span,
+                ));
             }
 
             // Normalize cases and check for duplicates
             let mut normalized: HashMap<Option<i64>, Span> = HashMap::new();
             for (case, case_span) in cases.iter() {
+                // Each case value converts to the switch type; warn if that narrowing changes it.
+                if let Some(c) = case_constant(case) {
+                    let (converted, truncated) = convert_to_type(c, switch_type);
+                    warn_constant_conversion(truncated, &c, &converted, *case_span);
+                }
                 let norm_value = case.as_i64(switch_type);
                 if let Some(previous_span) = normalized.insert(norm_value, *case_span) {
                     let (message, prev_note) = match norm_value {
@@ -1389,13 +1468,13 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
                 }
             }
 
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             // Convert Vec to HashSet for output (tacky doesn't need spans)
             let cases_set = cases.iter().map(|(c, _span)| *c).collect();
             Ok(Stmt::Switch(typed_e, Box::new(typed_s), lbl, cases_set))
         }
         ParserStmt::Case(e, s, lbl) => {
-            let typed_s = typecheck_stmt(s.stmt, symbols, ret_type)?;
+            let typed_s = typecheck_stmt(s.stmt, s.span, symbols, ret_type)?;
             let typed_e = typecheck_exp(e, symbols)?;
             Ok(Stmt::Case(typed_e, Box::new(typed_s), lbl))
         }
@@ -1419,7 +1498,7 @@ fn typecheck_stmt(stmt: ParserStmt, symbols: &mut SymbolTable, ret_type: &Type) 
             };
             let typed_cond = cond.map(|e| typecheck_exp(e, symbols)).transpose()?;
             let typed_post = post.map(|e| typecheck_exp(e, symbols)).transpose()?;
-            let typed_body = typecheck_stmt(body.stmt, symbols, ret_type)?;
+            let typed_body = typecheck_stmt(body.stmt, body.span, symbols, ret_type)?;
             Ok(Stmt::For(
                 Box::new(typed_init),
                 typed_cond,
@@ -1533,6 +1612,7 @@ fn resolve_fun_decoration(
             renamed: name.clone(),
             span: dec.span,
             ext_link: true,
+            is_function: true,
         },
     );
     if let Some(shadow) = shadow
@@ -1556,8 +1636,10 @@ fn resolve_fun_decoration(
     let mut inner_block_vars = HashSet::new();
     let original_params: Vec<Rc<str>> = dec.params.iter().map(|Identifier(name)| name.clone()).collect();
 
-    for param in &mut dec.params {
-        resolve_param(param, &mut inner_map, name_gen, &mut inner_block_vars, dec.span)?;
+    // A prototype's parameter names are only documentation, so they don't shadow anything.
+    let has_body = dec.body.is_some();
+    for (param, &span) in dec.params.iter_mut().zip(&dec.param_spans) {
+        resolve_param(param, &mut inner_map, name_gen, &mut inner_block_vars, span, has_body)?;
     }
 
     if let Some(block) = &mut dec.body {
@@ -1571,20 +1653,24 @@ fn resolve_fun_decoration(
             used_vars,
         )?;
     }
-    if dec.body.is_some() {
-        for (Identifier(param), org_name) in dec.params.iter().zip(original_params) {
-            warn_unused_parameter(used_vars.contains(param), &org_name, dec.span);
+    if has_body {
+        for ((Identifier(param), org_name), &span) in dec.params.iter().zip(original_params).zip(&dec.param_spans) {
+            warn_unused_parameter(used_vars.contains(param), &org_name, span);
         }
     }
     Ok(())
 }
 
+/// Resolves one function parameter: gives it a unique name in the function's scope (a duplicate
+/// parameter name is an error). In a definition (`has_body`), emits `-Wshadow` if it shadows a
+/// variable; a prototype's parameter names are only documentation, so they never warn.
 fn resolve_param(
     param: &mut Identifier,
     variable_map: &mut HashMap<Rc<str>, VarInfo>,
     name_gen: &mut NameGenerator,
     block_vars: &mut HashSet<Rc<str>>,
     span: Span,
+    has_body: bool,
 ) -> Result<(), SemanticError> {
     let Identifier(name) = param.clone();
 
@@ -1597,9 +1683,12 @@ fn resolve_param(
                 renamed: unique_name.clone(),
                 span,
                 ext_link: false,
+                is_function: false,
             },
         );
-        warn_shadow(&name, span, shadow.map(|s| s.span));
+        if has_body {
+            warn_shadow(&name, span, shadowed_variable_span(shadow.as_ref()));
+        }
         *param = Identifier(unique_name);
         Ok(())
     } else {
@@ -1631,6 +1720,7 @@ fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut Has
             renamed: name.clone(),
             span: dec.span,
             ext_link: true,
+            is_function: false,
         },
     );
 }
@@ -1645,6 +1735,7 @@ fn resolve_file_var_declaration(dec: &mut VarDeclaration, variable_map: &mut Has
 /// **extern**: References an external variable
 /// - Keeps original name (no renaming)
 /// - Marked with `ext_link: true`
+/// - If it hides a local, emits `-Wshadow` and sets `prior_linkage_hidden` (see that field)
 ///
 /// **static or automatic**: Local variable
 /// - Gets a unique renamed identifier (e.g., `x` → `x.1`)
@@ -1677,14 +1768,24 @@ fn resolve_local_var_decoration(
         ));
     }
     if dec.storage_class == Some(StorageClass::Extern) {
-        variable_map.insert(
+        let shadow = variable_map.insert(
             name.clone(),
             VarInfo {
                 renamed: name.clone(),
                 span: dec.span,
                 ext_link: true,
+                is_function: false,
             },
         );
+        // Shadowing a local (no linkage) hides every earlier declaration, so this `extern` can't
+        // inherit a file-scope `static`'s internal linkage. It names a *different* object than
+        // the local, so it also warrants -Wshadow; redeclaring a linked name does not.
+        if let Some(shadow) = shadow
+            && !shadow.ext_link
+        {
+            dec.prior_linkage_hidden = true;
+            warn_shadow(name, dec.span, Some(shadow.span));
+        }
     } else {
         let unique_name = name_gen.next(name);
         dec.name = Identifier(unique_name.clone());
@@ -1694,9 +1795,10 @@ fn resolve_local_var_decoration(
                 renamed: unique_name.clone(),
                 span: dec.span,
                 ext_link: false,
+                is_function: false,
             },
         );
-        warn_shadow(name, dec.span, shadow.map(|s| s.span));
+        warn_shadow(name, dec.span, shadowed_variable_span(shadow.as_ref()));
         if let Some(init_expr) = &mut dec.init {
             check_sequence_points(init_expr);
             resolve_exp(init_expr, variable_map, used_vars)?;
@@ -1834,7 +1936,8 @@ enum Wide {
 // truncated value is already in range. So: explicit range/NaN check returning the indefinite value
 // on failure, and plain `as` (which truncates toward zero, matching cvttsd2si) on success.
 //
-// `double_to_u32`/`u64` build on the signed path because `cvttsd2si` is signed-only (see each fn).
+// `double_to_u64` builds on the signed path because `cvttsd2si` is signed-only; `double_to_u32`
+// range-checks directly, mirroring the runtime lowering (invalid -> 0, the unsigned "indefinite").
 fn double_to_i32(d: f64) -> i32 {
     // cvttsd2si: valid iff trunc(d) fits in i32; NaN/inf/overflow -> indefinite (INT_MIN)
     if d.is_nan() || d < i32::MIN as f64 || d >= 2147483648.0
@@ -1859,8 +1962,10 @@ fn double_to_i64(d: f64) -> i64 {
 
 fn double_to_u64(d: f64) -> u64 {
     const TWO_POW_63: f64 = 9223372036854775808.0; // 2^63
-    if d < TWO_POW_63 {
-        double_to_i64(d) as u64 // fits signed range
+    // NaN fails the `comisd` range check too, so like the runtime it takes the direct conversion
+    // (indefinite = 2^63) rather than the subtract-2^63 path.
+    if d.is_nan() || d < TWO_POW_63 {
+        double_to_i64(d) as u64 // fits signed range, or NaN
     } else {
         // subtract 2^63, convert the (now in-range) remainder, restore the top bit
         (double_to_i64(d - TWO_POW_63) as u64).wrapping_add(1u64 << 63)
@@ -1868,8 +1973,15 @@ fn double_to_u64(d: f64) -> u64 {
 }
 
 fn double_to_u32(d: f64) -> u32 {
-    // u32's full range fits in i64, so convert via the signed 64-bit path and truncate.
-    double_to_i64(d) as u32
+    // valid iff trunc(d) fits in u32; NaN/inf/overflow -> unsigned "indefinite" = 0 (u32 MIN),
+    // mirroring the runtime lowering's range check. Note (-1.0, 0.0) truncates to 0 and is valid.
+    if d.is_nan() || d <= -1.0 || d >= 4294967296.0
+    /* 2^32 */
+    {
+        0
+    } else {
+        d as u32 // in range: truncates toward zero, matches cvttsd2si
+    }
 }
 
 /// Casts a normalized value (`i64`/`u64`) to each target type, yielding `(result, out_of_range)`
@@ -1918,7 +2030,19 @@ fn convert_to_type(val: StaticInit, target_type: &Type) -> (StaticInit, bool) {
 enum ConstEvalError {
     NotConstant,
     DivByZero,
-    InvalidType,
+    /// An operator applied to a `double` that requires integers; carries the diagnostic.
+    InvalidType(&'static str),
+}
+
+/// Diagnostic for `~` on a `double` (shared by runtime type checking and constant evaluation).
+const COMPLEMENT_DOUBLE_MSG: &str = "bitwise complement '~' requires an integer operand";
+/// Diagnostic for `%`, `&`, `|`, `^`, `<<`, `>>` with a `double` operand (shared likewise).
+const INTEGER_OPERANDS_MSG: &str = "bitwise, shift, and remainder operators require integer operands";
+
+/// The name as written in the source: the resolve pass renames locals to `name.N`, and `.`
+/// can't appear in a C identifier, so everything from the first `.` on is the suffix.
+fn source_name(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
 }
 
 /// Evaluate a static / file-scope initializer to its `InitialValue`, mapping the
@@ -1946,50 +2070,58 @@ fn eval_static_initializer(
         Err(ConstEvalError::NotConstant) => Err(SemanticError::with_span(
             format!(
                 "initializer for static variable '{}' is not a constant expression",
-                name.0.bold()
+                source_name(&name.0).bold()
             ),
             span,
         )),
-        Err(ConstEvalError::InvalidType) => Err(SemanticError::with_span(
-            format!("cannot take bitwise complement of a {} value", "'double'".bold()),
-            span,
-        )),
+        Err(ConstEvalError::InvalidType(msg)) => Err(SemanticError::with_span(msg.to_string(), span)),
     }
 }
 
 /// Evaluates a compile-time constant expression from the parser AST.
 ///
-/// Handles all arithmetic, bitwise, comparison, and logical operations with proper
-/// type promotion (Int + Long = Long). Type conversions follow implementation-defined
-/// behavior documented in README (wrapping arithmetic, shift masking, etc.).
+/// Handles all arithmetic, bitwise, comparison, and logical operations. Operands are converted
+/// with the same rules `typecheck_exp` uses (see [`binary_types`] and the `?:` common type), so a
+/// constant folds to the value the runtime code would compute. Type conversions follow
+/// implementation-defined behavior documented in README (wrapping arithmetic, shift masking, etc.).
 ///
 /// Used for static initializers, case labels, and other contexts requiring constant
 /// expressions. Does NOT call typecheck_exp to avoid mixing with general expression
 /// transformations that will be added in later chapters.
 ///
-/// On success returns `(value, overflowed)`, where `overflowed` is true if any sub-operation
-/// wrapped the result type during the fold (`INT_MAX + 1`, `-INT_MIN`, `INT_MIN / -1`, …). The
-/// value is still the well-defined wrapped result — callers use the flag to emit `-Woverflow`.
+/// On success returns `(value, overflowed)`, where `overflowed` is true if any evaluated
+/// sub-operation wrapped the result type during the fold (`INT_MAX + 1`, `-INT_MIN`,
+/// `INT_MIN / -1`, …). The value is still the well-defined wrapped result — callers use the
+/// flag to emit `-Woverflow`.
 ///
 /// Returns `Err(ConstEvalError::NotConstant)` if the expression contains non-constant
 /// elements (variables, function calls, assignments, etc.), or
-/// `Err(ConstEvalError::DivByZero)` if a `/` or `%` has a zero divisor.
+/// `Err(ConstEvalError::DivByZero)` if an evaluated `/` or `%` has a zero divisor.
 fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEvalError> {
-    match expr {
-        ParserExpr::Constant(Const::ConstInt(val)) => Ok((StaticInit::IntInit(*val), false)),
-        ParserExpr::Constant(Const::ConstLong(val)) => Ok((StaticInit::LongInit(*val), false)),
-        ParserExpr::Constant(Const::ConstUInt(val)) => Ok((StaticInit::UIntInit(*val), false)),
-        ParserExpr::Constant(Const::ConstULong(val)) => Ok((StaticInit::ULongInit(*val), false)),
-        ParserExpr::Constant(Const::ConstDouble(val)) => Ok((StaticInit::DoubleInit(*val), false)),
+    fold_constant(expr, true)
+}
+
+/// The worker for [`eval_constant_expr`]. `live` is false inside an operand C doesn't evaluate:
+/// the right side of a short-circuited `&&`/`||`, or the untaken branch of `?:`. That operand
+/// must still be a constant expression, and its type still matters (the untaken branch decides
+/// the `?:` result type), so it is folded anyway, but a zero divisor there isn't an error and
+/// overflow there doesn't warn.
+fn fold_constant(expr: &ParserExpr, live: bool) -> Result<(StaticInit, bool), ConstEvalError> {
+    let (value, overflowed) = match expr {
+        ParserExpr::Constant(Const::ConstInt(val)) => (StaticInit::IntInit(*val), false),
+        ParserExpr::Constant(Const::ConstLong(val)) => (StaticInit::LongInit(*val), false),
+        ParserExpr::Constant(Const::ConstUInt(val)) => (StaticInit::UIntInit(*val), false),
+        ParserExpr::Constant(Const::ConstULong(val)) => (StaticInit::ULongInit(*val), false),
+        ParserExpr::Constant(Const::ConstDouble(val)) => (StaticInit::DoubleInit(*val), false),
         ParserExpr::Cast(target, val) => {
-            let (v, o) = eval_constant_expr(val)?;
+            let (v, o) = fold_constant(val, live)?;
             // Explicit cast: suppress the conversion-truncation warning (programmer intent), but
             // keep `o` so arithmetic overflow inside the cast operand still surfaces.
             let (cv, _truncated) = convert_to_type(v, target);
-            Ok((cv, o))
+            (cv, o)
         }
         ParserExpr::Unary(op, inner, _) => {
-            let (v, o) = eval_constant_expr(inner)?;
+            let (v, o) = fold_constant(inner, live)?;
             let (r, o2) = match op {
                 UnaryOp::Negate => v.neg(),
                 UnaryOp::BitwiseComplement => (
@@ -1998,7 +2130,7 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
                         StaticInit::LongInit(n) => StaticInit::LongInit(!n),
                         StaticInit::ULongInit(n) => StaticInit::ULongInit(!n),
                         StaticInit::UIntInit(n) => StaticInit::UIntInit(!n),
-                        StaticInit::DoubleInit(_) => return Err(ConstEvalError::InvalidType),
+                        StaticInit::DoubleInit(_) => return Err(ConstEvalError::InvalidType(COMPLEMENT_DOUBLE_MSG)),
                     },
                     false,
                 ),
@@ -2006,11 +2138,17 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
             };
             // Unsigned wraparound is well-defined, not overflow — only signed ops warn (-Woverflow).
             let o2 = o2 && r.get_type().is_signed();
-            Ok((r, o | o2))
+            (r, o | o2)
         }
         ParserExpr::Binary(op, left, right, _) => {
-            let (l, lo) = eval_constant_expr(left)?;
-            let (r, ro) = eval_constant_expr(right)?;
+            let (l, lo) = fold_constant(left, live)?;
+            // `&&`/`||` don't evaluate the right side once the left side decides the result.
+            let short_circuits = match op {
+                BinOp::And => l.is_zero(),
+                BinOp::Or => !l.is_zero(),
+                _ => false,
+            };
+            let (r, ro) = fold_constant(right, live && !short_circuits)?;
             if (matches!(l, StaticInit::DoubleInit(_)) || matches!(r, StaticInit::DoubleInit(_)))
                 && matches!(
                     op,
@@ -2022,15 +2160,25 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
                         | BinOp::BitwiseRightShift
                 )
             {
-                return Err(ConstEvalError::InvalidType);
+                return Err(ConstEvalError::InvalidType(INTEGER_OPERANDS_MSG));
             }
-            let base = lo | ro;
+            // Usual arithmetic conversions, before the operation: `1.0 / 0` divides by `0.0`.
+            let (l, r) = match binary_types(*op, &l.get_type(), &r.get_type()).0 {
+                // Converting to the common type only widens or reinterprets, so it never truncates.
+                Some(t) => (convert_to_type(l, &t).0, convert_to_type(r, &t).0),
+                None => (l, r),
+            };
+            // A zero divisor in an unevaluated operand is fine; any value of the right type will do.
+            let div = |result: Result<(StaticInit, bool), ConstEvalError>| match result {
+                Err(ConstEvalError::DivByZero) if !live => Ok((l, false)),
+                other => other,
+            };
             let (v, op_ovf) = match op {
                 BinOp::Add => l.add(r),
                 BinOp::Subtract => l.sub(r),
                 BinOp::Multiply => l.mul(r),
-                BinOp::Divide => l.div(r)?,
-                BinOp::Remainder => l.rem(r)?,
+                BinOp::Divide => div(l.div(r))?,
+                BinOp::Remainder => div(l.rem(r))?,
                 BinOp::BitwiseAnd => (l.bitwise_and(r), false),
                 BinOp::BitwiseOr => (l.bitwise_or(r), false),
                 BinOp::BitwiseXOr => (l.bitwise_xor(r), false),
@@ -2050,20 +2198,24 @@ fn eval_constant_expr(expr: &ParserExpr) -> Result<(StaticInit, bool), ConstEval
             };
             // Unsigned wraparound is well-defined, not overflow — only signed ops warn (-Woverflow).
             let op_ovf = op_ovf && v.get_type().is_signed();
-            Ok((v, base | op_ovf))
+            (v, lo | ro | op_ovf)
         }
         ParserExpr::Conditional(cond, true_expr, false_expr) => {
-            let (cond_val, co) = eval_constant_expr(cond)?;
-            let (v, o) = if cond_val.is_zero() {
-                eval_constant_expr(false_expr)?
-            } else {
-                eval_constant_expr(true_expr)?
-            };
-            Ok((v, co | o))
+            let (cond_val, co) = fold_constant(cond, live)?;
+            let take_true = !cond_val.is_zero();
+            // Both branches are folded: the untaken one still sets the result type.
+            let (t, to) = fold_constant(true_expr, live && take_true)?;
+            let (f, fo) = fold_constant(false_expr, live && !take_true)?;
+            let common_type = t.get_type().common_with(&f.get_type());
+            let (v, o) = if take_true { (t, to) } else { (f, fo) };
+            // Converting to the common type only widens or reinterprets, so it never truncates.
+            (convert_to_type(v, &common_type).0, co | o)
         }
         // Variables, assignments, function calls etc. are not constant
-        _ => Err(ConstEvalError::NotConstant),
-    }
+        _ => return Err(ConstEvalError::NotConstant),
+    };
+    // Overflow in an unevaluated operand never happens at runtime, so it doesn't warn.
+    Ok((value, overflowed && live))
 }
 
 enum LabelTag {
@@ -2256,11 +2408,8 @@ fn label_statement(stmt: &mut SpannedStmt, label_tracker: &mut LabelTracker) -> 
                         stmt.span,
                     ));
                 }
-                Err(ConstEvalError::InvalidType) => {
-                    return Err(SemanticError::with_span(
-                        format!("cannot take bitwise complement of a {} value", "'double'".bold()),
-                        stmt.span,
-                    ));
+                Err(ConstEvalError::InvalidType(msg)) => {
+                    return Err(SemanticError::with_span(msg.to_string(), stmt.span));
                 }
             };
             *label = label_tracker.get_switch_case(value, &stmt.span)?;
