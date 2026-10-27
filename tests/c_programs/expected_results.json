@@ -65,6 +65,9 @@
   "switch/complex_const_int.c": {
     "return_code": 16
   },
+  "int_wrapping/div_overflow_wrap.c": {
+    "return_code": 13
+  },
   "int_wrapping/int_wrapping.c": {
     "return_code": 0
   },
@@ -111,10 +114,49 @@
   "large_shift_immediate.c": {
     "return_code": 0
   },
+  "shift_count_static_int.c": {
+    "return_code": 16
+  },
   "types/compound_assign_mixed_types.c": {
     "return_code": 30
   },
   "conversions/double_to_int_edges.c": {
     "return_code": 7
+  },
+  "conversions/double_to_uint_edges.c": {
+    "return_code": 11
+  },
+  "compare_result_width.c": {
+    "return_code": 93
+  },
+  "stack_slot_width.c": {
+    "return_code": 2
+  },
+  "types/int_min_literal_is_long.c": {
+    "return_code": 3
+  },
+  "lexer/comment_slash_star_slash.c": {
+    "return_code": 1
+  },
+  "lexer/formfeed_vtab_whitespace.c": {
+    "return_code": 7
+  },
+  "double_negation_mask.c": {
+    "return_code": 5
+  },
+  "lexer/octal_literals.c": {
+    "return_code": 10
+  },
+  "lexer/line_splice.c": {
+    "return_code": 21
+  },
+  "static_vars/const_eval_conversions.c": {
+    "return_code": 8
+  },
+  "conversions/double_to_ulong_nan.c": {
+    "return_code": 3
+  },
+  "lexer/hex_literals.c": {
+    "return_code": 10
   }
 }

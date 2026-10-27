@@ -556,10 +556,12 @@ fn convert_instruction(
                     v2: val_operand(src, constants, 8),
                     size,
                 },
+                // Zero dst at its own width (always int), not the operand's: the first
+                // instruction to touch a pseudo sets its stack-slot size.
                 Instruction::Mov {
                     src: Operand::Imm(0),
                     dst: val_operand(dst, constants, 8),
-                    size,
+                    size: symbols.get_assembly_type(dst),
                 },
                 Instruction::SetCC {
                     code: CondCode::E,
@@ -662,8 +664,53 @@ fn convert_instruction(
                         size,
                     }];
                     if signed {
-                        ins.push(Instruction::Cdq(size));
-                        ins.push(Instruction::Idiv(val_operand(src2, constants, 8), size));
+                        // `idiv` is the one integer instruction that refuses to wrap: MIN / -1
+                        // overflows the quotient and raises #DE (SIGFPE) instead. The README
+                        // guarantees signed overflow wraps, so divisor -1 is special-cased:
+                        // quotient = neg(dividend) (neg wraps MIN -> MIN natively), remainder = 0.
+                        // A constant divisor is decided here; a runtime divisor gets a cmp/branch.
+                        let wrap_ins = |ins: &mut Vec<Instruction>| {
+                            if *op == BinOp::Divide {
+                                ins.push(Instruction::Unary {
+                                    op: UnaryOp::Neg,
+                                    dst: Operand::Reg(Reg::AX),
+                                    size,
+                                });
+                            } else {
+                                ins.push(Instruction::Mov {
+                                    src: Operand::Imm(0),
+                                    dst: Operand::Reg(Reg::DX),
+                                    size,
+                                });
+                            }
+                        };
+                        let divisor = val_operand(src2, constants, 8);
+                        match divisor {
+                            Operand::Imm(-1) => wrap_ins(&mut ins),
+                            Operand::Imm(_) => {
+                                ins.push(Instruction::Cdq(size));
+                                ins.push(Instruction::Idiv(divisor, size));
+                            }
+                            _ => {
+                                let do_div = Identifier(name_gen.next("sdiv"));
+                                let end = Identifier(name_gen.next("sdiv_end"));
+                                ins.push(Instruction::Cmp {
+                                    v1: Operand::Imm(-1),
+                                    v2: divisor.clone(),
+                                    size,
+                                });
+                                ins.push(Instruction::JmpCC {
+                                    code: CondCode::NE,
+                                    label: do_div.clone(),
+                                });
+                                wrap_ins(&mut ins);
+                                ins.push(Instruction::Jmp(end.clone()));
+                                ins.push(Instruction::Label(do_div));
+                                ins.push(Instruction::Cdq(size));
+                                ins.push(Instruction::Idiv(divisor, size));
+                                ins.push(Instruction::Label(end));
+                            }
+                        }
                     } else {
                         ins.push(Instruction::Mov {
                             src: Operand::Imm(0),
@@ -715,10 +762,11 @@ fn convert_instruction(
                     };
                     let mut ins = vec![
                         Instruction::Cmp { v1, v2, size },
+                        // dst is int regardless of operand width; see the `Not` arm above
                         Instruction::Mov {
                             src: Operand::Imm(0),
                             dst: val_operand(dst, constants, 8),
-                            size,
+                            size: symbols.get_assembly_type(dst),
                         },
                         Instruction::SetCC {
                             code,
@@ -868,11 +916,22 @@ fn convert_instruction(
         tacky::Instruction::DoubleToUInt { src: src_raw, dst: dst_raw } => {
             let src = val_operand(src_raw, constants, 8);
             let dst = val_operand(dst_raw, constants, 8);
-            if matches!(symbols.get_assembly_type(src_raw), AssemblyType::Longword) {
-                // u32: every value in range fits the positive i64 range, so convert to a full
-                // 64-bit signed int and keep the low 32 bits.
+            // Dispatch on the *destination* width — the source is always a double.
+            if matches!(symbols.get_assembly_type(dst_raw), AssemblyType::Longword) {
+                // u32: every in-range value fits the positive i64 range, so convert with the
+                // 64-bit signed `cvttsd2si`, then range-check the result. Every invalid source
+                // (NaN, >= 2^32, <= -1, +/-inf) lands outside [0, 2^32) as an unsigned 64-bit
+                // value — including the i64::MIN indefinite — so one unsigned compare catches
+                // them all and yields the documented result for unsigned targets: the type
+                // minimum, 0.
+                let in_range = Identifier(name_gen.next("d2u_ok"));
                 vec![
                     Instruction::Cvttsd2si { src, dst: Operand::Reg(Reg::AX), size: AssemblyType::Quadword },
+                    Instruction::Mov { src: Operand::Imm(4294967296), dst: Operand::Reg(Reg::R10), size: AssemblyType::Quadword }, // 2^32
+                    Instruction::Cmp { v1: Operand::Reg(Reg::R10), v2: Operand::Reg(Reg::AX), size: AssemblyType::Quadword },      // rax vs 2^32
+                    Instruction::JmpCC { code: CondCode::B, label: in_range.clone() },                                             // rax < 2^32 unsigned -> valid
+                    Instruction::Mov { src: Operand::Imm(0), dst: Operand::Reg(Reg::AX), size: AssemblyType::Quadword },           // invalid -> 0
+                    Instruction::Label(in_range),
                     Instruction::Mov { src: Operand::Reg(Reg::AX), dst, size: AssemblyType::Longword }
                 ]
             } else {
@@ -1249,47 +1308,50 @@ struct StackMapping<'a> {
     /// Names of variables that should use Data operands (RIP-relative addressing).
     /// Includes both static variables defined in this file and extern variables.
     data_vars: &'a HashSet<Rc<str>>,
+    /// Source of each pseudo's type, which decides its slot size.
+    symbols: &'a BackendSymbolTable,
 }
 
 impl<'a> StackMapping<'a> {
-    fn from_data_vars(data_vars: &'a HashSet<Rc<str>>) -> Self {
+    fn new(data_vars: &'a HashSet<Rc<str>>, symbols: &'a BackendSymbolTable) -> Self {
         StackMapping {
             stack_mapping: HashMap::new(),
             offset: 0,
             data_vars,
+            symbols,
         }
     }
 
     /// Returns the stack operand for a pseudo-register, allocating a new slot if needed.
     ///
-    /// Stack grows downward: each new allocation decrements the offset by the type's size.
-    fn get_stack_location(&mut self, pseudo: &str, asm_type: AssemblyType) -> Operand {
-        let offset_option = self.stack_mapping.get(pseudo);
-        let offset = match offset_option {
-            Some(offset) => offset,
+    /// Stack grows downward: each new allocation decrements the offset by the size of the
+    /// pseudo's *declared type*. Sizing from the type (not from the width of whichever
+    /// instruction touches the pseudo first) matters: narrowing reads (`Truncate`) and shift
+    /// counts touch an operand at a different width than its type, and a slot sized from
+    /// them would be too small, so later full-width writes would clobber the neighbouring slot.
+    fn get_stack_location(&mut self, pseudo: &str) -> Operand {
+        let offset = match self.stack_mapping.get(pseudo) {
+            Some(offset) => *offset,
             None => {
-                self.offset -= asm_type.size() as i32;
+                self.offset -= self.symbols.get_obj_type(pseudo).size() as i32;
                 self.stack_mapping.insert(Rc::from(pseudo), self.offset);
-                &self.offset
+                self.offset
             }
         };
-        Operand::Stack(*offset)
+        Operand::Stack(offset)
     }
 
     /// Replaces pseudo-register operands with their actual locations.
     ///
     /// Static/extern variables become `Data` operands (RIP-relative addressing).
     /// Local variables become `Stack` operands (RBP-relative addressing).
-    fn replace_pseudo(&mut self, operand: &Operand, asm_type: AssemblyType) -> Operand {
-        match operand {
-            Operand::Pseudo(pseudo) => {
-                if self.data_vars.contains(pseudo) {
-                    Operand::Data(pseudo.clone())
-                } else {
-                    self.get_stack_location(pseudo, asm_type)
-                }
-            }
-            _ => operand.clone(),
+    fn replace_pseudo(&mut self, operand: &mut Operand) {
+        if let Operand::Pseudo(pseudo) = operand {
+            *operand = if self.data_vars.contains(pseudo) {
+                Operand::Data(pseudo.clone())
+            } else {
+                self.get_stack_location(pseudo)
+            };
         }
     }
 }
@@ -1305,41 +1367,25 @@ fn replace_pseudo_registers(program: &mut Program, symbols: &BackendSymbolTable)
 
     let mut offsets = HashMap::new();
     for FunctionDefinition { name, body, global: _ } in program.functions.iter_mut() {
-        let mut stack_mapping = StackMapping::from_data_vars(&data_vars);
+        let mut stack_mapping = StackMapping::new(&data_vars, symbols);
 
         for ins in body.iter_mut() {
             match ins {
-                Instruction::Mov { src, dst, size } | Instruction::Binary { op: _, src, dst, size } => {
-                    *src = stack_mapping.replace_pseudo(src, *size);
-                    *dst = stack_mapping.replace_pseudo(dst, *size);
+                Instruction::Mov { src, dst, .. }
+                | Instruction::Binary { src, dst, .. }
+                | Instruction::Cvttsd2si { src, dst, .. }
+                | Instruction::Cvtsi2sd { src, dst, .. }
+                | Instruction::Movsx { src, dst }
+                | Instruction::MovZeroExtend { src, dst }
+                | Instruction::Cmp { v1: src, v2: dst, .. } => {
+                    stack_mapping.replace_pseudo(src);
+                    stack_mapping.replace_pseudo(dst);
                 }
-                Instruction::Cvttsd2si { src, dst, size } => {
-                    *src = stack_mapping.replace_pseudo(src, AssemblyType::Double); // src is double
-                    *dst = stack_mapping.replace_pseudo(dst, *size); // dst is integer
-                }
-                Instruction::Cvtsi2sd { src, dst, size } => {
-                    *src = stack_mapping.replace_pseudo(src, *size); // src is integer
-                    *dst = stack_mapping.replace_pseudo(dst, AssemblyType::Double); // dst is double
-                }
-                Instruction::Unary { op: _, dst, size } => *dst = stack_mapping.replace_pseudo(dst, *size),
-                Instruction::Movsx { src, dst } | Instruction::MovZeroExtend { src, dst } => {
-                    *src = stack_mapping.replace_pseudo(src, AssemblyType::Longword);
-                    *dst = stack_mapping.replace_pseudo(dst, AssemblyType::Quadword);
-                }
-                Instruction::Idiv(src, size) | Instruction::Div(src, size) => {
-                    *src = stack_mapping.replace_pseudo(src, *size);
-                }
-                Instruction::Cmp { v1, v2, size } => {
-                    *v1 = stack_mapping.replace_pseudo(v1, *size);
-                    *v2 = stack_mapping.replace_pseudo(v2, *size);
-                }
-                Instruction::SetCC { op, .. } => {
-                    if let Operand::Pseudo(name) = op {
-                        let size = symbols.get_obj_type(name);
-                        *op = stack_mapping.replace_pseudo(op, size);
-                    }
-                }
-                Instruction::Push(op) => *op = stack_mapping.replace_pseudo(op, AssemblyType::Quadword),
+                Instruction::Unary { dst: op, .. }
+                | Instruction::Idiv(op, _)
+                | Instruction::Div(op, _)
+                | Instruction::SetCC { op, .. }
+                | Instruction::Push(op) => stack_mapping.replace_pseudo(op),
                 Instruction::Ret
                 | Instruction::Call(_)
                 | Instruction::Label(_)
@@ -1559,10 +1605,16 @@ fn fix_invalid(program: &mut Program, stack_offsets: &HashMap<Rc<str>, i32>) {
                     dst,
                     size,
                 } if src.is_memory() || matches!(src, Operand::Imm(val) if !(0..=255).contains(&val)) => {
+                    // Shift operands are not converted to a common type, so a memory-resident
+                    // count may be a 4-byte object while `size` (the shifted value's width) is
+                    // Quadword — loading at `size` would read past the count. Only CL is
+                    // consumed, so a Longword load is always sufficient and stays in bounds.
+                    // Immediates keep `size` so 64-bit counts still encode.
+                    let count_size = if src.is_memory() { AssemblyType::Longword } else { size };
                     new_ins.push(Instruction::Mov {
                         src,
                         dst: Operand::Reg(Reg::CX),
-                        size,
+                        size: count_size,
                     });
                     new_ins.push(Instruction::Binary {
                         op,

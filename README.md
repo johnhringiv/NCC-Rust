@@ -245,7 +245,7 @@ The compiler currently implements a subset of C with the following grammar:
          | "==" | "!=" | "<" | "<=" | ">" | ">="
 <assign-op> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
 <identifier> ::= ? An identifier token ?
-<int> ::= ? An integer constant token ?
+<int> ::= ? An integer constant token: decimal, octal with a leading 0 (e.g. 017), or hex with 0x (e.g. 0x1F) ?
 <long> ::= ? A long integer constant token (suffix 'l' or 'L') ?
 <uint> ::= ? An unsigned int constant token (suffix 'u' or 'U') ?
 <ulong> ::= ? An unsigned long constant token (suffix combining 'u'/'U' and 'l'/'L') ?
@@ -298,6 +298,13 @@ The compiler supports:
     - `goto` and labeled statements
     - `return` statements
 - **Expression statements** and **null statements**
+- **Integer literals**: decimal, octal (a leading `0`, e.g. `0755`), and hexadecimal (`0x`/`0X`, e.g. `0xFF`), with
+  `u`/`l` suffixes. Each literal takes the first type that holds its value, per C11 6.4.4.1: decimal goes `int` →
+  `long`, while octal and hex can also become unsigned (`int` → `unsigned int` → `long` → `unsigned long`), so
+  `0xFFFFFFFF` is an `unsigned int`. Hexadecimal floating literals (`0x1p3`) are not supported
+- **Line splicing**: a backslash at the end of a line joins it with the next before tokenizing, anywhere in the source
+  (inside tokens and `//` comments too). There is no preprocessor: a line whose first non-blank character is `#` is
+  skipped, along with any lines spliced onto it
 
 ### Safer C
 
@@ -306,8 +313,10 @@ NCC provides several safety features and guarantees to help developers write mor
 #### Guaranteed Behaviors
 
 - **Deterministic integer overflow**: Signed integer arithmetic uses two's complement wrapping (`int`: 32-bit,
-  `long`: 64-bit) instead of being undefined — e.g. `INT_MAX + 1` reliably wraps to `INT_MIN`. Unsigned arithmetic
-  (`unsigned int`, `unsigned long`) already wraps modulo 2^N per the C standard.
+  `long`: 64-bit) instead of being undefined — e.g. `INT_MAX + 1` reliably wraps to `INT_MIN`. This includes
+  division overflow: `INT_MIN / -1` wraps to `INT_MIN` (and `INT_MIN % -1` is `0`) rather than trapping with
+  SIGFPE as x86 `idiv` natively would. Unsigned arithmetic (`unsigned int`, `unsigned long`) already wraps
+  modulo 2^N per the C standard.
 - **Left-to-right evaluation**: Binary operations are evaluated left to right, eliminating undefined behavior from
   evaluation order.
 - **Type conversions**: Narrowing (e.g. `long` to `int`) truncates to the lower 32 bits using two's complement
@@ -322,7 +331,9 @@ NCC provides several safety features and guarantees to help developers write mor
   constant too large for `double` rounds to ±infinity and one too small rounds to zero (both flagged by
   `-Woverflow`), where C §6.4.4.2 leaves an out-of-range floating constant undefined. Converting a `double` to an
   integer truncates toward zero; out-of-range or NaN values produce the x86 `cvttsd2si` "integer indefinite" result
-  (the target type's minimum, e.g. `INT_MIN`), where C §6.3.1.4 leaves the conversion undefined.
+  (the target type's minimum, e.g. `INT_MIN`), where C §6.3.1.4 leaves the conversion undefined. `unsigned long`
+  follows its two-step lowering instead: values below 2^63 (including negatives) and NaN convert as `long` and
+  are reinterpreted (`-1.0` → `ULONG_MAX`, NaN → 2^63), and values at or above 2^64 give 0.
 - **Consistent compile-time and runtime behavior**: Constant expressions (static initializers, case labels) are
   folded with the *same* arithmetic and type-conversion rules as runtime expressions — including all of the
   deterministic resolutions above. Where standard C would make an overflowing or out-of-range constant expression a
@@ -332,28 +343,36 @@ NCC provides several safety features and guarantees to help developers write mor
 
 #### Compile-Time Warnings
 
-- **Variable shadowing** (`-Wshadow`): Warns when a variable declaration shadows a previous declaration in an outer
-  scope
-- **Unreachable switch code** (`-Wswitch-unreachable`): Warns about statements before the first `case` label in a
-  switch, which can never be executed
+- **Variable shadowing** (`-Wshadow`): Warns when a variable or parameter declaration shadows a variable in an outer
+  scope, including a block-scope `extern` that hides a local. Like gcc, it stays silent for prototype parameter
+  names and for variables that shadow a function
+- **Unreachable switch code** (`-Wswitch-unreachable`): Warns about code before the first label in a switch body,
+  which can never be executed: a statement, an initialized declaration, or the first part of a construct that runs
+  before any label inside it (an `if` condition, a `for` initializer, a nested switch's controlling expression).
+  Empty statements, uninitialized declarations, labeled statements, and loops entered through a `case` inside them
+  are reachable or harmless, and don't warn (matching gcc)
 - **Unused parameters** (`-Wunused-parameter`): Warns when a function parameter is declared but never used in the
   function body
 - **Division by zero** (`-Wdiv-by-zero`): Warns when `/` or `%`, including the compound forms `/=` and `%=`, has
   a constant zero divisor (e.g. `x / 0`, `x % 0`, `x /= 0`, `x %= 0`). A constant zero divisor in a context that
-  requires a constant expression (such as a static initializer) is a hard error instead
+  requires a constant expression (such as a static initializer) is a hard error instead, unless the division is a
+  `double` one (`1.0 / 0` folds to infinity) or sits in an operand that is never evaluated (`1 || 1 / 0`)
 - **Out-of-range shift count** (`-Wshift-count-overflow`, `-Wshift-count-negative`): Warns when a `<<` or `>>`
   (including `<<=` / `>>=`) has a constant shift count that is negative or `>=` the width of the left operand's type
-  (32 for 32-bit types, 64 for 64-bit types), e.g. `1 << 32` or `1 << -1`
+  (32 for 32-bit types, 64 for 64-bit types), e.g. `1 << 32` or `1 << -1`. An unsigned count is never negative, so
+  `1 << 18446744073709551615ul` is reported as too wide
 - **Integer overflow in a constant expression** (`-Woverflow`): Warns when folding a *signed* constant expression in a
   static initializer or case label overflows the result type (e.g. `int x = 2147483647 + 1;`). NCC wraps
   deterministically (two's complement) rather than treating it as undefined, so this flags non-portable code instead of
   erroring. Unsigned wraparound is well-defined and is *not* warned (matching gcc/clang)
-- **Constant changed by an implicit conversion** (`-Wconstant-conversion`): Warns when a constant initializer is
-  implicitly narrowed to a type that can't hold it (e.g. `int x = 2147483648;`, which truncates to `-2147483648`).
-  An explicit cast (`int x = (int)2147483648;`) silences it
+- **Constant changed by an implicit conversion** (`-Wconstant-conversion`): Warns when a constant initializer (of a
+  static, file-scope, or automatic variable) is implicitly narrowed to a type that can't hold it (e.g.
+  `int x = 2147483648;`, which truncates to `-2147483648`), and when a `case` value is narrowed to the switch's type
+  (`case 4294967296L:` in an `int` switch is `case 0:`). An explicit cast (`int x = (int)2147483648;`) silences it
 - **Unsequenced modification** (`-Wsequence-point`): Warns when the same object is modified more than once between
-  sequence points (e.g. `i = i++`, `i++ + i++`, `f(i++, i++)`) — undefined in standard C. NCC evaluates left-to-right
-  so the result is well-defined, but the code is non-portable
+  sequence points (e.g. `i = i++`, `i++ + i++`, `f(i++, i++)`, `i++ + f(i++)`) — undefined in standard C. `&&`, `||`
+  and `?:` sequence their own operands, but not against the rest of the expression, so `(j && i++) + i++` also warns.
+  NCC evaluates left-to-right so the result is well-defined, but the code is non-portable
 
 #### Developer Experience
 

@@ -5,5 +5,7 @@ int main(void) {
     int a = 1 << 5;     /* in range for int (< 32) */
     int b = 1 << n;     /* non-constant count */
     long c = 1L << 40;  /* in range for long (< 64) — width follows the left operand */
+    unsigned long d = 1ul << 40; /* unsigned long is 64 bits too */
+    d >>= 63;
     return 0;
 }

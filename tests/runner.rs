@@ -872,6 +872,215 @@ fn test_data_symbol_resolution_with_iced() {
 }
 
 #[test]
+fn test_shift_count_load_width() {
+    // Regression test for the shift-count fixup width bug: `long << int_count` with a
+    // memory-resident count must load the count into CX at the count's own width (%ecx),
+    // not the shifted value's (%rcx). An 8-byte load of the 4-byte static reads past the
+    // object, but the computed value is still correct (only CL is consumed) — so the bug
+    // is only observable in the generated assembly, never via exit code.
+    let test_file = "tests/c_programs/shift_count_static_int.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("-S")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    let asm_output = String::from_utf8_lossy(&output.stdout);
+
+    // Sanity: the quadword shift-by-CL this test targets must actually be present,
+    // otherwise codegen changed shape and the assertion below would pass vacuously.
+    assert!(
+        asm_output
+            .lines()
+            .any(|line| line.trim().starts_with("shlq") && line.contains("%cl")),
+        "expected a quadword shift by %cl in assembly output:\n{asm_output}"
+    );
+
+    let count_load = asm_output
+        .lines()
+        .find(|line| line.contains("scount(%rip)") && (line.contains("%rcx") || line.contains("%ecx")))
+        .unwrap_or_else(|| panic!("no load of scount into CX found in assembly output:\n{asm_output}"));
+
+    assert!(
+        count_load.contains("%ecx"),
+        "shift count loaded at the shifted value's width (8-byte read of a 4-byte static): `{}`",
+        count_load.trim()
+    );
+
+    println!("✓ Shift count load width test passed");
+}
+
+#[test]
+fn test_compare_result_width() {
+    // Regression test: a comparison's int result must be zeroed at its own width (movl)
+    // before `setCC`, not at the operands' width (movq). The first instruction touching a
+    // pseudo sets its stack-slot size, so the wide zeroing silently gave every result an
+    // 8-byte slot — self-consistent, so only visible in the generated assembly.
+    let test_file = "tests/c_programs/compare_result_width.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(test_file)
+        .arg("-S")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    let asm_output = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = asm_output.lines().map(str::trim).collect();
+
+    // setCC into memory (not the %al NaN fixup) — the line before it zeroes the result.
+    let mut checked = 0;
+    for pair in lines.windows(2) {
+        let (prev, cur) = (pair[0], pair[1]);
+        if cur.starts_with("set") && cur.contains("(%rbp)") {
+            assert!(
+                prev.starts_with("movl $0,"),
+                "comparison result zeroed at the wrong width: `{prev}` before `{cur}`"
+            );
+            checked += 1;
+        }
+    }
+
+    // 7 comparisons in the test file; guards against the scan passing vacuously.
+    assert_eq!(checked, 7, "expected 7 setCC-to-stack sites:\n{asm_output}");
+
+    println!("✓ Compare result width test passed");
+}
+
+// nm -S on Mach-O doesn't report symbol sizes (they aren't part of the format), so this
+// ELF symbol-size check is Linux-only.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_function_symbol_sizes() {
+    // Regression test for function st_size: every function's size must end where the next
+    // function begins, not extend to end-of-text. Overlapping sizes don't affect execution
+    // but corrupt profilers, debuggers, and size-based tooling.
+    let test_file = "tests/c_programs/conversions/double_to_int_edges.c"; // 3 functions
+
+    let ncc_path = get_ncc_binary_path();
+
+    // `-c` writes `<input>.o` next to the input (ignoring -o), so compile a copy in the
+    // temp dir to keep the repo tree clean.
+    let src_path = std::env::temp_dir().join("ncc_symbol_size_test.c");
+    let obj_path = std::env::temp_dir().join("ncc_symbol_size_test.o");
+    std::fs::copy(test_file, &src_path).expect("failed to copy test source to temp dir");
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(&src_path)
+        .arg("-c")
+        .output()
+        .expect("Failed to execute ncc");
+
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    let nm = std::process::Command::new("nm")
+        .arg("-S")
+        .arg(&obj_path)
+        .output()
+        .expect("Failed to execute nm");
+    assert!(nm.status.success(), "nm failed on {}", obj_path.display());
+
+    // nm -S text symbol lines: "<value> <size> T|t <name>"
+    let nm_output = String::from_utf8_lossy(&nm.stdout);
+    let mut funcs: Vec<(u64, u64, String)> = nm_output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let value = u64::from_str_radix(parts.next()?, 16).ok()?;
+            let size = u64::from_str_radix(parts.next()?, 16).ok()?;
+            let kind = parts.next()?;
+            let name = parts.next()?;
+            (kind == "T" || kind == "t").then(|| (value, size, name.to_string()))
+        })
+        .collect();
+    funcs.sort_unstable();
+
+    assert!(
+        funcs.len() >= 2,
+        "expected multiple function symbols with sizes, got:\n{nm_output}"
+    );
+
+    for pair in funcs.windows(2) {
+        let (off, size, name) = &pair[0];
+        let (next_off, _, next_name) = &pair[1];
+        assert!(size > &0, "function '{name}' has zero size");
+        assert!(
+            off + size <= *next_off,
+            "function '{name}' (offset {off:#x}, size {size:#x}) overlaps '{next_name}' at {next_off:#x}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&obj_path);
+    let _ = std::fs::remove_file(&src_path);
+    println!(
+        "✓ Function symbol size test passed: {} functions, no overlap",
+        funcs.len()
+    );
+}
+
+// Same as above: nm -S needs ELF symbol sizes, so Linux-only.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_double_negation_mask_size() {
+    // Regression test: the `xorps` sign-flip mask must be a 16-byte .rodata entry, because
+    // `xorps m128` reads 16 bytes. An 8-byte entry let the read run past the end of .rodata
+    // (harmless unless the section ends at a page boundary, so only visible in the object).
+    let test_file = "tests/c_programs/double_negation_mask.c";
+
+    let ncc_path = get_ncc_binary_path();
+
+    // `-c` writes `<input>.o` next to the input, so compile a copy in the temp dir.
+    let src_path = std::env::temp_dir().join("ncc_negation_mask_test.c");
+    let obj_path = std::env::temp_dir().join("ncc_negation_mask_test.o");
+    std::fs::copy(test_file, &src_path).expect("failed to copy test source to temp dir");
+
+    let output = std::process::Command::new(&ncc_path)
+        .arg(&src_path)
+        .arg("-c")
+        .output()
+        .expect("Failed to execute ncc");
+    assert!(output.status.success(), "ncc failed to compile {}", test_file);
+
+    let nm = std::process::Command::new("nm")
+        .arg("-S")
+        .arg(&obj_path)
+        .output()
+        .expect("Failed to execute nm");
+    assert!(nm.status.success(), "nm failed on {}", obj_path.display());
+
+    // nm -S read-only data lines: "<value> <size> r <name>"
+    let nm_output = String::from_utf8_lossy(&nm.stdout);
+    let rodata_sizes: Vec<u64> = nm_output
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            match parts.as_slice() {
+                [_, size, "r", _] => u64::from_str_radix(size, 16).ok(),
+                _ => None,
+            }
+        })
+        .collect();
+
+    let _ = std::fs::remove_file(&obj_path);
+    let _ = std::fs::remove_file(&src_path);
+
+    assert!(
+        rodata_sizes.contains(&16),
+        "expected a 16-byte .rodata entry for the negation mask, got sizes {rodata_sizes:?}:\n{nm_output}"
+    );
+
+    println!("✓ Double negation mask size test passed");
+}
+
+#[test]
 fn test_parser_printing() {
     // Test with a file that should generate labels
     let test_file = "writing-a-c-compiler-tests/tests/chapter_6/valid/extra_credit/compound_if_expression.c";
@@ -968,6 +1177,136 @@ fn test_switch_unreachable() {
     for file in files {
         test_warning(file, "-Wswitch-unreachable")
     }
+
+    // One warning per switch with dead code before its first label, none when it's reachable
+    for (file, expected) in [
+        ("tests/c_programs/warnings/switch_unreachable.c", 5),
+        ("tests/c_programs/warnings/no_switch_unreachable.c", 0),
+    ] {
+        let stderr = validate_stderr(file);
+        assert_eq!(
+            stderr.matches("-Wswitch-unreachable").count(),
+            expected,
+            "{file}: expected {expected} -Wswitch-unreachable warnings, stderr was: {stderr}"
+        );
+    }
+}
+
+/// Runs `ncc <file> --validate` and returns stderr with ANSI color codes removed.
+fn validate_stderr(file: &str) -> String {
+    let output = std::process::Command::new(get_ncc_binary_path())
+        .arg(file)
+        .arg("--validate")
+        .output()
+        .expect("Failed to execute ncc");
+    strip_ansi(&String::from_utf8_lossy(&output.stderr))
+}
+
+/// Removes ANSI escape sequences (`ESC [ ... m`) so diagnostics can be matched as plain text.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            chars.by_ref().find(|&c| c == 'm');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn test_wshadow_cases() {
+    // gcc-compatible -Wshadow: silent for prototype parameters and for names shadowing a function
+    let stderr = validate_stderr("tests/c_programs/warnings/no_shadow.c");
+    assert!(
+        !stderr.contains("-Wshadow"),
+        "expected no -Wshadow, stderr was: {stderr}"
+    );
+
+    // a block-scope extern hiding a local is a different object: exactly one warning, at the extern
+    let stderr = validate_stderr("tests/c_programs/warnings/shadow_extern.c");
+    assert_eq!(stderr.matches("-Wshadow").count(), 1, "stderr was: {stderr}");
+    assert!(
+        stderr.contains("shadow_extern.c:6:"),
+        "expected the warning at the extern on line 6, stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn test_warnings_outside_function_bodies() {
+    // -Wshift-count-overflow in a file-scope initializer (only constant-folded, never run)
+    let stderr = validate_stderr("tests/c_programs/warnings/shift_count_file_scope.c");
+    assert!(stderr.contains("-Wshift-count-overflow"), "stderr was: {stderr}");
+
+    // -Wconstant-conversion on an automatic local with a constant initializer
+    let stderr = validate_stderr("tests/c_programs/warnings/constant_conversion_local.c");
+    assert!(stderr.contains("-Wconstant-conversion"), "stderr was: {stderr}");
+}
+
+#[test]
+fn test_case_label_constant_conversion() {
+    // A case value narrowed to the switch type warns; sign-only changes and widenings don't
+    let stderr = validate_stderr("tests/c_programs/warnings/case_conversion.c");
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.contains("-Wconstant-conversion")).collect();
+    assert_eq!(lines.len(), 3, "stderr was: {stderr}");
+    for (line, pos) in lines.iter().zip([":9:5:", ":11:5:", ":17:5:"]) {
+        assert!(line.contains(pos), "expected a warning at {pos}, stderr was: {stderr}");
+    }
+}
+
+#[test]
+fn test_shift_count_huge_unsigned() {
+    // A huge unsigned count is too wide, not negative
+    let stderr = validate_stderr("tests/c_programs/warnings/shift_count_huge_unsigned.c");
+    assert_eq!(
+        stderr.matches("-Wshift-count-overflow").count(),
+        2,
+        "stderr was: {stderr}"
+    );
+    assert!(!stderr.contains("-Wshift-count-negative"), "stderr was: {stderr}");
+}
+
+#[test]
+fn test_semantic_error_messages() {
+    // (file, text the error must contain, text it must not contain)
+    let cases = [
+        (
+            "tests/c_programs/types/invalid_semantics/const_remainder_double.c",
+            "remainder operators require integer operands",
+            "complement",
+        ),
+        (
+            "tests/c_programs/static_vars/invalid_semantics/static_init_not_constant.c",
+            "static variable 'b' is not a constant expression",
+            "b.",
+        ),
+        (
+            "tests/c_programs/declaration/invalid_semantics/extern_conflicting_types.c",
+            "conflicting types",
+            "different kind of symbol",
+        ),
+        (
+            "tests/c_programs/declaration/invalid_semantics/extern_hides_static.c",
+            "both external and internal linkage",
+            "\0",
+        ),
+        (
+            // the error carries a location (it used to have none)
+            "writing-a-c-compiler-tests/tests/chapter_13/invalid_types/extra_credit/switch_on_double.c",
+            "switch_on_double.c:",
+            "\0",
+        ),
+    ];
+    for (file, must, must_not) in cases {
+        let stderr = validate_stderr(file);
+        assert!(stderr.contains(must), "{file}: expected `{must}`, stderr was: {stderr}");
+        assert!(
+            !stderr.contains(must_not),
+            "{file}: unexpected `{must_not}`, stderr was: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -1000,6 +1339,13 @@ fn test_unused_parameter_warning() {
     assert!(
         !stderr_output.contains("unused parameter 'x'"),
         "Should not warn about parameter 'x' which is used, but stderr was: {}",
+        stderr_output
+    );
+
+    // The warning points at the parameter itself (`y` is at 1:20), not at the function
+    assert!(
+        strip_ansi(&stderr_output).contains("unused_parameter.c:1:20: warning: unused parameter 'y'"),
+        "Warning should point at parameter 'y' (1:20), but stderr was: {}",
         stderr_output
     );
 
@@ -1310,9 +1656,12 @@ fn test_sequence_point_warning() {
         .expect("Failed to execute ncc");
 
     let stderr_output = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr_output.contains("-Wsequence-point"),
-        "Expected -Wsequence-point warning, but stderr was: {}",
+    // 3 basic cases plus 4 where a sequenced operator or a call argument conflicts with a
+    // modification elsewhere in the same expression: each must warn exactly once.
+    assert_eq!(
+        stderr_output.matches("-Wsequence-point").count(),
+        7,
+        "Expected 7 -Wsequence-point warnings, but stderr was: {}",
         stderr_output
     );
 
